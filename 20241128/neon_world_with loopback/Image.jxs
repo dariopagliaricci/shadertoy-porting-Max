@@ -1,0 +1,80 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+void main()
+{
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+	vec2 uv = fragCoord.xy/viewPort.xy;
+        
+    float b = step(fract(uv.y * 50.0 + iTime), 0.5);
+	vec4 tex = texture(iChannel0, uv);
+    vec4 tex2 = texture(iChannel0, uv + vec2((b - 0.5)*0.005, 0.0));
+    
+    vec2 vign = smoothstep(vec2(0.5, 1.5), vec2(1.0, 0.98 + b*0.02), vec2(length(uv - 0.5) * 2.0)); 
+       
+    vec4 grain = texture(iChannel1, fragCoord.xy/256.0 + vec2(0.0, iTime*10.0));
+    vec4 res = mix(tex, vec4(tex.x, tex.y, tex2.z, tex.w), vign.x);
+    vec4 col = res * vign.y * (0.85 + grain*0.15);
+	outColor = pow(col*1.75, vec4(1.25));
+}
+]]>
+</program>
+</language>
+</jittershader>

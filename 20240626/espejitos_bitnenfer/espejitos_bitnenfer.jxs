@@ -1,0 +1,369 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0 " />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+uniform sampler2D iChannel1;
+
+#define MAX_DIST 20.0
+#define MIN_DIST 0.001
+#define PI 3.14159265359
+#define TAU (PI * 2.0)
+
+struct Hit
+{
+    float dist;
+    float diffuse;
+    float specular;
+    float isLight;
+    vec3 color;
+};
+
+const Hit kInvHit = Hit(MAX_DIST + 1.0, 0.0, 0.0, 1.0, vec3(1.0, 0.0, 1.0));
+
+float gSeed = 0.0;
+vec2 gUV;
+
+float hash( float n )
+{
+    return fract(sin(n + gSeed)*43758.5453);
+}
+
+float random() {
+
+    return hash(fract(sin(dot(gUV, vec2(12.9898, 78.233)) * (gSeed += 1.0)) * 43758.5453));
+}
+
+vec3 randomHemispherePoint()
+{
+    float theta = random() * (PI*2.0);
+    float z = random() * 2.0 - 1.0;
+    float a = sqrt(1.0 - z * z);
+    vec3 vector = vec3(a * cos(theta), a * sin(theta), z);
+    return vector * sqrt(random());
+}
+
+mat2 rot(float r)
+{
+    float c = cos(r);
+    float s = sin(r);
+    return mat2(c, -s, s, c);
+}
+
+float sdBox(vec3 p, vec3 s)
+{
+    vec3 d = abs(p) - s;
+    return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
+}
+
+float sdPyramid( vec3 p, float h)
+{
+  float m2 = h*h + 0.25;
+    
+  p.xz = abs(p.xz);
+  p.xz = (p.z>p.x) ? p.zx : p.xz;
+  p.xz -= 0.5;
+
+  vec3 q = vec3( p.z, h*p.y - 0.5*p.x, h*p.x + 0.5*p.y);
+   
+  float s = max(-q.x,0.0);
+  float t = clamp( (q.y-0.5*p.z)/(m2+0.25), 0.0, 1.0 );
+    
+  float a = m2*(q.x+s)*(q.x+s) + q.y*q.y;
+  float b = m2*(q.x+0.5*t)*(q.x+0.5*t) + (q.y-m2*t)*(q.y-m2*t);
+    
+  float d2 = min(q.y,-q.x*m2-q.y*0.5) > 0.0 ? 0.0 : min(a,b);
+    
+  return sqrt( (d2+q.z*q.z)/m2 ) * sign(max(q.z,-p.y));
+}
+
+Hit opMin(Hit a, Hit b)
+{
+    if (a.dist < b.dist)
+    {
+        return a;
+    }
+    return b;
+}
+
+vec3 opRep(vec3 p, vec3 r)
+{
+    return mod(p, r) - r * 0.5;
+}
+
+Hit map(vec3 p)
+{
+    Hit scene = kInvHit;
+    vec3 lightP = p;
+    lightP.y -= 0.1;
+    lightP.z += 0.5;
+    lightP.yz *= rot(0.9);
+    float lightBoxSDF = sdBox(lightP, vec3(1.9, 1.5, 0.01));
+    float lightBoxSplit = sdBox(opRep(lightP, vec3(0.7, 0.0, 0.0)), vec3(0.2, 10.0, 1.0));
+    lightBoxSDF = max(lightBoxSDF, -lightBoxSplit);
+    Hit lightBoxHit = Hit(lightBoxSDF, 1.0, 0.0, 1.0, vec3(2.0, 1.5, 2.0));
+    vec4 t = texture(iChannel1, p.xz * 0.1);
+    float floorSDF = (p.y + 1.0 - t.r * 0.05) * 0.7;
+    Hit floorHit = Hit(floorSDF, 1.0, 0.95, 0.0, vec3(0.1, 0.2, 0.4));
+    vec3 offset = vec3(0.0, 0.60, 1.65);
+    
+    Hit boxHit = Hit(sdBox(p + offset, vec3(0.3)), 1.0, 1.0, 0.0, vec3(2.0, 0.0, 0.0));
+    Hit sphereHit = Hit(length(p + offset + vec3(1.0, -0.04, 0.0)) - 0.35, 1.0, 1.0, 0.0, vec3(0.0, 2.0, 0.0));
+    vec3 pp = p + offset + vec3(-0.9, 0.3, 0.0);
+    pp.x *= 1.2;
+    Hit pyrHit = Hit(sdPyramid(pp, 0.6), 1.0, 1.0, 0.0, vec3(0.0, 0.0, 2.0));
+
+    float frameSDF = sdBox(vec3(abs(p.x) - 1.4, p.y, p.z + 1.6), vec3(0.03, 1.00, 0.03)) * 0.5;
+    Hit frameHit = Hit(frameSDF, 1.0, 0.0, 0.0, vec3(0.0));
+    
+    float platformSDF = sdBox(p + vec3(0.0, 1.1, 1.0), vec3(1.5, 0.2, 1.8));
+   	Hit platformHit = Hit(platformSDF, 1.0, 1.0, 0.0, vec3(0.0));
+    
+    scene = opMin(lightBoxHit, floorHit);
+    scene = opMin(scene, boxHit);
+    scene = opMin(scene, sphereHit);
+    scene = opMin(scene, pyrHit);
+    scene = opMin(scene, frameHit);
+    scene = opMin(scene, platformHit);
+    
+    return scene;
+}
+
+vec3 normal(vec3 p)
+{
+    const vec2 e = vec2(0.0, 0.001);
+    return normalize(vec3(
+        map(p + e.yxx).dist - map(p - e.yxx).dist,
+        map(p + e.xyx).dist - map(p - e.xyx).dist,
+        map(p + e.xxy).dist - map(p - e.xxy).dist
+    ));
+}
+
+Hit raymarch(vec3 ro, vec3 rd, out bool hitSurface)
+{
+    float t = 0.0;
+    hitSurface = false;
+    for (int i = 0; i < 400; ++i)
+    {
+        Hit hit = map(ro + rd * t);
+        if (hit.dist < MIN_DIST)
+        {
+            hit.dist = t;
+            hitSurface = true;
+            return hit;
+        }
+        t += hit.dist;
+        if (t > MAX_DIST)
+        {
+            break;
+        }
+    }
+    return kInvHit;
+}
+
+vec3 tpm(sampler2D tex, vec3 p, vec3 n)
+{
+    float sc = 0.5;
+    vec4 colX = texture(tex, p.zy * sc);
+    vec4 colY = texture(tex, p.xz * sc);
+    vec4 colZ = texture(tex, p.xy * sc);
+    vec3 n2 = n;
+    vec3 bw = abs(n2);
+    bw = bw / (bw.x + bw.y + bw.z);
+    vec3 c = colX.rgb * bw.x + colY.rgb * bw.y + colZ.rgb * bw.z;
+    return c * ((colX.a + colY.a + colZ.a) / 3.0);
+}
+
+#define BOUNCE_COUNT 4
+#define SAMPLE_COUNT 1
+#define SPECULAR 1
+#define DIFFUSE 1
+#define ATTEN_FACTOR 0.5
+#define DEBUG 0
+
+vec3 trace(vec2 uv)
+{
+    vec3 finalColor = vec3(0.0);
+    vec2 offsetSize = 4.0 / viewPort.xy;
+    for (int sampleIndex = 0; sampleIndex < SAMPLE_COUNT; sampleIndex++)
+    {
+
+        vec2 jitter = (vec2(random(), random()) * (offsetSize));
+        vec3 ro = vec3(0.5, -0.5, -10.0);
+        vec3 rd = normalize(vec3(uv.xy + jitter, 5.0));
+        vec3 colorAccum = vec3(0.0);
+        float hitLight = 0.0;
+        float mx = -(iMouse.x / viewPort.x * 2.0 - 1.0) * TAU;
+        
+        mx -= 0.8;
+        ro.z -= 0.8;
+        ro.xz *= rot(mx);
+        rd.xz *= rot(mx);
+        
+        #if DEBUG
+        {
+            
+        
+            bool hitSurface = false;
+            Hit debugHit = raymarch(ro, rd, hitSurface);
+            if (hitSurface)
+            {
+                vec3 p = ro + rd * debugHit.dist;
+                vec3 n = normal(p);
+                return n;
+            }
+            return vec3(0.0);
+        }
+        #endif
+        
+        // Diffuse
+        #if DIFFUSE
+        {
+	        float colorAtten = 1.0;
+            vec3 diffRO = ro;
+            vec3 diffRD = rd;
+            for (int bounceIndex = 0; bounceIndex < BOUNCE_COUNT; bounceIndex++)
+            {
+                bool hitSurface = false;
+                vec2 jit = vec2(0.0, 0.0);
+                Hit bounceHit = raymarch(diffRO, diffRD + vec3(jit, 0.0), hitSurface);
+                if (hitSurface)
+                {
+                    vec3 p = diffRO + diffRD * bounceHit.dist;
+                    vec3 n = normal(p);
+                    colorAccum += (bounceHit.color * colorAtten);
+                    hitLight += bounceHit.isLight;
+                    colorAtten *= ATTEN_FACTOR * 2.0;
+                    diffRD = n + randomHemispherePoint() * bounceHit.diffuse;
+                    diffRO = p + diffRD * 0.1;
+                    continue;
+                }
+                break;
+            }
+        }
+        #endif
+        
+        // Specular
+        #if SPECULAR
+        {
+	        float colorAtten = 1.0;
+            vec3 specRO = ro;
+            vec3 specRD = rd;
+            for (int bounceIndex = 0; bounceIndex < BOUNCE_COUNT; bounceIndex++)
+            {
+                bool hitSurface = false;
+                Hit bounceHit = raymarch(specRO, specRD, hitSurface);
+                if (hitSurface)
+                {
+                    vec3 p = specRO + specRD * bounceHit.dist;
+                    vec3 n = normal(p);
+                    colorAccum += (bounceHit.color * colorAtten);
+                    hitLight += bounceHit.isLight;
+                    colorAtten *= ATTEN_FACTOR;
+                    specRD = normalize(reflect(specRD, n)) + randomHemispherePoint() *  clamp(1.0-bounceHit.specular, 0.0, 1.0);
+                    specRO = p + specRD * 0.1;
+                }
+            }
+        }
+        #endif
+        
+        if (hitLight > 0.0)
+        {
+            finalColor += colorAccum;
+        }
+    }
+    
+    return finalColor / float(SAMPLE_COUNT);
+}
+
+vec3 acesFilm(const vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d ) + e), 0.0, 1.0);
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 ar = vec2(viewPort.x / viewPort.y, 1.0);
+    vec2 uv = (fragCoord.xy / viewPort.xy * 2.0 - 1.0) * ar;
+    // vec4 prev = texture(iChannel0, fragCoord.xy / viewPort.xy);
+    vec3 cubeSamp = vec3(uv, 1.0);
+    vec4 prev = texture(iChannel0, cubeSamp);
+	float ss = 0.96;
+    gSeed = iTime;
+    gUV = uv;
+    
+    float iframe = mix(prev.a, 0.0, clamp(iMouse.z, 0.0, 1.0));
+    {
+    	ss += mix(0.00, 0.1, clamp(iframe / 400.0, 0.0, 1.0));
+        ss = clamp(ss, 0.0, 0.999);
+    }
+    
+    vec3 color = trace(uv);
+    outColor = vec4(mix(color, prev.rgb, mix(ss, 0.0, clamp(iMouse.z, 0.0, 1.0))), iframe + 1.0);
+    outColor = vec4(acesFilm(color.rgb),1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

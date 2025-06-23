@@ -1,0 +1,336 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />	
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iFrame" type="int" state="FRAME" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+    <param name="iChannel1" type="int" default="1" />
+    <param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+        <bind param="iChannel1" program="fp" />
+        <bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+uniform samplerCube iChannel1;
+uniform sampler2D iChannel2;
+
+
+#define Pi 3.14159265359
+
+// radius of the scene
+#define SceneRadius 100.
+// minimum distance before considering a hit
+#define MinDist .01
+// maximum number of steps when tracing a ray
+#define MaxSteps 512
+// number of light bounces
+#define RayDepth 3
+// Ior of the fresnel effect on the reflections
+#define Ior 1.45
+// enable reflexion caustics for more realism
+#define Caustics false
+
+#define HASH( seed ) fract(cos(seed)*43758.5453)
+#define RANDOM HASH(seed++)
+#define RANDOM2D vec2(RANDOM, RANDOM)
+
+float seed;
+
+vec3 CamPos = vec3(0, 0, -4.);
+vec3 CamRot = vec3(0., -1.5, 0.);
+float CamFocalLength = 1.5;
+float CamFocalDistance = 3.25;
+float CamAperture = .05;
+
+vec3 LightDir = normalize(vec3(-.0, -.1, .1));
+vec3 LightColor = vec3(4.);
+float LightRadius = .3;
+
+// self explanatory ...
+mat3 rotationMatrix(vec3 rotEuler){
+    float c = cos(rotEuler.x), s = sin(rotEuler.x);
+    mat3 rx = mat3(1, 0, 0, 0, c, -s, 0, s, c);
+    c = cos(rotEuler.y), s = sin(rotEuler.y);
+    mat3 ry = mat3(c, 0, -s, 0, 1, 0, s, 0, c);
+    c = cos(rotEuler.z), s = sin(rotEuler.z);
+    mat3 rz = mat3(c, -s, 0, s, c, 0, 0, 0, 1);
+    
+    return rz * rx * ry;
+}
+
+vec3 ortho(vec3 v) {
+  return abs(v.x) > abs(v.z) ? vec3(-v.y, v.x, 0.0)  : vec3(0.0, -v.z, v.y);
+}
+
+// cosine weighted sample for diffuse samples
+vec3 getCosineWeightedSample(vec3 dir) {
+    vec3 o1 = normalize(ortho(dir));
+    vec3 o2 = normalize(cross(dir, o1));
+    vec2 r = RANDOM2D;
+    r.x = r.x * 2.0 * Pi;
+    r.y = pow(r.y, .5);
+    float oneminus = sqrt(1.0-r.y*r.y);
+    return cos(r.x) * oneminus * o1 + sin(r.x) * oneminus * o2 + r.y * dir;
+}
+
+
+// cone sample for NEE on a spherical cap
+vec3 getConeSample(vec3 dir, float theta) {
+    vec3 o1 = normalize(ortho(dir));
+    vec3 o2 = normalize(cross(dir, o1));
+    vec2 r = RANDOM2D;
+    r.x = r.x * 2.0 * Pi;
+    r.y = 1. - r.y*(1.-cos(min(theta, Pi*.5)));
+    float oneminus = sqrt(1.0 - r.y*r.y);
+    return cos(r.x) * oneminus * o1 + sin(r.x) * oneminus * o2 + r.y * dir;
+}
+
+// fresnel
+float fresnel(vec3 dir, vec3 n, float ior) {
+    float cosi = dot(dir, n);
+    float etai = 1.0;
+    float etat = ior;
+    if (cosi > 0.0) {
+         float tmp = etai;
+         etai = etat;
+         etat = tmp;
+     }
+    float sint = etai / etat * sqrt(max(0.0, 1.0 - cosi * cosi));
+    if (sint >= 1.0) return 1.0;
+    float cost = sqrt(max(0.0, 1.0 - sint * sint));
+    cosi = abs(cosi);
+    float sqrtRs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
+    float sqrtRp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
+    return (sqrtRs * sqrtRs + sqrtRp * sqrtRp) / 2.0;
+}
+
+// julia variant of the quadratic mandelbulb
+// http://www.bugman123.com/Hypercomplex/index.html
+float sdfMandelbulb(vec3 z, vec3 c, out vec3 diffuseColor){
+    z *= rotationMatrix(vec2(.0, .08).xxy);
+    vec3 orbitTrap = vec3(1);
+    float r = length(z);
+    float dr = 1., xxyy;
+    for (int i = 0; i < 100; i++) {
+        xxyy = z.x*z.x+z.y*z.y;
+        r = sqrt(xxyy+z.z*z.z);
+        orbitTrap = min(orbitTrap, abs(z*3.));
+        if (r>10.) break;
+        dr = r*2.*dr + 1.;
+        z = vec3(vec2(z.x*z.x-z.y*z.y, 2.*z.x*z.y)*(1.-z.z*z.z/xxyy), -2.*z.z*sqrt(xxyy)) + c;
+    }
+    diffuseColor = 1.-orbitTrap;
+    return 0.5*log(r)*r/dr;
+    
+}
+
+// plane with a texture and POM
+float sdfPlane(vec3 pos, out vec3 diffuseColor){
+    diffuseColor = texture(iChannel2, pos.xz*.5).rgb;
+    // uncomment for a checkerboard pattern
+    //diffuseColor = fract(pos.x)<.5 ^^ fract(pos.z)<.5 ? vec3(0) : vec3(1);
+    return pos.y + .51 + length(diffuseColor)*.001;
+}
+
+float sdf(vec3 pos, out vec3 diffuseColor){
+    
+    vec3 c = vec3(-1.26, .37, .0);
+    
+    vec3 dcM, dcS;
+    float s = sdfPlane(pos, diffuseColor);
+    float sM = sdfMandelbulb(pos, c, dcM);
+    if(sM < s){
+        diffuseColor = dcM;
+        s = sM;
+    }
+    return s;   
+}
+
+float sdf(vec3 pos){
+    vec3 ph; // placeholder
+    return sdf(pos, ph);
+}
+
+// UPDATE (29/12/2021) : fixed the NaN issue causing a black screen
+vec3 normal(vec3 pos, float dist){
+    vec2 k = vec2(abs(dist) + 0.0000001, 0.);
+    return normalize(vec3(sdf(pos + k.xyy),
+                          sdf(pos + k.yxy),
+                          sdf(pos + k.yyx)) - vec3(dist));
+}
+
+// traces a ray
+bool rayHit(inout vec3 pos, vec3 dir){
+    pos += RANDOM * sdf(pos) * dir;
+    float dist;
+    for(int i = 0; i < MaxSteps; i++){
+        dist = sdf(pos);
+        if(length(pos) > SceneRadius) break;
+        if(dist < MinDist) return true;
+        pos += dir * dist * .99;
+    }
+    return false;
+}
+
+// traces a shadow ray and computes direct light on the surface
+vec3 directLight(vec3 pos, vec3 n){
+    vec3 dir = getConeSample(-LightDir, LightRadius);
+    float dnrd = dot(n, dir);
+    if(dnrd < 0.0) return vec3(0);
+    return rayHit(pos, dir) ? vec3(0.) : LightColor * dnrd * (1.-fresnel(-dir, n, Ior));
+}
+
+
+vec3 background(vec3 dir) {
+    vec3 col = texture(iChannel1, dir).rgb;
+    return col*col+col;
+}
+
+// path tracing algorithm
+vec3 pathTrace(vec3 pos, vec3 dir){
+    
+    vec3 light = vec3(0.), attenuation = vec3(1.);
+    
+    // set this to zero for no reflected light at all (when fireflies are too annoying)
+    vec3 LCsLR2 = LightColor/(sin(LightRadius)*sin(LightRadius)); 
+    
+    bool diffuse = false;
+    for(int i = 0; i <= RayDepth; i++){
+        
+        if(sdf(pos) < 0.) return light;
+        
+        // if the ray doesn't hit anything, the background gets rendered
+        if(!rayHit(pos, dir))
+            return light + attenuation *
+                (dot(dir, -LightDir) > cos(LightRadius)     // if the ray end up in the light
+                    ? diffuse                               // if the ray if a diffuse ray
+                        ? vec3(0.)                          // then don't add any background (direct light already in nee)
+                        : LCsLR2                            // else add the light color
+                    : background(dir)                       // else sample the cubemap
+                );
+        
+        vec3 diffuseColor;
+        float dist = sdf(pos, diffuseColor);
+        vec3 n = normal(pos, dist);
+        pos += n*(1.5*MinDist-dist);
+        
+        // nee
+        light += attenuation * diffuseColor * directLight(pos, n);
+        
+        if(fresnel(dir, n, Ior) > RANDOM) {
+            // reflection
+            dir = reflect(dir, n);
+            if(Caustics) diffuse = false;
+        } else {
+            // diffuse
+            dir = getCosineWeightedSample(n);
+            attenuation *= diffuseColor;
+            diffuse = true;
+        }
+    }
+    return light;
+}
+
+// n-blade aperture
+vec2 sampleAperture(int nbBlades, float rotation){
+    
+    // create a point on the first "blade"
+    float side = sin(Pi / float(nbBlades));
+    vec2 tri = RANDOM2D;
+    if(tri.x-tri.y > 0.) tri = vec2(1.-tri.x, -1.+tri.y);
+    tri *= vec2(side, sqrt(1.-side*side));
+    
+    // rotate it to create the other blades
+    float angle = rotation + 2.*Pi*floor(RANDOM * float(nbBlades))/float(nbBlades);
+    return vec2(tri.x * cos(angle) + tri.y * sin(angle),
+                tri.y * cos(angle) - tri.x * sin(angle));
+}
+
+void main(){
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    //mouse mouvement
+    CamRot.yx -= Pi*(iMouse.xy-viewPort.xy*.5)/viewPort.y;
+    CamPos *= rotationMatrix(CamRot);
+    
+    // random numbers seed
+    seed = cos(iTime)+cos(fragCoord.x)+sin(fragCoord.y);
+    
+    // uv on the camera sensor (from -1 to 1 vertically)
+    vec2 uv = (fragCoord+RANDOM2D-viewPort.xy*.5) / viewPort.y;
+    
+    // gerenate ray direction & position in camera space
+    vec3 focalPoint = vec3(uv * CamFocalDistance / CamFocalLength, CamFocalDistance);
+    vec3 aperture = CamAperture * vec3(sampleAperture(6, 0.0), 0.0);
+    vec3 dir = normalize(focalPoint-aperture);
+    vec3 pos = aperture;
+    
+    // convertion to world space
+    mat3 CamMatrix = rotationMatrix(CamRot);
+    dir *= CamMatrix;
+    pos = pos*CamMatrix + CamPos;
+    
+    // outColor = iFrame == 0 ? vec4(0.) : texelFetch(iChannel0, ivec2(fragCoord), 0);
+    outColor = iFrame == 0 ? vec4(0) : texture(iChannel0, vec3(fragCoord, 0.0));
+
+    if(iMouse.z > 0.) outColor.a = 0.;
+    outColor.rgb = mix(outColor.rgb, pathTrace(pos, dir), 1.0/(++outColor.a));
+}
+]]>
+</program>
+</language>
+</jittershader>

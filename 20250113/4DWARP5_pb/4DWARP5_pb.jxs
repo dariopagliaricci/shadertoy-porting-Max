@@ -1,0 +1,130 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 O;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+#define rot(a) mat2(cos(a+vec4(0,11,33,0)))
+
+//formula for creating colors;
+#define H(h)  (  cos( h*3. + 5.*vec3(1,2,3) )*.6 + .4 )
+
+//formula for mapping scale factor 
+#define M(c)  log(1.+c)
+
+#define R viewPort
+
+void main() {
+  
+    vec2 U = jit_in.uv * viewPort.xy;
+    float wfac = .8, zoom=0., cfac=0.;
+
+    O = vec4(0); 
+    vec3 c=vec3(0);  
+    vec4 rd = normalize( vec4(U-.5*R.xy, .8*R.y, wfac*R.y))*10.; 
+
+    float sc,dotp,totdist=0., t=2.9; 
+           
+    float fac=1.;
+
+    
+    for (float i=0.; i<100.; i++) {
+        
+        vec4 p = vec4( rd*totdist );
+        
+        p.x -= 1.3 ;
+        p.y -= 1.9;
+        p.z += iTime;
+ 
+        p.z = mod(p.z,12.)-6.;  
+        
+        p.xy *= rot( t*2. + sin(t/2.)  );
+        p.yz *= rot(.707 + t/2. );
+        p.xz *= rot(.707 + t/5. );
+
+        sc = 1.;  
+       
+        for (float j=0.; j<5.; j++) {
+        
+            p = abs( p - .8 )*.6;
+            
+            dotp = max(1./dot(p,p),fac);
+            sc *= dotp;
+
+            p=p.x<p.y?p.wzxy:p.wzyx;
+            p=p.z<p.w?p.xywz:p.xyzw;
+            p=p.y<p.z?p.xwyz:p.xwzy;
+            
+            p *= dotp - .2*p;
+            
+        }
+ 
+        float dist = clamp(abs( length(p-p.w) -.35)/(1.+sc),1e-4,.008) ; 
+        float stepsize = dist + 4e-4  ;
+        totdist += stepsize;    
+
+        c += .03 * H(M(sc)) * exp(-i*i*stepsize*stepsize*1e2)
+        ;
+    }
+    
+    c = clamp(c,-100.,100.);
+    c = 1. - exp(-c*c);
+    c *= exp(-totdist*totdist/2.);  
+    c.b *= 1.5;
+    O = ( vec4(c,0) );
+               
+}  
+
+
+]]>
+</program>
+</language>
+</jittershader>

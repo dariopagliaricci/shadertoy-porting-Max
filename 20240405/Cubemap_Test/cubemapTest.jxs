@@ -1,0 +1,59 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="cubeTex" type="int" default="1" />
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="direction" type="vec3" state="CAMERA_DIRECTION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<language name="glsl" version="1.5">
+		<bind param="cubeTex" program="fp" />
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="direction" program="fp" />
+		<bind param="uv" program="vp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			uniform mat4 modelViewProjectionMatrix;
+			uniform vec3 farCorner;
+
+			out jit_PerVertex {
+				vec3 rd;
+			} jit_out;
+
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.rd = vec3(uv, 1);
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+
+			layout (location = 0) out vec4 outColor;
+			
+			uniform samplerCube cubeTex;
+			uniform vec3 direction;
+
+			in jit_PerVertex {
+				vec3 rd;
+			} jit_in;
+
+			void main(void) {
+
+				vec3 rd = normalize(jit_in.rd);
+				vec3 right = normalize(cross(direction, vec3(0,0,1)));
+				vec3 up = normalize(cross(direction, right));
+				rd = rd.x*right + rd.y*up + rd.z*direction;
+				outColor = texture(cubeTex, rd);
+			}
+		]]>
+		</program>
+	</language>
+</jittershader>

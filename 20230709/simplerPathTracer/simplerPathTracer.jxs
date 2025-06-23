@@ -1,0 +1,539 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="eye" type="vec3" state="CAMERA_POSITION" />
+
+	<param name="envTex" type="int" default="0" />
+	<param name="sphereBuff" type="int" default="1" />
+	<param name="albBuff" type="int" default="2" />
+	<param name="emiBuff" type="int" default="3" />
+    <param name="refInfoBuff" type="int" default="4" />
+
+	<param name="sample" type="float" default="0.0" />
+    <param name="aperture" type="float" default="0.1" />
+    <param name="DoFdist" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+		<bind param="eye" program="fp" />
+
+		<bind param="envTex" program="fp" />
+		<bind param="sphereBuff" program="fp" />
+		<bind param="albBuff" program="fp" />
+		<bind param="emiBuff" program="fp" />
+        <bind param="refInfoBuff" program="fp" />
+		<bind param="sample" program="fp" />
+        <bind param="aperture" program="fp" />
+        <bind param="DoFdist" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+#define BOUNCES 8
+#define VERY_FAR 1e8
+#define TWOPI 6.2831855
+
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform float sample, aperture, DoFdist;
+
+uniform samplerCube envTex;
+uniform samplerBuffer sphereBuff, albBuff, emiBuff, refInfoBuff;
+
+struct rayInfo {
+	vec3 origin;
+	vec3 dir;
+};
+
+struct hitInfo {
+	float t0;
+	vec3 nor;
+};
+
+struct matInfo {
+	vec3 alb;
+	vec3 emi;
+    float roughness;
+    float f0;
+    float IOR;
+};
+
+struct searchInfo{
+	float rngState;
+	vec3 finalColor;
+	vec3 through;
+};
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+// Hash functions by Nimitz:
+// https://www.shadertoy.com/view/Xt3cDn
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+float g_seed = 0.;
+
+float hash1(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    return float(n)/float(0xffffffffU);
+}
+
+vec2 hash2(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 hash3(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec3 rz = uvec3(n, n*16807U, n*48271U);
+    return vec3(rz & uvec3(0x7fffffffU))/float(0x7fffffff);
+}
+
+//https://www.shadertoy.com/view/tddSz4 (Adapted)
+
+vec3 random_in_unit_sphere(inout searchInfo search) {
+    vec3 h = hash3(search) * vec3(2.,6.28318530718,1.)-vec3(1,0,0);
+    float phi = h.y;
+    float r = pow(h.z, 1./3.);
+    return r * vec3(sqrt(1.-h.x*h.x)*vec2(sin(phi),cos(phi)),h.x);
+}
+
+float ScalarTriple(vec3 u, vec3 v, vec3 w)
+{
+    return dot(cross(u, v), w);
+}
+
+void TestQuadTrace(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, in vec3 a, in vec3 b, in vec3 c, in vec3 d, vec3 color, vec3 emissive)
+{
+    // calculate normal and flip vertices order if needed
+    vec3 normal = normalize(cross(c-a, c-b));
+    if (dot(normal, ray.dir) > 0.0f)
+    {
+        normal *= -1.0f;
+        
+		vec3 temp = d;
+        d = a;
+        a = temp;
+        
+        temp = b;
+        b = c;
+        c = temp;
+    }
+    
+    vec3 p = ray.origin;
+    vec3 q = ray.origin + ray.dir;
+    vec3 pq = q - p;
+    vec3 pa = a - p;
+    vec3 pb = b - p;
+    vec3 pc = c - p;
+    
+    // determine which triangle to test against by testing against diagonal first
+    vec3 m = cross(pc, pq);
+    float v = dot(pa, m);
+    vec3 intersectPos;
+    if (v >= 0.0f)
+    {
+        // test against triangle a,b,c
+        float u = -dot(pb, m);
+        if (u < 0.0f) return;
+        float w = ScalarTriple(pq, pb, pa);
+        if (w < 0.0f) return;
+        float denom = 1.0f / (u+v+w);
+        u*=denom;
+        v*=denom;
+        w*=denom;
+        intersectPos = u*a+v*b+w*c;
+    }
+    else
+    {
+        vec3 pd = d - p;
+        float u = dot(pd, m);
+        if (u < 0.0f) return;
+        float w = ScalarTriple(pq, pa, pd);
+        if (w < 0.0f) return;
+        v = -v;
+        float denom = 1.0f / (u+v+w);
+        u*=denom;
+        v*=denom;
+        w*=denom;
+        intersectPos = u*a+v*d+w*c;
+    }
+    
+    float dist;
+    if (abs(ray.dir.x) > 0.1f)
+    {
+        dist = (intersectPos.x - ray.origin.x) / ray.dir.x;
+    }
+    else if (abs(ray.dir.y) > 0.1f)
+    {
+        dist = (intersectPos.y - ray.origin.y) / ray.dir.y;
+    }
+    else
+    {
+        dist = (intersectPos.z - ray.origin.z) / ray.dir.z;
+    }
+    
+	if(dist < hit.t0) //(dist > c_minimumRayHitTime && dist < info.dist)
+    {
+        hit.t0 = dist;        
+        hit.nor = normal;
+        mat.alb = color;
+        mat.emi = emissive;
+        return;
+    }    
+    
+    return;
+}
+
+void TestSphereTrace(in rayInfo ray, inout hitInfo hit, inout matInfo mat, in vec4 sphere, vec3 color, vec3 emissive, vec3 rouF0IOR)
+{
+	//get the vector from the center of this sphere to where the ray begins.
+	vec3 m = ray.origin - sphere.xyz;
+
+    //get the dot product of the above vector and the ray's vector
+	float b = dot(m, ray.dir);
+
+	float c = dot(m, m) - sphere.w * sphere.w;
+
+	//exit if r's origin outside s (c > 0) and r pointing away from s (b > 0)
+	if(c > 0.0 && b > 0.0)
+		return;
+
+	//calculate discriminant
+	float discr = b * b - c;
+
+	//a negative discriminant corresponds to ray missing sphere
+	if(discr < 0.0)
+		return;
+    
+	//ray now found to intersect sphere, compute smallest t value of intersection
+    bool fromInside = false;
+	float dist = -b - sqrt(discr);
+    if (dist < 0.0f)
+    {
+        fromInside = true;
+        dist = -b + sqrt(discr);
+    }
+    
+	if (dist < hit.t0) //(dist > c_minimumRayHitTime && dist < info.dist)
+    {
+        hit.t0 = dist;        
+        hit.nor = normalize((ray.origin+ray.dir*dist) - sphere.xyz) * (fromInside ? -1.0f : 1.0f);
+        mat.alb = color;
+        mat.emi = emissive;
+        mat.roughness = rouF0IOR.x;
+        mat.f0 = rouF0IOR.y;
+        mat.IOR = rouF0IOR.z;
+        return;
+    }
+    
+    return;
+}
+
+void TestSceneTrace(inout rayInfo ray, inout hitInfo hit, inout matInfo mat)
+{    
+    
+   	// back wall
+    {
+        
+        vec3 A = vec3(-5.0f, -5.0f, 10.0f);
+        vec3 B = vec3( 5.0f, -5.0f, 10.0f);
+        vec3 C = vec3( 5.0f,  5.0f, 10.0f);
+        vec3 D = vec3(-5.0f,  5.0f, 10.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.7f, 0.7f, 0.7f), vec3(1.0f, 0.9f, 0.7f) * 0.5f);
+        // {
+        //     hitInfo.albedo = vec3(0.7f, 0.7f, 0.7f);
+        //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+        // }
+   
+	}    
+    
+    // floor
+    {
+        vec3 A = vec3(-5.0f, -5.0f, 10.0f);
+        vec3 B = vec3( 5.0f, -5.0f, 10.0f);
+        vec3 C = vec3( 5.0f, -5.0f, 5.0f);
+        vec3 D = vec3(-5.0f, -5.0f, 5.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.7f, 0.7f, 0.7f), vec3(1.0f, 0.9f, 0.7f) * 0.5f);
+        // {
+        //     hitInfo.albedo = vec3(0.7f, 0.7f, 0.7f);
+        //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+        // }        
+    }
+    
+    // cieling
+    {
+        vec3 A = vec3(-5.0f,  5.0f, 10.0f);
+        vec3 B = vec3( 5.0f,  5.0f, 10.0f);
+        vec3 C = vec3( 5.0f,  5.0f, 5.0f);
+        vec3 D = vec3(-5.0f,  5.0f, 5.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.7f, 0.7f, 0.7f),vec3(0.0f, 0.0f, 0.0f));
+        // {
+        //     hitInfo.albedo = vec3(0.7f, 0.7f, 0.7f);
+        //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+        // }        
+    }    
+    
+    // left wall
+    {
+        vec3 A = vec3(-5.0f, -5.0f, 10.0f);
+        vec3 B = vec3(-5.0f, -5.0f, 5.0f);
+        vec3 C = vec3(-5.0f,  5.0f, 5.0f);
+        vec3 D = vec3(-5.0f,  5.0f, 10.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.7f, 0.1f, 0.1f), vec3(1.0f, 0.9f, 0.7f) * 0.5f);
+        // {
+        //     hitInfo.albedo = vec3(0.7f, 0.1f, 0.1f);
+        //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+        // }        
+    }
+    
+    // right wall 
+    {
+        vec3 A = vec3( 5.0f, -5.0f, 10.0f);
+        vec3 B = vec3( 5.0f, -5.0f, 5.0f);
+        vec3 C = vec3( 5.0f,  5.0f, 5.0f);
+        vec3 D = vec3( 5.0f,  5.0f, 10.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.1f, 0.7f, 0.1f), vec3(0.0f, 0.0f, 0.0f));
+        // {
+        //     hitInfo.albedo = vec3(0.1f, 0.7f, 0.1f);
+        //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+        // }        
+    }    
+    
+    // light
+    {
+        vec3 A = vec3(-2.5f,  5.0f,  10.0f);
+        vec3 B = vec3( 2.5f,  5.0f,  10.0f);
+        vec3 C = vec3( 2.5f,  5.0f,   5.0f);
+        vec3 D = vec3(-2.5f,  5.0f,   5.0f);
+        TestQuadTrace(ray, hit, mat, A, B, C, D, vec3(0.0f, 0.0f, 0.0f), vec3(1.0f, 0.9f, 0.7f) * 20.0f);      
+    }
+    
+	// if (TestSphereTrace(rayPos, rayDir, hitInfo, vec4(-9.0f, -9.5f, 20.0f, 3.0f)+sceneTranslation4))
+    // {
+    //     hitInfo.albedo = vec3(0.9f, 0.9f, 0.75f);
+    //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);        
+    // } 
+    
+	// if (TestSphereTrace(rayPos, rayDir, hitInfo, vec4(0.0f, -9.5f, 20.0f, 3.0f)+sceneTranslation4))
+    // {
+    //     hitInfo.albedo = vec3(0.9f, 0.75f, 0.9f);
+    //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);        
+    // }    
+    
+	// if (TestSphereTrace(rayPos, rayDir, hitInfo, vec4(9.0f, -9.5f, 20.0f, 3.0f)+sceneTranslation4))
+    // {
+    //     hitInfo.albedo = vec3(0.75f, 0.9f, 0.9f);
+    //     hitInfo.emissive = vec3(0.0f, 0.0f, 0.0f);
+    // }    
+}
+
+float planeIntersect(vec3 ro, vec3 rd, vec4 p){
+    return -(dot(ro, p.xyz)+p.w)/dot(rd, p.xyz);
+}
+
+vec2 getBokehCircle(in searchInfo search){
+
+    vec2 rand = hash2(search);
+    float angle = rand.x*TWOPI;
+    float radius = sqrt(rand.y);
+    return vec2(cos(angle), sin(angle))*aperture*radius;
+}
+
+vec2 getBokehHexa(in searchInfo search){
+
+    float sin30 = 0.5;
+    float cos30 = 0.866;
+    vec2 bokeh[7] = vec2[]  (   vec2(0, 1),
+                                vec2(-cos30, sin30),
+                                vec2(-cos30, -sin30),
+                                vec2(0, -1),
+                                vec2(cos30, -sin30),
+                                vec2(cos30, sin30),
+                                vec2(0, 1)
+                            );
+
+    vec2 rand = hash2(search);
+    int index = int(floor(rand.x*6));
+    float interp = fract(rand.x*6);
+    float radius = sqrt(rand.y);
+    return mix(bokeh[index], bokeh[index+1], interp)*aperture*radius;
+
+}
+
+void computeFirstRay(out rayInfo ray, inout searchInfo search) {
+	vec2 screenPos = jit_in.uv*2-1;
+	float aspectRatio = viewPort.x / viewPort.y;
+	screenPos.x *= aspectRatio;
+	//Antialiasing
+	vec2 jittering = hash2(search)-0.5;
+	jittering /= viewPort;// stay in the subpixel area
+	screenPos += jittering*3;
+
+	ray.origin = eye;
+
+	vec3 target = vec3(0.);
+	vec3 front = normalize(target - ray.origin);
+	vec3 right = cross(vec3(0., 1., 0.), front);
+	vec3 up = cross(front, right);
+
+	vec3 pixPos = vec3(screenPos, 4);
+	ray.dir = normalize(pixPos.x*right + pixPos.y*up + pixPos.z*front);
+
+    float focalPlane = planeIntersect(ray.origin, ray.dir, vec4(-front, DoFdist));
+    vec3 focalPoint = ray.origin + ray.dir * focalPlane;
+
+    vec2 cameraShift = getBokehHexa(search);
+    float screenDist = planeIntersect(ray.origin, ray.dir, vec4(front, 4));
+    ray.origin = eye +ray.dir*screenDist;
+    ray.origin += right*cameraShift.x + up*cameraShift.y;
+    ray.dir = normalize(focalPoint - ray.origin);
+}
+
+void rayTrace(in rayInfo ray, inout hitInfo hit, inout matInfo mat, inout searchInfo search){
+	
+	hit.t0 = VERY_FAR;
+	for(int i = 0; i < 80; i++){
+		vec3 emissive = texelFetch(emiBuff, i).rgb;
+		vec3 alb = texelFetch(albBuff, i).rgb;
+		vec4 sphere = texelFetch(sphereBuff, i);
+        vec3 rouF0IOR = texelFetch(refInfoBuff, i).rgb;
+		TestSphereTrace(ray, hit, mat, sphere, alb, emissive, rouF0IOR);
+	}	
+	return;
+}
+
+void miss(inout searchInfo search, in rayInfo ray){
+	search.finalColor += texture(envTex, ray.dir).rgb * search.through;
+}
+
+void updateColor(inout matInfo mat, inout searchInfo search){
+	search.finalColor += mat.emi*search.through;
+	search.through *= mat.alb;
+}
+
+float FresnelReflectAmount(in rayInfo ray, in hitInfo hit, float n1, float n2, float f0, float f90)
+{
+        // Schlick aproximation
+        float r0 = (n1-n2) / (n1+n2);
+        r0 *= r0;
+        float cosX = -dot(hit.nor, ray.dir);
+        if (n1 > n2)
+        {
+            float n = n1/n2;
+            float sinT2 = n*n*(1.0-cosX*cosX);
+            // Total internal reflection
+            if (sinT2 > 1.0)
+                return f90;
+            cosX = sqrt(1.0-sinT2);
+        }
+        float x = 1.0-cosX;
+        float ret = r0+(1.0-r0)*x*x*x*x*x;
+
+        // adjust reflect multiplier for object reflectivity
+        return mix(f0, f90, ret);
+}
+
+void createNewRay(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, inout searchInfo search){
+	float airIOR = 1.000293;
+    float f90 = 0.2;
+
+    float fresnel = FresnelReflectAmount(ray, hit, airIOR, mat.IOR, mat.f0, f90);
+    vec3 hitPos = ray.origin + ray.dir*hit.t0;
+	ray.origin = hitPos;
+	ray.origin += 0.001*hit.nor;//avoid false self intersections
+    vec3 spe = reflect(ray.dir, hit.nor);
+	vec3 dif = normalize(random_in_unit_sphere(search)+hit.nor);
+    float randChoice = hash1(search);
+    
+    if(randChoice > fresnel){
+        ray.dir = dif;
+    } else {
+        spe = mix(spe, dif, mat.roughness*mat.roughness);
+        ray.dir = spe;
+    }
+
+}
+
+void getFragmentColor(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, inout searchInfo search){
+	search.through = vec3(1.);
+	search.finalColor = vec3(0.);
+	for(int i = 0; i < BOUNCES; i++){
+		rayTrace(ray, hit, mat, search);
+		TestSceneTrace(ray, hit, mat);
+		if(hit.t0 == VERY_FAR){
+			miss(search, ray);
+			return;
+		}
+		updateColor(mat, search);
+		createNewRay(ray, hit, mat, search);
+	}
+	return;	
+}
+
+void initializeRngState(out searchInfo search){
+
+	search.rngState = float(base_hash(floatBitsToUint(jit_in.uv)))/float(0xffffffffU)+sample;
+}
+
+void main(void) {
+
+	rayInfo ray;
+	hitInfo hit;
+	matInfo mat;
+	searchInfo search;
+
+	initializeRngState(search);
+	computeFirstRay(ray, search);
+	getFragmentColor(ray, hit, mat, search);
+
+	outColor.rgb = search.finalColor;
+	outColor.a = 1;
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

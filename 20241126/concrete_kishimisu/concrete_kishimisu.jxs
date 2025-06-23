@@ -1,0 +1,231 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+uniform sampler2D iChannel1;
+
+#define QUALITY 8  // lower = more fps,  higher = less noise
+
+
+// fract noise - https://www.shadertoy.com/view/4djSRW
+vec2 hash(vec3 p) {
+	p = fract(p * vec3(.1031, .103, .0973));
+    p += dot(p, p.yzx+33.33);
+    return fract((p.xx+p.yz)*p.zy);
+}
+
+// 2D rotation
+#define rot(a) mat2(cos(a), -sin(a), sin(a), cos(a))
+
+// 2D rectangle SDF
+float rect(vec2 p, vec2 b) {
+    p = abs(p) - b;
+    return length(max(p, 0.)) + min(max(p.x,p.y), 0.);
+}
+
+// hemisphere sampling
+vec3 bounce(vec2 seed, vec3 n) {
+    vec3 t = vec3(1.+n.z-n.xy*n.xy, -n.x*n.y)/(1.+n.z);
+    vec3 u = vec3(t.xz, -n.x);
+    vec3 v = vec3(t.zy, -n.y);
+    float a = 6.283185 * seed.y;
+    return sqrt(seed.x) * (cos(a)*u + sin(a)*v) + sqrt(1.-seed.x)*n;
+}
+
+float cut;
+
+float map(vec3 p) {
+    p.x = mod(p.x, 7.) - 3.5;
+
+    vec3 q = p;
+    q.y = mod(q.y, 4.) - 2.;
+    
+    float z = rect(q.xy, vec2(1.2 + sin(p.z*.25) * step(p.y, 0.)*.75, .6))*.97;
+    cut = abs(abs(q.y) - .2) - .1;
+    
+    p.z = mod(p.z, 7.) - 3.5;
+    
+    float x = rect(p.yz - vec2(2, 1), vec2(.45, 1));
+    float y = rect(p.xz, vec2(.5));
+    
+    float d = min(x, z);
+          d = max(d,-cut);
+          d = min(d, y);
+            
+    return d;
+}
+
+vec3 normal(vec3 p) {
+    const vec2 e = vec2(1,-1)*.0001;
+    return normalize(e.xyy*map(p + e.xyy) + e.yyx*map(p + e.yyx) + 
+					 e.yxy*map(p + e.yxy) + e.xxx*map(p + e.xxx));
+}
+
+float raymarch(vec3 ro, vec3 rd, int S) {
+    vec3 p;
+    float d, t = 0.;
+
+    for (int i = 0; i < S; i++) {
+        p = ro + t*rd;
+        if (p.y > 3.) break;
+
+        d = map(p);
+        if (d < .01) break;
+        
+        t += d; 
+    }
+    return t;
+}
+
+void main() {
+    
+	vec2 F = jit_in.uv * viewPort.xy;
+    vec2 R = viewPort.xy, 
+         seed = hash(vec3(F, iTime)),
+         uv = ((F+seed-.5)*2.-R)/R.y;
+         
+    float M = step(0., iMouse.z) * iMouse.x/R.x;
+         
+    // Starting ray direction & origin
+    vec3 r0 = normalize(vec3(uv, 2));
+    vec3 p0 = vec3(0, 0, -29) + r0 * 1.5;
+    
+    // Alternate viewpoints
+    float scene  = floor(iTime/8.), 
+          scene2 = floor(mod(scene, 4.)*.5);
+          
+    vec2 V = (mod(scene, 2.) == 0.)
+            ? vec2(0, cos(floor(iTime/16.)*1.57+1.3)*.25+.25)
+            : vec2(scene2*1.16-.58, .5-scene2*.2);
+    
+    mat2 Vx = rot(V.x), Vy = rot(V.y);
+    p0.zy *= Vy; r0.zy *= Vy;
+    p0.zx *= Vx; r0.zx *= Vx;
+    
+    p0.z += iTime * .5;
+
+    // Precompute first ray
+    float t = raymarch(p0, r0, 120);
+    p0 += r0 * (t - .01);
+    
+    // Accumulate samples
+    vec3 acc = vec3(0); 
+    for (int k = 0; k < QUALITY; k++) 
+    {
+        vec3 col  = vec3(0),
+             mask = vec3(1),
+             p = p0; // start at first ray intersection
+
+        // bounce twice
+        for (int b = 0; b < 2; b++) {
+            seed = hash(vec3(seed*9., k));
+            
+            // random bounce direction
+            vec3 n  = normal(p);
+            vec3 rd = bounce(seed, n*.999);
+            
+            float t = raymarch(p, rd, 40);
+            p += rd * (t - .01);
+
+            // ceiling light
+            if (p.y > 3.) {
+                col += mask*1.5;
+                break;
+            }
+            
+            // other materials
+            vec4 c = mix(
+                vec4(.4, .4, .4, 0), 
+                vec4(1. + cos(length(p)*.01 + iTime + vec3(0,1,2)), 1), 
+                step(cut, 0.) * M
+            );
+
+            mask *= c.rgb;
+            col += mask * c.a;
+        }
+    
+        acc += col; 
+    }
+    
+    // Fog
+    acc /= float(QUALITY) * exp(t*.01);
+    
+    // Texture details
+    vec2 tuv = abs(p0.zx) + p0.y*.25;
+    acc *= mix(texture(iChannel1, tuv*.25).rgb*.4+.6, vec3(1), step(2.9, p0.y));
+    
+    // Blend with previous frame
+    // vec4 prev = iFrame < 3 ? vec4(0) : texture(iChannel0, F/R);
+
+    // Example direction vector
+	vec3 direction = vec3(F, 0.0);
+
+	// Sample the cube map using the direction vector
+	vec4 prev = iFrame < 3 ? vec4(0) : texture(iChannel0, normalize(direction));
+
+    outColor = mix(prev, acc.rgbb, .08);
+}
+]]>
+</program>
+</language>
+</jittershader>

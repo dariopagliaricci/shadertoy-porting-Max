@@ -1,0 +1,383 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+//Simple path tracer. I used Iq's great article as a tutorial for this.
+//https://iquilezles.org/articles/simplepathtracing
+
+#define STEPS 28
+#define FAR 60.0
+#define EPSILON 0.01
+#define PIXELR 0.5/viewPort.x
+#define PI 3.14159265359
+
+#define BOUNCES 12
+#define SAMPLES 1.0
+
+//Hash method from https://www.shadertoy.com/view/4djSRW
+//#define HASHSCALE3 vec3(.1031, .1030, .0973)
+#define HASHSCALE3 vec3(443.897, 441.423, 437.195)
+vec2 hash23(vec3 p3){
+	p3 = fract(p3 * HASHSCALE3);
+    p3 += dot(p3, p3.yzx+19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+vec2 hash21(float p){
+	vec3 p3 = fract(vec3(p) * HASHSCALE3);
+	p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+//from http://amietia.com/lambertnotangent.html
+vec3 lambertNoTangent(vec3 normal, vec2 uv){
+   float theta = 6.283185 * uv.x;
+   uv.y = 2.0 * uv.y - 1.0;
+   vec3 spherePoint = vec3(sqrt(1.0 - uv.y * uv.y) * vec2(cos(theta), sin(theta)), uv.y);
+   return normalize(normal + spherePoint);
+}
+
+//Distance functions from Mercury's SDF library
+//http://mercury.sexy/hg_sdf/
+
+// Maximum/minumum elements of a vector
+float vmax3(vec3 v) {
+	return max(max(v.x, v.y), v.z);
+}
+
+float fSphere(vec3 p, float r) {
+	return length(p) - r;
+}
+
+// Box: correct distance to corners
+float fBox(vec3 p, vec3 b) {
+	vec3 d = abs(p) - b;
+	return length(max(d, vec3(0))) + vmax3(min(d, vec3(0)));
+}
+
+vec2 dist(vec3 p){
+    
+    float ball = fSphere(p-vec3(-3.0, -2.5, 0.0), 1.5);
+    float cube = fBox(p-vec3(3.0, -2.0, 0.0), vec3(1.0, 2.0, 2.0));
+    float box = -fBox(p, vec3(8.0, 4.0, 8.0));
+    
+    float scene = min(ball, min(cube,box));
+
+    float id = 0.0;
+    if(ball < cube && ball < box){
+        id = 1.0;
+    }
+    else if(cube < ball && cube < box){
+        id = 2.0;
+    }
+    
+    return vec2(scene, id);
+}
+
+vec3 normals(vec3 p){
+    vec3 eps = vec3(EPSILON, 0.0, 0.0);
+    return normalize(vec3(
+        dist(p+eps.xyy).x-dist(p-eps.xyy).x,
+        dist(p+eps.yxy).x-dist(p-eps.yxy).x,
+        dist(p+eps.yyx).x-dist(p-eps.yyx).x
+    ));
+}
+
+//Enhanced sphere tracing algorithm introduced by Mercury
+
+// Sign function that doesn't return 0
+float sgn(float x) {
+	return (x < 0.0)?-1.0:1.0;
+}
+
+vec2 march(vec3 ro, vec3 rd){
+    float t = 0.001;//EPSILON;
+    float step = 0.0;
+
+    float omega = 1.0;//muista testata eri arvoilla! [1,2]
+    float prev_radius = 0.0;
+
+    float candidate_t = t;
+    float candidate_error = 1000.0;
+    float sg = sgn(dist(ro).x);
+
+    vec3 p = vec3(0.0);
+
+	for(int i = 0; i < STEPS; ++i){
+		p = rd*t+ro;
+		float sg_radius = sg*dist(p).x;
+		float radius = abs(sg_radius);
+		step = sg_radius;
+		bool fail = omega > 1. && (radius+prev_radius) < step;
+		if(fail){
+			step -= omega * step;
+			omega = 1.;
+		}
+		else{
+			step = sg_radius*omega;
+		}
+		prev_radius = radius;
+		float error = radius/t;
+
+		if(!fail && error < candidate_error){
+			candidate_t = t;
+			candidate_error = error;
+		}
+
+		if(!fail && error < PIXELR || t > FAR){
+			break;
+		}
+		t += step;
+	}
+    //discontinuity reduction
+    float er = candidate_error;
+    for(int j = 0; j < 6; ++j){
+        float radius = abs(sg*dist(p).x);
+        p += rd*(radius-er);
+        t = length(p-ro);
+        er = radius/t;
+
+        if(er < candidate_error){
+            candidate_t = t;
+            candidate_error = er;
+        }
+    }
+	if(t <= FAR || candidate_error <= PIXELR){
+		t = candidate_t;
+	}
+    
+    p = ro+rd*t;
+    float id = dist(p).y;
+    
+	return vec2(t, id);
+}
+
+float marchShadow(vec3 ro, vec3 rd){
+    float t = 0.0;
+    vec3 p = ro;
+    float s = 1.0;
+    for(int i = 0; i < 32; ++i){
+        float d = dist(p).x;
+        p += rd*d;
+        t += d;
+        
+        if(d < EPSILON){
+            s = 0.0;
+            break;
+        }
+    }
+    return s;
+}
+
+vec3 color(float obj){
+    vec3 base = vec3(0.0);
+    if(obj == 0.0){
+        base = vec3(0.8);
+    }
+    else if(obj == 1.0){
+        base = vec3(0.8, 0.2, 0.6);
+    }
+    else if(obj == 2.0){
+        base = vec3(0.2, 0.6, 0.9);
+    }
+    return base;
+}
+
+vec3 render(vec3 o, vec3 d, vec3 rt, vec2 uv){
+    vec3 ro = o;
+    vec3 rd = d;
+    
+    vec3 tcol = vec3(0.0);
+    vec3 fcol = vec3(1.0);
+    
+    vec3 ld = normalize(rt-o);
+    
+    for(int i = 0; i < BOUNCES; ++i){
+        vec2 t = march(ro, rd);
+        vec3 p = ro+rd*t.x;
+        if(t.y < 0.0 || t.x > FAR){
+            tcol = vec3(0.0);
+            break;
+        }
+        
+        vec3 n = normals(p);
+        
+        vec3 scol = color(t.y);
+        vec3 dcol = vec3(0.8)+max(dot(n, ld), 0.0);
+        dcol *= (marchShadow(p+n*0.02, ld)+vec3(0.0, 0.0, 0.03));
+        
+        fcol *= scol;
+        tcol += fcol * dcol;
+        
+        ro = p+(n*0.02);
+        rd = lambertNoTangent(n, hash21(float(i)));
+    }
+    
+    return tcol;
+}
+
+//The glitch method is modified from three.js post processing examples
+//Original version by alteredq
+//https://github.com/mrdoob/three.js/blob/dev/examples/js/postprocessing/GlitchPass.js
+
+// #define PI 3.14159265
+
+//Hash method from https://www.shadertoy.com/view/4djSRW
+//#define HASHSCALE1 443.8975
+#define HASHSCALE1 .1031
+float hash12(vec2 p){
+    vec3 p3  = fract(vec3(p.xyx) * HASHSCALE1);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float randf(){
+    float time = iTime*0.1;
+    return mod(4.0,sin(time*time)+1.0)*0.75;
+}
+
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 uv = fragCoord.xy / viewPort.xy;
+    vec2 q = -1.0+2.0*uv;
+    q.x *= viewPort.x/viewPort.y;
+
+    vec3 ro = vec3(6.0*cos(iTime*0.1), 1.0+sin(iTime*0.05), 6.0*sin(iTime*0.15));
+    vec3 rt = vec3(0.0, -0.5, 0.0);
+    
+    vec3 z = normalize(rt-ro);
+    vec3 x = normalize(cross(z, vec3(0.0, 1.0, 0.0)));
+    vec3 y = normalize(cross(x, z));
+    vec3 color = vec3(0.0);
+
+    for(float i = 0.0; i < SAMPLES; ++i){
+        vec3 rd = normalize(mat3(x, y, z)*vec3(q, radians(60.0)));
+        color += render(ro, rd, rt, uv);
+    }
+    color /= SAMPLES;
+    color = smoothstep(0.1, 0.8, color);
+
+    outColor = vec4(color, 1.0);
+
+    // int on = 1;//should we apply the glitch ?
+    // float amount = randf()*0.005;
+    // float angle = (PI*randf())/(2.0*PI)-PI;
+    // float seed = randf();
+    // float seed_x = 0.5*randf()-0.5;
+    // float seed_y = (0.3*randf()/0.6)-0.3;
+    // float distortion_x = randf()*viewPort.x;
+    // float distortion_y = randf()*viewPort.y;
+    // float col_s = 0.3;
+
+
+    // if(on != 0){
+
+    //     vec2 p = uv;
+    //     float xs = floor(fragCoord.x / 0.5);
+    //     float ys = floor(fragCoord.y / 0.5);
+    //     //based on staffantans glitch shader for unity https://github.com/staffantan/unityglitch
+    //     vec4 normal = texture(iChannel0, p*seed*seed);
+    //     if(p.y<distortion_x+col_s && p.y>distortion_x-col_s*seed) {
+    //         if(seed_x >0.0){
+    //             p.y = 1. - (p.y + distortion_y);
+    //         }
+    //         else {
+    //             p.y = distortion_y;
+    //         }
+    //     }
+    //     if(p.x<distortion_y+col_s && p.x>distortion_y-col_s*seed) {
+    //         if(seed_y>0.){
+    //             p.x=distortion_x;
+    //         }
+    //         else {
+    //             p.x = 1. - (p.x + distortion_x);
+    //         }
+    //     }
+    //     p.x+=normal.x*seed_x*(seed/5.);
+    //     p.y+=normal.y*seed_y*(seed/5.);
+    //     //base from RGB shift shader
+    //     //vec2 offset = amount * vec2( cos(angle), sin(angle));
+    //     //vec4 cr = texture(sTD2DInputs[0], p + offset);
+    //     //vec4 cga = texture(sTD2DInputs[0], p);
+    //     //vec4 cb = texture(sTD2DInputs[0], p - offset);
+    //     outColor = texture(iChannel0, p);//vec4(cr.r, cga.g, cb.b, cga.a);
+    //     //add noise
+    //     vec4 snow = 200.*amount*vec4(hash12(vec2(xs * seed,ys * seed*50.))*0.2);
+    //     outColor = outColor+ snow;
+    // }
+    // else {
+    //     outColor = texture(iChannel0, uv);
+    // }
+
+
+   
+    
+        
+    //  //Vigenting
+    // float vigentOffset = 0.005;
+    // float darkness = 0.8;
+    // float dist = distance(uv, vec2( 0.5 ));
+    // outColor.rgb *= smoothstep(0.8, vigentOffset * 0.799, dist *( darkness + vigentOffset ));
+    
+    // outColor.rgb = pow(outColor.rgb, 1.0/vec3(2.2));
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,390 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+    <param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+        <bind param="iMouse" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+// ---------- STRUCTS ----------------
+
+struct camera {
+  vec3 origin;
+  vec3 lower_left_corner;
+  vec3 horizontal;
+  vec3 vertical;
+  vec3 u, v, w;
+  float lens_radius;
+};
+
+struct ray
+{
+  vec3 origin;
+  vec3 dir;
+};
+
+// contains a combination of all possible
+struct material_texture {
+  int type;
+  vec3 albedoA;
+  vec3 albedoB;
+  float checkerboard_freq;
+  float metal_fuzz;
+  float dialectric_IoR;
+};
+
+struct hit_record {
+    vec3 p;
+    vec3 normal;
+    material_texture mat;
+    float t;
+    bool front_face;
+};
+
+struct sphere {
+  vec3 cen;
+  float rad;
+  material_texture mat;
+};
+
+// ---------- rtweekend.h ---------------
+
+#define PI 3.1415926535897932384626433832795
+
+// Hash functions by Nimitz
+// copied from 
+// https://www.shadertoy.com/view/llVcDz
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+float g_seed = 0.;
+
+vec2 hash2(inout float seed) {
+    uint n = base_hash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 hash3(inout float seed) {
+    uint n = base_hash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec3 rz = uvec3(n, n*16807U, n*48271U);
+    return vec3(rz & uvec3(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 random_in_unit_sphere(inout float seed) {
+    vec3 h = hash3(seed) * vec3(2.,6.28318530718,1.)-vec3(1,0,0);
+    float phi = h.y;
+    float r = pow(h.z, 1./3.);
+	return r * vec3(sqrt(1.-h.x*h.x)*vec2(sin(phi),cos(phi)),h.x);
+}
+// thank you, reinder and iq
+
+float hash1(inout float seed) {
+    uint n = base_hash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    return float(n & (0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 random_unit_vector()
+{
+  return normalize(random_in_unit_sphere(g_seed));
+}
+
+vec3 random_in_unit_disk() {
+    while (true) {
+        vec3 p = vec3(hash2(g_seed)-vec2(.5), 0.0);
+        if (dot(p,p) >= 1.0) continue;
+        return p;
+    }
+}
+
+//----------- camera.h ------------------
+camera cameraCreator(vec3 orig, vec3 lookat, vec3 up, float vfov, float aspect_ratio, float aperture, float focus_dist) {
+    camera outCam;
+    outCam.origin = orig;
+    float theta = radians(vfov);
+    float h = tan(theta/2.0);
+    float viewport_height = 2.0 * h;
+    float viewport_width = aspect_ratio * viewport_height;
+
+    vec3 w = normalize(orig - lookat);
+    vec3 u = normalize(cross(up, w));
+    vec3 v = cross(w, u);
+
+    outCam.origin = orig;
+    outCam.horizontal = focus_dist * viewport_width * u;
+    outCam.vertical = focus_dist * viewport_height * v;
+    outCam.lower_left_corner = orig - outCam.horizontal/2.0 - outCam.vertical/2.0 - focus_dist * w;
+    outCam.lens_radius = aperture / 2.0;
+    outCam.u = u;
+    outCam.v = v;
+    outCam.w = w;
+    return outCam;
+}
+
+ray get_ray(camera cam, float s, float t) {
+    vec3 rd = cam.lens_radius * random_in_unit_disk();
+    vec3 offset = cam.u * rd[0] + cam.v * rd[1];
+
+    return ray(
+        cam.origin + offset,
+        cam.lower_left_corner + s*cam.horizontal + t*cam.vertical - cam.origin - offset);
+}
+
+// ---------------- ray.h -----------------------
+
+vec3 at(ray r, float t) {
+  return r.origin + (t*r.dir);
+}
+
+// ---------------- sphere.h ---------------------
+
+bool hit_sphere(sphere sph, ray r, float t_min, float t_max, out hit_record rec) {
+    vec3 oc = r.origin - sph.cen;
+    float a = dot(r.dir, r.dir);
+    float half_b = dot(oc, r.dir);
+    float c = dot(oc,oc) - (sph.rad*sph.rad);
+    float discriminant = (half_b*half_b) - (a*c);
+
+    if (discriminant < 0.0) return false;
+    float sqrtd = sqrt(discriminant);
+    
+    float root = (-half_b - sqrtd) / a;
+    if (root < t_min || t_max < root) {
+        root = (-half_b + sqrtd) / a;
+        if (root < t_min || t_max < root)
+            return false;
+    }
+
+    rec.t = root;
+    rec.p = at(r, rec.t);
+    rec.normal = (rec.p - sph.cen) / sph.rad;
+    rec.mat = sph.mat;
+    rec.front_face = dot(r.dir, rec.normal) < 0.0;
+    if(!rec.front_face) rec.normal = -rec.normal;
+    return (discriminant >= 0.);
+}
+
+
+//------------- material.h -------------------
+
+// this is kinda from the second book, a checkerboard-ish
+vec3 textureColor(hit_record rec)
+{
+    vec3 color = rec.mat.albedoA;
+    if(rec.mat.type != 2) return color;// type 2 is checkered.... 
+    vec3 scaled = rec.p*rec.mat.checkerboard_freq;
+    float val = sin(scaled.x)*sin(scaled.y)*sin(scaled.z);
+    if(val > -0.01) color = rec.mat.albedoB;
+    return color;
+}
+
+bool lambertian_scatter(inout ray r, hit_record rec, inout vec3 attenuation)
+{
+    vec3 scatter_direction = (rec.normal*1.00001) + random_unit_vector();
+    r = ray(rec.p, scatter_direction);
+    attenuation *= textureColor(rec);
+    return true;
+}
+
+bool metal_scatter(inout ray r, hit_record rec, inout vec3 attenuation)
+{
+    vec3 reflected = reflect(normalize(r.dir), rec.normal);
+    r = ray(rec.p, reflected + rec.mat.metal_fuzz*random_in_unit_sphere(g_seed));
+    attenuation *= rec.mat.albedoA;
+    return (dot(r.dir, rec.normal) > 0.0);
+}
+
+float reflectance(float cosine, float ref_idx) {
+    // Use Schlick's approximation for reflectance.
+    float r0 = (1.0-ref_idx) / (1.0+ref_idx);
+    r0 = r0*r0;
+    return r0 + (1.0-r0)*pow((1.0 - cosine),5.0);
+}
+
+
+bool dialectric_scatter(inout ray r, hit_record rec, inout vec3 attenuation)
+{
+    attenuation *= rec.mat.albedoA;//vec3(1.0, 1.0, 1.0);
+    float refraction_ratio = rec.front_face ? (1.0/rec.mat.dialectric_IoR) : rec.mat.dialectric_IoR;
+
+    vec3 unit_direction = normalize(r.dir);
+    float cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    float sin_theta = sqrt(1.0 - cos_theta*cos_theta);
+
+    bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+    vec3 direction;
+    float rnd = hash1(g_seed);
+    if (cannot_refract || reflectance(cos_theta, refraction_ratio) > rnd)
+        direction = reflect(unit_direction, rec.normal);
+    else
+        direction = refract(unit_direction, rec.normal, refraction_ratio);
+
+    r = ray(rec.p, direction);
+    return true;
+}
+
+bool scatter(inout ray r, hit_record rec, inout vec3 attenuation)
+{
+    if(rec.mat.type == 1) 
+        return lambertian_scatter(r, rec, attenuation);
+    if(rec.mat.type == 2) 
+        return lambertian_scatter(r, rec, attenuation);
+    if(rec.mat.type == 3) 
+        return metal_scatter(r, rec, attenuation);
+    if(rec.mat.type == 4) 
+        return dialectric_scatter(r, rec, attenuation);
+}
+
+// ------------- httable_list.h and world --------------
+
+#define NPRIMS 20
+
+void primList(out sphere sphList[NPRIMS], int seedOffset)
+{
+    int i = -1;
+    for(i = 0; i < NPRIMS-4; ++i){
+        float iseed = float(i+seedOffset);
+        vec2 randLoc = (hash2(iseed)-vec2(.5))*10.0;
+        float switchVal = hash1(iseed);
+         material_texture randomMat;
+        if(switchVal<.3)
+            randomMat = material_texture(1, hash3(iseed), vec3(0), 1.0, 0.0, 1.5);
+        else if(switchVal<.6)
+            randomMat = material_texture(3, hash3(iseed), vec3(0), 1.0, hash1(iseed)*.25, 1.5);
+        else
+            randomMat = material_texture(4, hash3(iseed), vec3(0), 1.0, 0.0, 1.5);
+        sphList[i+0] = sphere(vec3(randLoc.y,-.6,randLoc.x),.4, randomMat);
+        
+    }
+
+    material_texture matr0 = material_texture(3, vec3(1,.06,.06), vec3(1,.4,1), 1.0, 0.0, 1.5);
+    sphList[i+0] = sphere(vec3(-2.1,0,1),1.0, matr0);
+
+    material_texture matr1 = material_texture(4, vec3(.6,1,.6), vec3(1,.4,1), 1.0, 0.0, 1.5);
+    sphList[i+1] = sphere(vec3(0,0,0),1.0, matr1);
+
+    material_texture matr2 = material_texture(2, vec3(.6,.6,1), vec3(10,8,1), 4.0, 0.0, 1.5);
+    sphList[i+2] = sphere(vec3(2.1,0,.5),1.0, matr2);
+
+    material_texture matr3 = material_texture(2, vec3(0.2, 0.3, 0.1), vec3(0.9, 0.9, 0.9), 10.0, 0.0, 0.0);
+    sphList[i+3] = sphere(vec3(0,-100.9,0),100.0, matr3);
+}
+
+bool hittable_list_hit(ray r, float t_min, float t_max, out hit_record rec, sphere sphList[NPRIMS]) {
+    hit_record temp_rec;
+    bool hit_anything = false;
+    float closest_so_far = t_max;
+
+    for (int i = 0; i < sphList.length(); ++i){
+        if(hit_sphere(sphList[i], r, t_min, closest_so_far, temp_rec)){
+            hit_anything = true;
+            closest_so_far = temp_rec.t;
+            rec = temp_rec;
+        }
+    }
+    return hit_anything;
+}
+// ------------------ hello world ------------------
+
+vec3 ray_color(in ray r, sphere sphList[NPRIMS]) {
+  hit_record rec;
+  vec3 albedoAccum = vec3(1.);
+  for(int i = 0; i < 8; ++i){
+      if(!hittable_list_hit(r, 0.00001, 1000.0, rec, sphList)){
+        vec3 unit_direction = normalize(r.dir);
+        float t = 0.5*(unit_direction.y + 1.0);
+        return (1.0-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0) * albedoAccum;
+      }
+      scatter(r, rec, albedoAccum);
+  }
+  return vec3(0);
+}
+
+
+void main()
+{
+  
+  vec2 fragCoord = jit_in.uv * viewPort.xy; 
+  // initialize the hash seed
+  g_seed = float(base_hash(floatBitsToUint(fragCoord)))/float(0xffffffffU)+iTime;
+  float aspect = viewPort.x/viewPort.y;
+  vec2 off = vec2(-6,3) - abs(iMouse.xy)/viewPort.xy*vec2(-12.0, 4.0);
+  float aperture = .4;
+  float focus_dist = 7.0;
+  camera cam = cameraCreator(vec3(off,-6), vec3(0), vec3(0,1,0), 30.0, aspect, aperture, focus_dist);
+  vec2 uv = fragCoord.xy / viewPort.xy;  
+  sphere sphList[NPRIMS];
+  primList(sphList, int(iTime/1.0));
+  vec3 Caccum = vec3(0);
+  int nSamples = 16;
+  for(int i = 0; i < nSamples; ++i){
+      vec2 sloc = 2.0*(hash2(g_seed) / viewPort.xy)+uv;
+      ray rLoop = get_ray(cam, sloc.x, sloc.y);
+      Caccum += ray_color(rLoop, sphList);
+  }
+
+  outColor = vec4(Caccum / float(nSamples), 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

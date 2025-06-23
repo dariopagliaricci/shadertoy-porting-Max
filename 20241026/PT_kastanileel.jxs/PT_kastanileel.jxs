@@ -1,0 +1,405 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+#define PI 3.14159f
+#define EPSILON 0.0001
+//-----------------------------------------------------
+// Random functions
+//-----------------------------------------------------
+
+float hash1(inout float seed) {
+    seed = seed + 0.1f;
+    return fract(sin(seed += 0.1)*43758.5453123);
+}
+
+vec2 hash2(inout float seed) {
+    seed = seed + 0.1f;
+    return fract(sin(vec2(seed+=0.1,seed+=0.1))*vec2(43758.5453123,22578.1459123));
+}
+
+vec3 hash3(inout float seed) {
+    seed = seed + 0.1f;
+    return fract(sin(vec3(seed+=0.1,seed+=0.1,seed+=0.1))*vec3(43758.5453123,22578.1459123,19642.3490423));
+}
+
+
+vec2 antiAliasingOffset(inout float seed, vec2 resolution){
+    return hash2(seed);
+}
+
+vec3 randomCosineDirectionHemisphere(inout float seed){
+    vec2 rr = hash2(seed);
+    
+    float phi = 2.0*PI*rr.x;
+    float x = cos(phi)*sqrt(rr.y);
+    float y = sin(phi)*sqrt(rr.y);
+    float z = sqrt(1.0-rr.y);
+    
+    return vec3(x, y, z);
+}
+
+vec3 randomUniformDirectionSphere(inout float seed){
+    vec2 rr = hash2(seed);
+  
+    float x = cos(2.0f*PI*rr.x) * 2.0f * sqrt(rr.y*(1.0-rr.y));
+    float y = sin(2.0f*PI*rr.x) * 2.0f * sqrt(rr.y*(1.0-rr.y));
+    float z = 1.0 - 2.0*rr.y;
+
+    return normalize(vec3(x, y, z));
+}
+//-----------------------------------------------------
+// Structs
+//-----------------------------------------------------
+struct ONB {
+    vec3 u, v, w;
+};
+
+ONB buildONB(vec3 normal){
+    ONB onb;
+    onb.w = normal;
+    
+    // make sure a is nonparallel to onb.w
+    vec3 a = vec3(1.0f, 0.0f, 0.0f);
+    if(abs(onb.w.x) > 0.9f){
+        a = vec3(0.0f, 1.0f, 0.0f);
+    }
+    
+    onb.v = normalize(cross(onb.w, a));
+    onb.u = cross(onb.w, onb.v);
+    
+    return onb;
+}
+
+vec3 onbTransform(ONB onb, vec3 vector) {
+    return onb.u * vector.x + onb.v * vector.y + onb.w * vector.z;
+}
+
+struct Material {
+    vec3 emission;
+    vec3 albedo;
+};
+
+vec3 evaluateLambertianBRDF(Material material, vec3 theta_out, vec3 normal, vec3 theta_in){
+    return material.albedo/PI;
+}
+
+vec3 sampleCosineWeighted(vec3 theta_out, vec3 normal, inout float pdf, inout float seed) {
+    ONB onb = buildONB(normal);
+    vec3 scatterDirection = onbTransform(onb, randomCosineDirectionHemisphere(seed));
+    
+    pdf = max(EPSILON, dot(normalize(scatterDirection), normal))/PI;
+    
+    return normalize(scatterDirection);
+}
+
+bool isEmitter(Material material) {
+    return length(material.emission) > 0.0f;
+}
+
+struct Payload {
+    vec3 throughput;
+    vec3 accumulatedColor;
+    int bounces;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+    Payload payload;
+};
+
+// intersection geometry
+vec3 nSphere( in vec3 pos, in vec4 sph ) {
+    return (pos-sph.xyz)/sph.w;
+}
+
+float iSphere( in Ray ray, in vec4 sph ) {
+    vec3 oc = ray.origin - sph.xyz;
+    float b = dot(oc, ray.direction);
+    float c = dot(oc, oc) - sph.w * sph.w;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+
+	float s = sqrt(h);
+	float t1 = -b - s;
+	float t2 = -b + s;
+	
+	return t1 < 0.0 ? t2 : t1;
+}
+
+vec3 nPlane( in vec3 ro, in vec4 obj ) {
+    return obj.xyz;
+}
+
+float iPlane( in Ray ray, in vec4 pla ) {
+    return (-pla.w - dot(pla.xyz,ray.origin)) / dot( pla.xyz, ray.direction );
+}
+
+struct Camera {
+    vec3 origin;
+    vec3 forward;
+    vec3 up;
+    vec3 right;
+};
+
+struct HitRecord {
+    vec3 point;
+    vec3 normal;
+    int primitiveID;
+    bool didHit;
+};
+
+vec3 sampleLight(Material material, HitRecord hit, vec4 lightSphere, inout float pdf, inout float seed) {
+    
+    // Generate a random point on the light sphere
+    vec3 randomUniformDirection = normalize(randomUniformDirectionSphere(seed));
+    vec3 ranPointOnSphere = randomUniformDirection * lightSphere.w + lightSphere.xyz;
+    vec3 sphereDirection = ranPointOnSphere - hit.point;
+
+    // Check if the sampled point is on the visible side of the surface
+    if (dot(sphereDirection, hit.normal) < 0.0f) {
+        return vec3(0.0f);  // Early exit if the light is not visible from the hit point
+    }
+
+    // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#cleaninguppdfmanagement/samplingasphereobject
+    float distance_to_center = length(lightSphere.xyz - hit.point);
+    float cos_theta = sqrt(1.0f - (lightSphere.w * lightSphere.w) / (distance_to_center * distance_to_center));
+    float solid_angle = 2.0 * PI * (1.0f - cos_theta);
+    pdf = 1.0 / solid_angle;
+    
+    return normalize(sphereDirection);
+}
+
+float getCosineWeightedSamplingPDF(vec3 normal, vec3 sampledDirection){
+    return max(EPSILON, dot(normalize(sampledDirection), normal))/PI;
+}
+
+float getLightSamplingPDF(HitRecord hit, vec4 lightSphere, vec3 sampledDirection){
+    float Visibility = 0.0f;
+    
+    // check visibility
+    Ray ray;
+    ray.origin = hit.point;
+    ray.direction = sampledDirection;
+    float t = 1e20;
+    float it = iSphere( ray, lightSphere);
+    if( it > EPSILON && it < t ) 
+        Visibility = 1.0f;
+        
+    float distance_to_center = length(lightSphere.xyz - hit.point);
+    float cos_theta = sqrt(1.0f - (lightSphere.w * lightSphere.w) / (distance_to_center * distance_to_center));
+    float solid_angle = 2.0 * PI * (1.0f - cos_theta);
+    float pdf = 1.0 / solid_angle;
+    
+    return Visibility * pdf;
+}
+
+#define MAX_BOUNCES 6
+
+#define NUM_SPHERES 2
+#define NUM_PLANES 5
+
+vec4 spheres[NUM_SPHERES];
+vec4 planes[NUM_PLANES];
+Material materials[NUM_SPHERES+NUM_PLANES];
+Camera camera;
+
+void initialize() {
+    // Camera
+    camera.origin = vec3(0.0f, 1.0f, 1.0f);
+    camera.forward = normalize(vec3(0.0f, 0.0f, -1.0f));
+    camera.up = normalize(vec3(0.0f, 1.0f, 0.0f));
+    camera.right = normalize(vec3(1.0f, 0.0f, 0.0f));
+    
+    // Cornell Box
+    spheres[0] = vec4(0.5f, 0.5f, -0.5f, 0.5f);
+    spheres[1] = vec4(-1.0f, 1.5f, -0.5f, 0.4f);
+    planes[0] = vec4( 0.0, 0.0,1.0,2.0);    
+    planes[1] = vec4( 0.0, 1.0,0.0,0.0);    
+    planes[2] = vec4( 1.0, 0.0,0.0,2.0);
+    planes[3] = vec4( -1.0, 0.0,0.0,2.0);
+    planes[4] = vec4( 0.0, -1.0, 0.0,3.0);
+    
+    materials[0] = Material(vec3(0.0f), vec3(0.75f));    
+    materials[1] = Material(vec3(16.86, 10.76, 8.2)*1.3f, vec3(0.0f));
+    materials[2] = Material(vec3(0.0f), vec3(.7295, .7355, .729));   
+    materials[3] = Material(vec3(0.0f), vec3(.7295, .7355, .729));
+    materials[4] = Material(vec3(0.0f), vec3(.117, .4125, .115));
+    materials[5] = Material(vec3(0.0f), vec3(.611, .0555, .062));
+    materials[6] = Material(vec3(0.0f), vec3(.7295, .7355, .729));
+
+}
+
+Ray raygen(vec2 uv, inout float seed) {
+    Ray ray;
+   // uv += antiAliasingOffset(seed, viewPort.xy);
+    ray.origin = camera.origin;
+    ray.direction = normalize(((camera.origin+camera.forward) + camera.right * uv.x + camera.up *uv.y)-camera.origin);
+    
+    Payload payload;
+    payload.throughput = vec3(1.0f);
+    payload.accumulatedColor =vec3(0.0f);
+    payload.bounces = 0;
+    ray.payload = payload;
+    
+    return ray;
+}
+
+HitRecord intersectScene(Ray ray) {
+    HitRecord hit;
+    
+    int primitiveID = -1;
+    float t = 1e20;
+    vec3 normal;
+    
+    for(int i = 0; i < NUM_SPHERES; i++){
+        float it = iSphere( ray, spheres[i] );
+        if( it > EPSILON && it < t ) {
+            t = it;
+            normal = nSphere(ray.origin + ray.direction * t, spheres[i] ); 
+            primitiveID = i;
+        }
+    }
+	
+    for(int i = NUM_SPHERES; i < NUM_SPHERES+NUM_PLANES; i++){
+        float it = iPlane(ray, planes[i-NUM_SPHERES]);
+        if( it > EPSILON && it < t ) {
+            t = it;
+            normal = nPlane(ray.origin + ray.direction * t, planes[i-NUM_SPHERES] ); 
+            primitiveID = i;
+        }
+    }
+    
+    hit.point = ray.origin + ray.direction * t;
+    hit.normal = normal;
+    hit.primitiveID = primitiveID;
+    hit.didHit = primitiveID != -1;
+					  
+    return hit;					  
+}
+
+
+void closestHit(inout Ray ray, in HitRecord hit, inout float seed) {
+    
+    Material material = materials[hit.primitiveID];
+    
+   if (isEmitter(material)) {
+        ray.payload.accumulatedColor += material.emission * ray.payload.throughput;
+        ray.payload.bounces = MAX_BOUNCES;
+        return;
+    }
+    float pdf;
+    vec3 sampledDirection;
+    if(hash1(seed) > 0.5f){
+        // light sampling
+        float pdf_light, pdf_bsdf;
+        sampledDirection = sampleLight(material, hit, spheres[1], pdf_light, seed);
+        pdf_bsdf = 1.0f/(2.0f*PI);
+        pdf = 0.5*pdf_bsdf + 0.5 * pdf_light;
+    }
+    else {
+        // bsdf sampling
+        float pdf_light, pdf_bsdf;
+        sampledDirection = sampleCosineWeighted(-ray.direction, hit.normal, pdf_bsdf, seed);
+        pdf_light = getLightSamplingPDF(hit, spheres[1], sampledDirection);
+        pdf = 0.5*pdf_bsdf + 0.5 * pdf_light;
+    }
+    
+    vec3 brdf = evaluateLambertianBRDF(material, -ray.direction, hit.normal, sampledDirection); 
+    float cos_theta = max(0.0f, dot(sampledDirection, hit.normal));
+      
+    ray.payload.throughput *= (brdf * cos_theta)/pdf;
+    ray.origin = hit.point + hit.normal * EPSILON; 
+    ray.direction = sampledDirection;
+}
+
+void main() {
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = (fragCoord*2.0f)/viewPort.xy - 1.0f;
+    uv.x *= viewPort.x/viewPort.y;
+    float seed = uv.x + uv.y * 3.43121412313 + fract(1.12345314312*iTime);
+
+    initialize(); 
+    Ray ray = raygen(uv, seed);
+
+    while(ray.payload.bounces < MAX_BOUNCES){
+
+       HitRecord hit = intersectScene(ray);
+       if (!hit.didHit)
+           break;
+
+       closestHit(ray, hit, seed);
+       ray.payload.bounces += 1;
+    }
+    
+    // vec3 previousColor = texture(iChannel0, fragCoord/viewPort.xy).xyz;
+    vec3 direction = vec3(fragCoord.x / viewPort.x, fragCoord.y / viewPort.y, 0.0);
+	vec3 previousColor = texture(iChannel0, direction).xyz;
+
+    float ratio = 1.0f/(float(iFrame+1));
+    vec3 accumulatedColor = ratio * ray.payload.accumulatedColor + (1.0f-ratio)*previousColor;
+    
+    outColor.xyz = accumulatedColor;
+}
+]]>
+</program>
+</language>
+</jittershader>

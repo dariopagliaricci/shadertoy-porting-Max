@@ -1,0 +1,401 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iChannel0" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+	
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+const float HIT = 1.;
+const float MISS = 2.;
+const float inf = 9999999.;
+const float eps = 0.01;
+const float max_t = 100.;
+const float pi = 3.14159265359;
+const float degree_to_rad = pi/180.;
+const float rad_to_degree = 180./pi;
+const int matte = 1;
+const int metal = 2;
+const vec3 sky_col = vec3(4., 4, 12.);
+const vec3 fog_col = vec3(6.);
+const float fog_dist = 100.;
+const float fog_intensity = 0.2;
+
+float sde_v_1;
+float sde_v_2;
+vec3 normal;
+
+vec3 scene_col;
+float scene_diffuse;
+float scene_roughness;
+int scene_surface;
+
+//settings
+const int bounces = 4;
+const int pass_per_frame = 1;
+
+const bool ambient_light_enabled = false;
+const bool use_three_light_model = false;
+const bool use_sky_light = false;
+const bool camera_is_light = false;
+
+vec4 postprocess(vec4 og){
+    vec4 temp = og;
+    temp *= 0.8;
+    temp = temp/(temp+1.);
+    temp = 1.2*(temp-0.5)+0.5-0.05;
+    temp = pow(temp, vec4(1.6));
+    return temp;
+
+}
+
+vec3 rotate(vec3 base, float rotation, int type){
+    vec3 temp = base;
+    if(type == 2){
+        temp.x = base.x*cos(rotation) - base.z*sin(rotation);
+        temp.z = base.x*sin(rotation) + base.z*cos(rotation);
+    }else if(type == 1){
+        temp.z = base.z*cos(rotation) - base.y*sin(rotation);
+        temp.y = base.z*sin(rotation) + base.y*cos(rotation);
+    }
+    return temp;
+}
+
+struct Ray{
+    vec3 pos;
+    vec3 dir;
+    float len;
+};
+
+void object(bool update_surface, float sde, vec3 col, float diffuse, float roughness, int surface_type){
+    if(sde <= sde_v_1){
+        sde_v_1 = sde;
+        if(update_surface){
+            scene_col = col;
+            scene_diffuse = diffuse;
+            scene_roughness = roughness;
+            scene_surface = surface_type;
+        }
+    }
+}
+
+float sphere(vec3 from, vec3 pos, float radius){
+    return distance(from, pos)-radius;
+}
+
+float plane(vec3 from, vec3 normal, float offset){
+    return(dot(normalize(normal), from)-offset);
+}
+
+float box(vec3 from, vec3 pos, vec3 dimensions)
+{
+  vec3 q = abs(from-pos) - dimensions;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+
+float get_scene_distance(vec3 pos, bool colors){
+
+    sde_v_1 = inf;
+    object(colors, //sphere1
+           sphere(pos, vec3(-10., -1., 0.), 2.),
+           vec3(0.9, 0.9, 0.9), 0.9, 0.9, matte);
+    object(colors, //sphere2
+           sphere(pos, vec3(-5., -1., 0.), 2.),
+           vec3(0.9, 0.9, 0.9), 0.6, 0.6, matte);
+    object(colors, //sphere3
+           sphere(pos, vec3(0., -1., 0.), 2.),
+           vec3(0.9, 0.9, 0.9), 0.4, 0.4, matte);
+    object(colors, //sphere4
+           sphere(pos, vec3(5., -1., 0.), 2.),
+           vec3(0.9, 0.9, 0.9), 0.3, 0.3, metal);
+    object(colors, //sphere5
+           sphere(pos, vec3(10., -1., 0.), 2.),
+           vec3(0.9, 0.9, 0.9), 0.1, 0.1, metal);
+
+    object(colors, //floor
+           plane(pos, vec3(0., 1., 0.), -2.5),
+           vec3(0.9, 0.9, 0.9), 0.1, 0.05, matte);
+    object(colors, //right wall
+           plane(pos, vec3(-1., 0., 0.), -20.),
+           vec3(0.9, 0.1, 0.1), 0.9, 0.9, matte);
+    object(colors, //left wall
+           plane(pos, vec3(1., 0., 0.), -20.),
+           vec3(0.1, 0.1, 0.6), 0.9, 0.9, matte);
+    object(colors, //back wall
+           plane(pos, vec3(0., 0., -1.), -20.),
+           vec3(0.9, 0.9, 0.9), 0., 0., metal);
+    object(colors, //front wall
+           plane(pos, vec3(0., 0., 1.), -20.),
+           vec3(0.9, 0.9, 0.9), 0., 0., metal);
+    object(colors, //ceiling
+           plane(pos, vec3(0., -1., 0.), -10.),
+           vec3(0.6, 0.6, 0.6), 0.5, 0.4, matte);
+
+    return sde_v_1;
+}
+
+void get_normal(vec3 pos){
+    vec2 oz = vec2(1., 0.);
+    normal = vec3(0.);
+    normal.x += get_scene_distance(pos+eps*oz.xyy, false)-get_scene_distance(pos-eps*oz.xyy, false);
+    normal.y += get_scene_distance(pos+eps*oz.yxy, false)-get_scene_distance(pos-eps*oz.yxy, false);
+    normal.z += get_scene_distance(pos+eps*oz.yyx, false)-get_scene_distance(pos-eps*oz.yyx, false);
+    normal = normalize(normal);
+}
+
+vec3 hash31(float p)
+{
+   vec3 p3 = fract(vec3(p) * vec3(.1031, .1030, .0973));
+   p3 += dot(p3, p3.yzx+33.33);
+   vec3 temp = fract((p3.xxy+p3.yzz)*p3.zyx); 
+   return (temp-0.5)*2.;
+}
+
+float hash13(vec3 p3)
+{
+    p3  = fract(p3 * .1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec3 random_equal_vec3(vec3 seed){
+    float azimuth = hash13(seed)*360.;
+    float polar = hash13(seed*2.5+103.)*360.;
+    vec3 temp = vec3(0.);
+    temp.x = sin(polar)*cos(azimuth);
+    temp.y = sin(polar)*sin(azimuth);
+    temp.z = cos(polar);
+    return temp;
+}
+
+
+//    normalize(hash31(abs(time*50.+100.+abs(seed.x*25.)+abs(seed.y*1234.)+abs(seed.z*100.))));
+
+
+vec3 vec3_near(vec3 seed, vec3 dir, float threshold){
+    if(threshold > 0.9){
+        return dir;
+    }else{
+        float modify = 100.;
+        vec3 temp = random_equal_vec3(seed+modify*10.);
+        while(dot(temp, dir) <= threshold){
+            modify += 0.5;
+            temp = random_equal_vec3(seed+modify*10.);
+        }
+        return temp;
+    }
+}
+
+Ray ray;
+
+float sde;
+float intersect_result;
+vec2 uv;
+vec2 uv2;
+vec3 col;
+
+//camera
+vec3 camera_pos = vec3(4., 4., -15.);
+vec3 camera_rot = degree_to_rad*vec3(-10., -15., 0.);
+
+vec3 camera_transform(vec3 base){
+
+    vec3 temp = base;
+    temp = rotate(temp.xyz, camera_rot.x, 1); //rotation about x
+    temp = normalize(temp);
+    temp = rotate(temp.xyz, -camera_rot.y, 2); //rotation about y axis
+    temp = normalize(temp);
+    return temp;
+}
+
+void intersect(float max_len){
+    sde = inf;
+    //ray.pos += ray.dir*eps;
+    while(sde > eps || ray.len < max_len){
+        sde = get_scene_distance(ray.pos, false);
+        if(sde > eps && ray.len < max_len){
+            ray.pos += ray.dir*sde;
+            ray.len += sde;
+        }else{
+            intersect_result = (sde <= eps) ? HIT : MISS;
+            break;
+        }
+    }
+}
+
+vec3 apply_light(vec3 light_dir, vec3 light_col, bool ambient){
+
+    vec3 n_dir = normalize(light_dir);
+    vec3 fresnel1 = (scene_surface == matte) ? scene_col : vec3(0.5);
+    
+    vec3 half_not_illegal = normalize(n_dir-ray.dir);
+    float diffuse = max(0., dot(n_dir, normal));
+    
+    float specular = 0.;//(1.-scene_roughness)*pow(clamp(dot(n_dir,reflect(ray.dir, normal)),0.,1.),10.*(1.-scene_roughness));
+    vec3  fresnel = fresnel1 + (1.-fresnel1)*pow(clamp(1.-dot(half_not_illegal,n_dir),0.,1.),50.);
+    
+    float d = length(light_dir);
+    float shadow_strength = 1.;
+    if(diffuse >= 0. && !ambient){
+        Ray ray2 = ray;
+        ray.dir = n_dir;
+        ray.len = 0.;
+        intersect(d);
+        shadow_strength = (intersect_result == HIT) ? 0. : 1.;
+        ray = ray2;
+    }else{
+        shadow_strength = 1.;
+    }
+    vec3 back = vec3(0.);
+    
+    if(scene_surface == matte){
+        back += diffuse*scene_col*light_col;
+        back += diffuse*light_col*fresnel*(1.+specular);
+    }else if(scene_surface == metal){
+        back += diffuse*light_col*fresnel*(1.+specular);
+    }else{
+        
+    }
+    back *= shadow_strength;
+    return back;
+
+}
+
+vec3 apply_lighting(){
+
+    vec3 temp = vec3(0.);
+    float distance_to_center = hash13(cross(ray.pos, ray.dir)*2.3+iTime*500.);
+    vec3 offset = random_equal_vec3(cross(ray.pos, ray.dir)*(iTime+500.));
+    
+
+    temp += apply_light((0.75*offset+vec3(0., 9., 0.)-ray.pos), vec3(5., 5., 2.5), false); 
+    
+    if(ambient_light_enabled){
+        temp += apply_light((normalize(offset)), vec3(0.5, 0.5, 0.5), true); 
+    }
+    if(use_sky_light){
+        temp += apply_light(100.*normalize(vec3(1000., 10000., -500.)), sky_col, false); 
+    }
+    if(use_three_light_model){
+        temp += apply_light((distance_to_center*0.5*offset+vec3(-7., 9., -1.)-ray.pos), vec3(1., 1., 1.), false); 
+        temp += apply_light((distance_to_center*0.5*offset+vec3(7., 9., -1.)-ray.pos), vec3(1., 1., 1.), false); 
+    }
+    if(camera_is_light){
+        temp += apply_light((distance_to_center*0.25*offset+camera_pos-ray.pos), vec3(0.5, 0.5, 0.5), false); 
+    }
+    
+    return temp;
+}
+
+void main(){
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec3 total_color = vec3(0.);
+
+    for(int pass = 0; pass <= pass_per_frame; pass++){
+        uv = fragCoord/viewPort.xy;
+        uv2 = (uv-0.5)*2.;
+        uv2.x *= viewPort.x/viewPort.y;
+        vec2 uv3 = uv2+(hash31(iTime*1234.5).xy/(viewPort.xy-10.));
+        col = vec3(0.);
+        vec3 ray_col = vec3(1.);
+        vec3 accumulated = vec3(0.);
+        float pixel_depth = 0.;
+        
+        ray = Ray(camera_pos, normalize(vec3(uv3, 2.)), 0.);
+        ray.dir = camera_transform(ray.dir);
+        for(int i = 0; i <= bounces; i++){
+            pixel_depth = 0.;
+            intersect(max_t);
+            if(intersect_result == HIT){
+                if(true){
+                    pixel_depth += ray.len;
+                }
+                get_scene_distance(ray.pos, true);
+                get_normal(ray.pos);
+                ray.pos += normal*eps;
+                //lighting goes here??? maybe???
+                vec3 scene_color2 = scene_col;
+                scene_col *= ray_col;
+                vec3 temp_col = apply_lighting();
+                ray_col *= scene_color2;
+                accumulated += temp_col;
+                //tint *= temp_col;
+                vec3 specular_dir = reflect(ray.dir, normal);
+                vec3 diffuse_dir = vec3_near(cross(ray.pos, ray.dir)*(iTime+500.), normal, 1.-scene_diffuse);
+                ray.dir = mix(specular_dir, diffuse_dir, scene_roughness);
+                ray.len = 0.;
+            }else{
+                accumulated += sky_col*ray_col;
+                break;
+            }
+            accumulated = mix(accumulated, fog_col, pow(min(pixel_depth/fog_dist, 1.), 3.)*fog_intensity);
+
+        }
+    
+        col = accumulated/float(bounces+1);
+        total_color += col;
+    }
+
+    vec4 total = texture(iChannel0, uv);
+    total += vec4(total_color, pass_per_frame);
+    if(iTime <2.){
+        outColor = vec4(0.);
+    }else{
+        outColor = total;
+    }
+}
+]]>
+</program>
+</language>
+</jittershader>

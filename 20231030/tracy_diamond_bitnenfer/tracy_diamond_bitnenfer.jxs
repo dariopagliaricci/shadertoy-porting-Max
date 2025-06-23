@@ -1,0 +1,396 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec3 iMouse;
+
+#define MAX_DIST 100.0
+#define MIN_DIST 0.001
+#define TYPE_NONE -1.0
+#define TYPE_SPHERE 1.0
+#define TYPE_BOX 2.0
+#define TYPE_BOX2 4.0
+#define TYPE_BOX3 5.0
+#define TYPE_SUN 3.0
+#define IS_DEBUG 0
+
+vec3 kSunDir = vec3(0.8, 1.0, 0.6);
+
+struct Hit
+{
+    vec3 point;
+    vec3 normal;
+    float type;
+};
+
+vec3 hash3( vec2 p ){
+    vec3 q = vec3( dot(p,vec2(127.1,311.7)), 
+                   dot(p,vec2(269.5,183.3)), 
+                   dot(p,vec2(419.2,371.9)) );
+    return fract(sin(q)*43758.5453);
+}
+
+float seed = 0.0;
+float hash( float n )
+{
+    seed = fract(sin(n + seed)*43758.5453);
+    return seed;
+}
+
+// HG_SDF (http://mercury.sexy/hg_sdf/)
+float pModInterval1(inout float p, float size, float start, float stop) {
+    float halfsize = size*0.5;
+    float c = floor((p + halfsize)/size);
+    p = mod(p+halfsize, size) - halfsize;
+    if (c > stop) { //yes, this might not be the best thing numerically.
+        p += size*(c - stop);
+        c = stop;
+    }
+    if (c <start) {
+        p += size*(c - start);
+        c = start;
+    }
+    return c;
+}
+
+
+void Rotate(inout vec2 point, float rad)
+{
+    float c = cos(rad);
+    float s = sin(rad);
+    float px = point.x * c - point.y * s;
+    float py = point.x * s + point.y * c;
+    point.x = px;
+    point.y = py;
+}
+
+float SDFSphere(vec3 point, float radius)
+{
+    return length(point) - radius;
+}
+
+float SDFBox(vec3 point, vec3 size)
+{
+    vec3 d = abs(point) - size;
+    return length(max(d,0.0)) + min(max(d.x,max(d.y,d.z)),0.0);
+}
+
+vec2 Union(in vec2 a, in vec2 b)
+{
+    return a.x < b.x ? a : b;
+}
+
+vec2 MapSpheres(vec3 rayPoint)
+{
+    float a = SDFSphere(rayPoint + vec3(+0.3, 1.6, -1.7), 0.5);
+    float b = SDFSphere(rayPoint + vec3(-1.0, 1.3, -4.0), 0.8);
+    
+    return vec2(min(a, b), TYPE_SPHERE);
+}
+
+vec2 MapBoxes(vec3 rayPoint)
+{
+    rayPoint += vec3(0.0, 0.0, -3.0);
+    float a = SDFBox(rayPoint + vec3(0.0, 0.0, 0.0), vec3(4.2, 2.4, 7.2));
+    float b = SDFBox(rayPoint + vec3(0.0, 0.0, 0.0), vec3(3.8, 2.0, 6.5));
+    float c = SDFBox(rayPoint + vec3(-0.0, 0.4, -9.0), vec3(2.45, 0.45, 10.0)) - 0.4;
+    
+    vec3 rep = vec3(0.0, 0.0, 1.3);
+    vec3 p = mod(rayPoint, rep) - rep * 0.5;
+    float vent = SDFBox(p + vec3(0.0, -2.5, 0.0), vec3(3.1, 0.8, 0.4));
+    float scene = max(max(max(a, -b), -c), -vent);
+    float d = SDFBox(rayPoint + vec3(-5.2, 0.4, -0.0), vec3(2.45, 0.45, 3.0)) - 0.4;
+    
+    scene = max(scene, -d);
+    
+    
+    
+    return vec2(scene, TYPE_BOX);
+}
+
+vec2 MapScene(vec3 rayPoint)
+{
+    vec2 spheres = MapSpheres(rayPoint);
+    vec2 boxes = MapBoxes(rayPoint);
+    vec3 p = rayPoint + vec3(0.0, -1.0, -9.5);
+    pModInterval1(p.x, 2.0, -1.0, 1.0);
+    vec2 box2 = vec2(SDFBox(p, vec3(0.3, 0.1, 0.2)), TYPE_BOX2);
+    
+    vec3 hp = rayPoint + vec3(0.05, 1.1, -4.1);
+    Rotate(hp.xz, 3.15/2.5);
+    Rotate(hp.yz, -3.15/4.3);
+    float hex = SDFBox(hp, vec3(0.8, 1.2, 0.1)) - 0.05;
+    
+    box2 = Union(box2, vec2(hex, TYPE_BOX3));
+    
+    return Union(Union(spheres, boxes), box2);
+}
+
+vec3 GetNormal(vec3 point)
+{
+    vec2 e = vec2(0.0, 0.001);
+    return normalize(MapScene(point).x - vec3(
+        MapScene(point - e.yxx).x,
+        MapScene(point - e.xyx).x,
+        MapScene(point - e.xxy).x
+    ));
+}
+
+float RayMarch(vec3 rayOrigin, vec3 rayDirection, out Hit result)
+{
+    const int MAX_STEPS = 200;
+    float totalDistance = 0.0;
+    for (int i = 0; i < MAX_STEPS; ++i)
+    {
+        vec3 rayPoint = rayOrigin + rayDirection * totalDistance;
+        vec2 mapResult = MapScene(rayPoint);
+        if (mapResult.x < MIN_DIST) 
+        {
+            result.point = rayPoint;
+            result.normal = GetNormal(rayPoint);
+            result.type = mapResult.y;
+            return totalDistance;
+        }
+        totalDistance += mapResult.x;
+        if (totalDistance > MAX_DIST) break;
+    }
+    result.type = TYPE_NONE;
+    return MAX_DIST;
+}
+
+vec3 seed1 = vec3(0, 0, 0);
+float random()
+{
+    return fract(sin(fract(sin(dot(seed1.xy, vec2(12.98, 78.23)) * (seed1.z += 1.)) * 437.54))*73.54);
+}
+
+vec3 getSampleBiased(vec3 dir, float power) {
+    dir = normalize(dir);
+    vec3 o1 = normalize(abs(dir.x) > abs(dir.z) ? vec3(-dir.y, dir.x, 0) : vec3(0, -dir.z, dir.y));
+    vec3 o2 = normalize(cross(dir, o1));
+    vec2 r = vec2(random(), random());
+    r.x = r.x * 2. * 3.14;
+    r.y = pow(r.y, 1. / (power + 1.));
+    float oneminus = sqrt(1. - r.y * r.y);
+    return cos(r.x) * oneminus * o1 + sin(r.x) * oneminus * o2 + r.y * dir;
+}
+
+vec3 GetRandomHemisphere(float r1, float r2)
+{
+    #if 0
+    float st = sqrt(1.0 - r1 * r1);
+    float phi = 2.0 * 3.15 * r2;
+    float x = st * cos(phi);
+    float z = st * sin(phi);
+    return vec3(x, r1, z);
+    #else
+    float r = sqrt(r1);
+    float theta = 2.0 * 3.15 * r2;
+    float x = r * cos(theta);
+    float y = r * sin(theta);
+    return vec3(x, sqrt(max(0.0, 1.0 - r1)), y);
+    #endif
+}
+
+vec3 Trace(in vec3 rayOrigin, in vec3 rayDirection)
+{
+    #if IS_DEBUG
+    Hit result;
+    float dist = RayMarch(rayOrigin, rayDirection, result);
+    if (result.type != TYPE_NONE)
+    {
+        return result.normal;
+        return result.point;
+        return vec3(dist / 20.0);
+    }
+    #else
+    const int BOUNCE_COUNT = 5;
+    vec3 color = vec3(0.1);
+    float offset = 0.1;
+    vec3 l = normalize(kSunDir);
+    float a = 1.0;
+    float frame = float(iFrame);
+    float cf = cos(frame);
+    float sf = sin(frame);
+    
+    for (int bounce = 0; bounce < BOUNCE_COUNT; ++bounce)
+    {
+        Hit result = Hit(vec3(0.0), vec3(0.0), 0.0);
+        float rayDistance = RayMarch(rayOrigin, rayDirection, result);
+        float diff = dot(result.normal, l);
+        
+        if (result.type == TYPE_BOX)
+        {
+            float rx = hash(rayDirection.x + sf);
+            float ry = hash(rayDirection.x + cf);
+            vec3 rn = GetRandomHemisphere(rx, ry);
+            vec3 n = normalize(result.normal + rn * 0.8);
+            rayDirection = getSampleBiased(result.normal, 1.);//normalize(reflect(rayDirection, n));
+            rayOrigin = result.point + rayDirection * offset;
+            a *= 0.8;
+            if (diff > 0.0)
+            {
+                float dist = RayMarch(result.point + result.normal * offset, l + rn * 0.01, result);
+                if (result.type == TYPE_NONE)
+                {       
+                    color += a * vec3(1.2,1.2,1) * max(0.0, diff);
+                }
+            }
+        }
+        else if (result.type == TYPE_SPHERE)
+        {
+            rayDirection = normalize(reflect(rayDirection, result.normal));
+            rayOrigin = result.point + rayDirection * offset;
+            color += a * vec3(0.25,0,0) * max(0.2, diff);
+            a *= 0.1;
+            if (diff > 0.0)
+            {
+                float rx = hash(rayDirection.x + sf);
+                float ry = hash(rayDirection.x + cf);
+                vec3 rn = GetRandomHemisphere(rx, rx);
+                float dist = RayMarch(result.point + result.normal * offset, l + rn * 0.1, result);
+                if (result.type == TYPE_NONE)
+                {       
+                    color += a * vec3(1.8, 0.0, 0.0) * max(0.0, diff);
+                }
+            }
+        }
+        else if (result.type == TYPE_BOX3)
+        {
+            float rx = hash(rayDirection.x + sf);
+            float ry = hash(rayDirection.x + cf);
+            vec3 rn = GetRandomHemisphere(rx, rx);
+            vec3 n = normalize(result.normal + rn * 0.02);
+            rayDirection = getSampleBiased(result.normal, 1.);;
+            rayOrigin = result.point + rayDirection * offset;
+            color += a * vec3(0.3, 0.2, 0.05) * max(0.2, diff * 2.0);
+            a *= 0.5;
+            if (diff > 0.0)
+            {
+                float dist = RayMarch(result.point + result.normal * offset, l + rn * 0.1, result);
+                if (result.type == TYPE_NONE)
+                {
+                    color += a * vec3(0.8, 0.8, 0.0) * max(0.00, diff);
+                }
+            }
+        }
+        else if (result.type == TYPE_BOX2)
+        {
+            rayDirection = normalize(reflect(rayDirection, result.normal));
+            rayOrigin = result.point + rayDirection * offset;
+            color += a * (vec3(1.29, 0.71, 0.28)) * 4.0;
+            a *= 0.1;
+        }
+        else if (result.type == TYPE_NONE) 
+        {
+            color = color + a * vec3(0.35, 0.69, 0.95);
+            break;
+        }
+    }
+    
+    return color;
+    #endif
+}
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    seed1 = vec3(fragCoord.xy/viewPort.xy, mod(iTime, 10.));
+    vec3 color = vec3(0.0);
+    vec2 aspectRatio = vec2(viewPort.x / viewPort.y, 1.0);
+    vec2 uv = (fragCoord.xy / viewPort.xy - 0.5) * aspectRatio;
+    vec3 rayOrigin = vec3(0.0, 0.0, -3.2);
+    vec3 rayDirection = normalize(vec3(uv, 1.0));
+    float frame = float(iFrame);
+    float cf = cos(frame);
+    float sf = sin(frame);
+    float mx = (iMouse.x / viewPort.x * 2.0 - 1.0) * 6.28;
+    
+    Rotate(rayOrigin.xz, mx);
+    Rotate(rayDirection.xz, mx);
+    
+    #if IS_DEBUG
+    color = Trace(rayOrigin, rayDirection);
+    #else
+    vec3 rd = rayDirection;
+    float rx = hash(rayDirection.x + sf);
+    float ry = hash(rayDirection.x + cf);
+    vec3 rn = GetRandomHemisphere(rx, ry);
+    color = Trace(rayOrigin, rd);
+    color = pow(color, vec3(1.0/1.4));
+    color = mix(color, 1.0 - (color * 5.2), max(0.0, pow(length(1.0 * uv / vec2(aspectRatio)), 5.9)));   
+    // vec4 prevColor = texture(iChannel0, fragCoord.xy / viewPort.xy);
+    // float frames = 1.0 / float(iFrame + 1);
+    // if (iFrame > 1)
+    //     color.rgb = mix(prevColor.rgb, color.rgb, frames);
+    #endif
+    
+    outColor = vec4(color, 1.0);
+}
+
+
+// void main(void) {
+// 	outColor = vec4(1, 0, 0, 1);
+// }
+]]>
+</program>
+</language>
+</jittershader>

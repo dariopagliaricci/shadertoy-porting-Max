@@ -1,0 +1,993 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iFrame" type="int" default="0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+    <param name="iChannel1" type="int" default="1" />
+    <param name="iChannel2" type="int" default="2" />
+	
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+        <bind param="iChannel1" program="fp" />
+        <bind param="iChannel2" program="fp" />
+		
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0, iChannel1;
+uniform samplerCube iChannel2;
+
+///////////////////////////
+#define PI 3.14159265
+#define TAU 6.2831853
+
+
+// Microfaceted normal distribution function.
+float D_GGX(float NoH, float roughness) {
+    float alpha = pow(roughness, 4.);
+    float b = (NoH*NoH*(alpha - 1.) + 1.);
+    return alpha/(PI*b*b);
+}
+
+// Surface geometry function.
+float G1_GGX_Schlick(float NoV, float roughness) {
+    //float r = roughness; // original
+    float r = .5 + .5*roughness; // Disney remapping.
+    float k = (r*r)/2.;
+    float denom = NoV*(1. - k) + k;
+    return max(NoV, .001)/denom;
+}
+
+float G_Smith(float NoV, float NoL, float roughness) {
+    float g1_l = G1_GGX_Schlick(NoL, roughness);
+    float g1_v = G1_GGX_Schlick(NoV, roughness);
+    return g1_l*g1_v;
+}
+
+// Bidirectional Reflectance Distribution Function (BRDF). 
+//
+// If you want a quick crash course in BRDF, see the following:
+// Microfacet BRDF: Theory and Implementation of Basic PBR Materials
+// https://www.youtube.com/watch?v=gya7x9H3mV0&t=730s
+//
+vec3 BRDF(vec3 col, vec3 n, vec3 l, vec3 v, 
+          float type, float rough, float fresRef, vec3 lCol){
+     
+    vec3 h = normalize(v + l); // Half vector.
+
+    // Standard BRDF dot product calculations.
+    float nv = clamp(dot(n, v), 0., 1.);
+    float nl = clamp(dot(n, l), 0., 1.);
+    float nh = clamp(dot(n, h), 0., 1.);
+    float vh = clamp(dot(v, h), 0., 1.);  
+
+
+    // Specular microfacet (Cook- Torrance) BRDF.
+    //
+    // F0 for dielectics in range [0., .16] 
+    // Default FO is (.16 * .5^2) = .04
+    // Common Fresnel values, F(0), or F0 here.
+    // Water: .02, Plastic: .05, Glass: .08, Diamond: .17
+    // Copper: vec3(.95, .64, .54), Aluminium: vec3(.91, .92, .92), Gold: vec3(1, .71, .29),
+    // Silver: vec3(.95, .93, .88), Iron: vec3(.56, .57, .58).
+    vec3 f0 = vec3(.16*(fresRef*fresRef)); 
+    // For metals, the base color is used for F0.
+    f0 = mix(f0, col, type);
+    vec3 F = f0 + (1. - f0)*pow(1. - vh, 5.);  // Fresnel-Schlick reflected light term.
+    // Microfacet distribution... Most dominant term.
+    float D = D_GGX(nh, rough); 
+    // Geometry self shadowing term.
+    float G = G_Smith(nv, nl, rough); 
+    // Combining the terms above.
+    vec3 spec = F*D*G/(4.*max(nv, .001));
+
+
+    // Diffuse calculations.
+    vec3 diff = vec3(nl);
+    diff *= 1. - F; // If not specular, use as diffuse (optional).
+    diff *= (1. - type); // No diffuse for metals.
+
+
+    // Combining diffuse and specular.
+    // You could specify a specular color, multiply it by the base
+    // color, or multiply by a constant. It's up to you.
+    return (col*diff + lCol*spec*PI);
+  
+}
+////////////////////
+/*
+// Commutative smooth minimum function. Provided by Tomkh, and taken 
+// from Alex Evans's (aka Statix) talk: 
+// http://media.lolrus.mediamolecule.com/AlexEvans_SIGGRAPH-2015.pdf
+// Credited to Dave Smith @media molecule.
+float smin(float a, float b, float k){
+
+   float f = max(0., 1. - abs(b - a)/k);
+   return min(a, b) - k*.25*f*f;
+}
+*/
+
+// Commutative smooth maximum function. Provided by Tomkh, and taken 
+// from Alex Evans's (aka Statix) talk: 
+// http://media.lolrus.mediamolecule.com/AlexEvans_SIGGRAPH-2015.pdf
+// Credited to Dave Smith @media molecule.
+float smax(float a, float b, float k){
+    
+   float f = max(0., 1. - abs(b - a)/k);
+   return max(a, b) + k*.25*f*f;
+}
+
+/*
+
+    Polar Grid Raymarch Traversal
+    -----------------------------
+    
+    I've been enjoying posting simple 2D shaders, but I figured it was probably 
+    time to post something more technical. I enjoy coding 3D shaders, but groan at 
+    the prospect of tidying up the code for presentation.
+    
+    This is a raymarched traversal of a polar grid. The polar grid traversal code
+    was written some time ago, so I've merely combined it with raymarching code in
+    order to benefit from soft shadows, and so forth. Polar grid traversal is 
+    definitely not common, but not nonexistent -- Abje wrote one a few years ago...
+    and I'm willing to bet that he was able to do it far less time than it took 
+    me. :) The link is below, for anyone interested.
+    
+    Most traversals -- and by most, I mean, virtually all -- involve cells 
+    bordered by straight lines or planes. Polar traversals involve cells bordered
+    by the former with additional curved borders. Logistically speaking, it's not
+    much different; With a square grid, for example, you'll require four straight
+    line cell border intersections. However, an extruded polar cell traversal will 
+    involve two straight line intersections and two circular intersections -- which
+    will be pretty simple for anyone with even a rudimentary raytracing knowledge.
+    
+    Anyway, the details are below. The code runs fine, but could benefit from some
+    streamlining to speed things up -- Apologies for anyone trying to run this on
+    a slower system. The comments were rushed, but I'll tidy them up in due course. 
+    By the way, I'll post a 2D polar traversal to accompany this soon, for anyone 
+    interested.
+    
+    
+    
+    
+    Similar examples:
+    
+    // Abje codes some really interesting examples, and he seems to 
+    // code them up very quickly.
+    polar wave - abje
+    https://www.shadertoy.com/view/wsSSWR
+
+*/
+
+// Infuse some color.
+#define ADD_COLOR
+
+ 
+// Maximum ray distance.
+#define FAR  20.
+
+
+// Light type: Point: 0, Direct: 1
+#define LIGHT_TYPE 0
+
+
+// Bore out some holes.
+#define HOLES
+
+//////////////
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+
+ 
+// Tri-Planar blending function: Based on an old Nvidia writeup:
+// GPU Gems 3 - Ryan Geiss: http://http.developer.nvidia.com/GPUGems3/gpugems3_ch01.html
+vec3 tex3D(sampler2D tex, in vec3 p, in vec3 n){    
+    
+    // Ryan Geiss effectively multiplies the first line by 7. It took me a while to realize that 
+    // it's largely redundant, due to the division process that follows. I'd never noticed on 
+    // account of the fact that I'm not in the habit of questioning stuff written by Ryan Geiss. :)
+    n = max(n*n - .2, .001); // max(abs(n), 0.001), etc.
+    n /= dot(n, vec3(1)); 
+    //n /= length(n); 
+    
+    // Texure samples. One for each plane.
+    vec3 tx = texture(tex, p.yz).xyz;
+    vec3 ty = texture(tex, p.xz).xyz;
+    vec3 tz = texture(tex, p.xy).xyz;
+    
+    // Multiply each texture plane by its normal dominance factor.... or however you wish
+    // to describe it. For instance, if the normal faces up or down, the "ty" texture sample,
+    // represnting the XZ plane, will be used, which makes sense.
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear space 
+    // (squaring is a rough approximation) prior to working with them... or something like that. :)
+    // Once the final color value is gamma corrected, you should see correct looking colors.
+    return mat3(tx*tx, ty*ty, tz*tz)*n; // Equivalent to: tx*tx*n.x + ty*ty*n.y + tz*tz*n.z;
+
+}
+
+// Fabrice's fork of "Integer Hash - III" by IQ: https://shadertoy.com/view/4tXyWN
+float hash21(vec2 f){
+    // The first line relates to ensuring that icosahedron vertex identification
+    // points snap to the exact same position in order to avoid hash inaccuracies.
+    uvec2 p = floatBitsToUint(f);
+    p = 1664525U*(p>>1U^p.yx);
+    return float(1103515245U*(p.x^(p.y>>3U)))/float(0xffffffffU);
+}
+
+// IQ's "uint" based uvec3 to float hash.
+float hash31(vec3 f){
+
+    uvec3 p = floatBitsToUint(f);
+    p = 1664525U*((p >> 2U)^(p.yzx>>1U)^p.zxy);
+    uint h32 = 1103515245U*(((p.x)^(p.y>>3U))^(p.z>>6U));
+
+    uint n = h32^(h32 >> 16);
+    return float(n & uint(0x7fffffffU))/float(0x7fffffff);
+}
+
+// IQ's 2D signed box formula with some added rounding.
+float sBoxS(vec2 p, vec2 b, float sf){
+
+  p = abs(p) - b + sf;
+  return min(max(p.x, p.y), 0.) + length(max(p, 0.)) - sf;
+}
+
+// IQ's extrusion formula.
+float opExtrusion(in float sdf, in float pz, in float h, in float sf){
+ 
+    // Slight rounding. A little nicer, but slower.
+    vec2 w = vec2( sdf, abs(pz) - h) + sf;
+    return min(max(w.x, w.y), 0.) + length(max(w, 0.)) - sf;   
+     
+}
+
+
+// Height map value.
+float hm(in vec2 p){ 
+
+    // Texture height value.
+    vec3 tx = texture(iChannel1, p).xyz; tx *= tx;
+    
+    return dot(tx, vec3(.299, .587, .114));
+}
+
+// Two value sign function.
+//vec2 sign2(in vec2 p){ return vec2(p.x<0.? -1 : 1, p.y<0.? -1 : 1); }
+ 
+
+// Ray origin, ray direction, point on the line, normal. 
+float rayLine(vec2 ro, vec2 rd, vec2 p, vec2 n){
+   
+   // This it trimmed down, and can be trimmed down more. Note that 
+   // "1./dot(rd, n)" can be precalculated outside the loop. However,
+   // this isn't a GPU intensive example, so it doesn't matter here.
+   //return max(dot(p - ro, n), 0.)/max(dot(rd, n), 1e-8);
+   float dn = dot(p - ro, n)/dot(rd, n);
+   return dn<0.? 1e8 : dn;   
+
+} 
+
+
+// IQ's circle intersect function: I have my own, but IQ's functions are 
+// known to people, and tend to be more reliable. I can't remember the 
+// exact example that I referred to, but IQ's nicely presented shader,
+// here, will give you the general idea:
+//
+// Complex Intersection Points - iq
+// https://www.shadertoy.com/view/Dt3SDH
+//
+// I've substituted in a lot of comments, for anyone interested.
+float circleIntersect(in vec2 ro, in vec2 rd, in vec2 ce, float ra){
+
+    // Standard quadratic solution to the ray circle intersection.
+    // Ie. Solving the circle equation, "x*x + y*y - ra*ra = 0", where
+    // "x = (ro - ce).x + rd.x*t", and "y = (ro - ce).y + rd.y*t". 
+    // Substituting produces a quadratic that can be solved for "t". 
+    
+    vec2 oc = ro - ce; 
+    float b = dot(oc, rd);
+    vec2 qc = oc - b*rd;
+    float h = ra*ra - dot(qc, qc); // Squared discriminant: b*b - 4*a*c.
+    
+    // No real roots, so no intersection... Not on the real plane, anyway.
+    if(h<0.) return 1e8; //if(b<0. || h<0.)
+    
+    // Interpreting the results, below:
+    //
+    // Real roots, so there are, at most, two solutions -- In the rare case of 
+    // the direction ray running perpendicular to the circle normal at the hit
+    // point, there'd be two equal values (so techniqally, one solution), but 
+    // it shouldn't affect the following logic.
+    
+    // If the second (larger value) is negative, then it follows that both values 
+    // will be negative, so there'll be no intersection points.
+    
+    // If the second value is positive, but the first value is negative, then
+    // we're inside the circle, so we'll need the positive distance in front of us.
+    // Ie. The second value.
+    
+    // If both values are positive, then we're outside the circle, so we'll need the
+    // lesser distance, or the first one.
+    
+    h = sqrt(h);
+    
+    // Two real roots. Return the correct one based on the above information.
+    vec2 pI = vec2(-b - h, -b + h); 
+    
+    return pI.y<0.? 1e8 : pI.x<0.? pI.y : pI.x;
+
+}
+
+
+// Global ring rotation matrix.
+mat2 gRot;
+
+// Number of cells.
+const float rSpacing = 1./3.;
+
+
+// The polar grid.
+vec4 getGrid(inout vec2 p){
+
+    // Radial ID.
+    float iR = floor((length(p) + rSpacing/2.)/rSpacing);
+    // Number of segments per ring -- Roughly equal size chunks whilst 
+    // maintaining some radial balance.
+    float aNum = max(floor(iR*3.), 1.);//6.2831*
+    
+    //if(iR>0.) aNum = max(aNum, 2.);
+
+
+     // More mechanical rotation.
+     float angT2 = cos(32./(iR + 1.)/1. + iTime + iR);
+     angT2 = smoothstep(-.4, .4, angT2)/1.5;
+     gRot = rot2(angT2);
+     // More fluid rotation.
+     //float angT = sin(32./(iR + 1.)/1. + iTime)/4.;
+     //gRot = rot2(angT);
+     p = gRot*p;
+    
+    // Polar angle.
+    // Note: If using IDs, "mod(atan(p.y, p.x), 6.2831)" might be necessary.
+    float a = mod(atan(p.y, p.x), TAU);
+    
+
+    // Partitioning the angle into "aNum" cells.
+    float ia = mod(floor(a/TAU*aNum), aNum); // Modulo not always needed.
+    
+    // Radial ID, angular ID, angle, number of angular segments per ring.
+    return vec4(iR, ia, a, aNum);
+}
+ 
+
+
+// Global cell boundary distance variables.
+vec3 gDir; // Cell traversing direction.
+vec3 gRd; // Ray direction.
+float gCD; // Cell boundary distance.
+// ID and local XY coordinates.
+
+vec3 gP;
+vec4 gID;
+
+
+
+float map(vec3 q3) {
+
+    // Floor. Redundant here.
+    float fl = q3.y + .5;
+
+
+    //vec3 sc = GSCALE; // Scale.
+    // Local coordinates and cell ID.
+    vec2 p = q3.xz;//p4.xy;
+    vec4 d4 = getGrid(p); 
+    //vec2 id = d4.xy;
+
+    float iR = d4.x;
+    float ia = d4.y;
+    float a = d4.z;
+    float aNum = d4.w;
+    float iaF = (ia + .5)/aNum*TAU;
+
+    vec2 pO = p;
+
+
+ ////////////
+ 
+    // The minimum distance from the current position in the direction
+    // of the normalized XZ plane unit ray to the polar cell wall. There
+    // are four cell walls to check: The two straight edge sides and the
+    // the two inner and outer circular boundaries.
+    
+    // Cell radius.
+    float r = (iR + .5)*rSpacing;  
+
+    vec2 rdXZ = normalize(gRd.xz); // 2D XZ plane ray normal.
+    // Larger ring radius ray intersection.
+    float t1 = circleIntersect(q3.xz, rdXZ, vec2(0), r);
+    // Larger outer radius distance.
+    //float t1 = pI.y<0.? 1e8 : pI.x<0.? pI.y : pI.x;
+
+    // Smaller inner radius ray intersection.
+    r -= rSpacing;
+    float t2 = circleIntersect(q3.xz, rdXZ, vec2(0), r);
+    // Smaller inner radius distance.
+    //float t2 = pI.y<0.? 1e8 : pI.x<0.? pI.y : pI.x;
+
+    // Take the minimum.
+    float t = min(t1, t2);
+
+    // The edges of each segmented rings are the following:
+    // vec2 edgeLeft = r2(PI/aNum - iaF)*vec2(0, 1);
+    // vec2 edgeRight = r2(-PI/aNum - iaF)*vec2(0, 1);
+    // The inward-faceing normals to the edges are:
+    // vec2 normalLeft = normalize(edgeLeft*vec2(1, -1));
+    // vec2 normalRight = -normalize(edgeRight*vec2(1, -1));
+    //
+    // The following is just a way way to calculate the above.
+    vec2 n1 = vec2(sin(iaF - PI/aNum), -cos(-iaF + PI/aNum))/sqrt(2.);
+
+    // The rings, and as such, ring segments are rotated over time with individual 
+    // rotation matrices, (gRot) so the normals need to be rotated accordingly.
+    n1 *= gRot; // Or, "n1 = inverse(gRot)*n1;".
+
+    // The two segment edge intersections. You could combine these, to save a few
+    // calculations, but this reads better. In instances where you're traversing a
+    // nonsegmented (single) ring, these calculations aren't necessary. In this 
+    // example, the middle circle doesn't need side segment intersections, but
+    // we're doing them anyway to save on GPU nesting, branching, etc... which is
+    // not important here, but would be when traversing in 3D.
+    float t3 = rayLine(q3.xz, gRd.xz, vec2(0), n1);
+    float t4 = rayLine(q3.xz, gRd.xz, vec2(0), -rot2(TAU/aNum)*n1);
+    // The two segment edge distances.
+    t3 = t3<0.? 1e8 : t3;
+    t4 = t4<0.? 1e8 : t4;
+    
+    // Take the minimum of all distances, but only if the ring has been segmented.
+    if(d4.w>1.) t = min(t, min(t3, t4)); // Only segmented rings. Not single ones.
+    //t = max(t, 0.); 
+    
+    // Minimum boundary wall distance.
+    gCD = t + .0015;
+
+////////////
+   
+   
+    // The extruded block height. See the height map function, above.
+    const float txSc = 5.;
+    vec2 rCoord = vec2(viewPort.y/viewPort.x, 1)*
+                  iR*rSpacing*vec2(cos(iaF), sin(iaF))/txSc + .5;
+   
+    // Block height.
+    float h = hm(rCoord)*2.;
+    // Adding some subtle randomized animation to break things up a bit.
+    //h += (sin(hash21(vec2(ia, iR) + .05)*TAU + iTime)*.5 + .5)*.3;
+ 
+   
+    // Radial coordinate.
+    r = length(p); 
+    
+    // Repetition via polar coordinates. It repeats object as required, but warps 
+    // space in the process. Sometimes, this is preferable, but not in this case.
+    //p = vec2(length(p), mod(a, TAU/aNum) - TAU/aNum/2.);
+    
+    // Converting the radial centers to their positions.
+    p *= rot2(iaF);
+    // The line above is equivalent to:
+    //p = vec2(p.x*cos(ia) + p.y*sin(ia), p.y*cos(ia) - p.x*sin(ia));
+   
+  
+    
+    // Setting the radial distance.
+    // Moving the points out a bit along the radial line. If you didn't perform this,
+    // all objects would be superimposed on one another in the center.
+    p.x = mod(r - rSpacing/2., rSpacing) - rSpacing/2.; // Radial repetition.
+     
+    // The radial distance field. For continuous rings with no segments, this would
+    // be all you'd need.
+    float d2 = abs(p.x) - rSpacing/2.;
+    
+    // Rings, not including the central circle.
+    if(aNum > 1.){
+       // We only need to segment piecewise annuli, not
+       // those with a single piece running the entire
+       // circumference.
+       
+       vec2 pR = rot2(-(iaF - (PI/aNum)))*pO;
+       vec2 pR2 = rot2(-(iaF + (PI/aNum)))*pO;
+      
+        d2 = smax(d2, max(-pR.y, pR2.y), .04);
+
+    }
+    
+    // The central circle.
+    if(iR==0.){
+       // The inner circle is handled differently. Basically, we just want
+       // a regular circle with regular coordinates.
+       p = pO;
+       d2 = length(p) - rSpacing/2.;
+       
+       //p.x = mod(p.x - rSpacing/2., rSpacing) - rSpacing/2.;
+       //d = abs(length(p) - (iR)*rSpacing) - rSpacing/2.;
+    }
+    
+    // Move the distance field cell walls in a little.
+    d2 += .005;
+    
+    // Random block holes. 
+    #ifdef HOLES
+    if(hash21(rCoord)<.5) d2 = max(d2, -(d2 + rSpacing/2.4)); //if(sc.x>1./16.) 
+    #endif
+    
+    // Creating the extruded prisms.
+    float d = opExtrusion(d2, q3.y - h/2., h/2., 0.);
+    //d -= -d2*.25; 
+    d -= min(-d2, .045)*.35;// 
+    
+    // Ridges.
+    d -= (smoothstep(-.01, .01, abs(d2 + .045) - .01) - .5)*.0075;
+    //d -= abs(fract(d2/rSpacing*6.) - .5)*.005;
+    //d -= abs(fract(p.x/rSpacing*8.) - .5)*.005;
+ 
+
+    // Saving the ID and local coordinates.
+    gP = vec3(p.x, (q3.y - h), p.y)/txSc;
+    gID = vec4(d, d2, vec2(iR, iaF));
+ 
+ 
+    // Scene distance.
+    return min(fl, d);
+}
+
+// Normal function. It's not as fast as the tetrahedral calculation, but more symmetrical.
+vec3 normal(in vec3 p) {
+    
+    //return normalize(vec3(map(p + e.xyy) - map(p - e.xyy), map
+    //                      map(p + e.yxy) - map(p - e.yxy),    
+    //                      map(p + e.yyx) - map(p - e.yyx)));
+    
+    // This mess is an attempt to speed up compiler time by contriving a break... It's 
+    // based on a suggestion by IQ. I think it works, but I really couldn't say for sure.
+    float sgn = 1.;
+    vec3 e = vec3(.001, 0, 0), mp = e.zzz; // Spalmer's clever zeroing.
+    for(int i = min(iFrame, 0); i<6; i++){
+        mp.x += map(p + sgn*e)*sgn;
+        sgn = -sgn;
+        if((i&1)==1){ mp = mp.yzx; e = e.zxy; }
+    }
+    
+    return normalize(mp);
+}
+
+ 
+// Raymarching.
+float rayMarch(vec3 ro, vec3 rd) {
+    
+    // Current and overall distance.
+    float d, t = 0.; //hash31(ro + rd)*.25; Jitter.
+    vec2 dt = vec2(1e8, 0); // IQ's edge desparkle trick.
+
+
+    // Set the global ray direction varibles -- Used to calculate
+    // the cell boundary distance inside the "map" function.
+    gDir = step(0., rd) - .5; // sign(rd)*.5;
+    gRd = rd;
+
+
+    const int iter = 128;
+    int i = 0;
+     
+    for (i = 0; i < iter; i++) {
+       
+        // Scene distance.
+        d = map(ro + rd*t);
+        
+        // IQ's clever edge desparkle trick. :)
+        if (d<dt.x) { dt = vec2(d, t); } 
+
+        // Surface or far plane bailout.
+        if(d<.001 || t > FAR) {
+           break;
+        }
+        
+        // Take the minimum of the scene distance or the 
+        // nearest cell wall in the direction of the ray.
+        t += min(d*.9, gCD);
+    }
+    
+    // Minimum distance in the event that we didn't hit the surface.
+    if(i == iter - 1) { t = dt.y; }
+
+    // Scene distance.
+    return min(t, FAR);
+}
+
+float softShadow(in vec3 p, in vec3 ld, in float lDist, in float k) {
+    
+    float res = 1.;
+    float t = 0.;
+
+    // Set the global ray direction varibles -- Used to calculate
+    // the cell boundary distance inside the "map" function.
+    gDir = step(0., ld) - .5;
+    gRd = ld; 
+
+    for (int i=0; i<64; i++){
+
+        float d = map(p + ld*t);
+        res = min(res, k*d/t);
+        if (d<0. || t>lDist) break;
+
+        t += clamp(min(d*.9, gCD), .01, .25);
+    }
+    return clamp(res, 0., 1.);
+}
+
+
+// A slight variation on a function from Nimitz's hash collection, here: 
+// Quality hashes collection WebGL2 - https://www.shadertoy.com/view/Xt3cDn
+vec2 hash23(vec3 f){
+
+    uvec3 p = floatBitsToUint(f);
+    p = 1103515245U*((p >> 2U)^(p.yzx>>1U)^p.zxy);
+    uint h32 = 1103515245U*(((p.x)^(p.y>>3U))^(p.z>>6U));
+
+    uint n = h32^(h32>>16);
+
+    uvec2 rz = uvec2(n, n*48271U);
+    // Standard uvec2 to vec2 conversion with wrapping and normalizing.
+    return vec2((rz>>1)&uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+ 
+// A nice random hemispherical routine taken out of one of IQ's examples.
+// The routine itself was written by Fizzer.
+vec3 cosDir(in vec3 p, in vec3 n){
+
+    vec2 rnd = hash23(p);
+    float u = rnd.x;
+    float v = rnd.y;
+    
+    // Method 1 and 2 first generate a frame of reference to use with an arbitrary
+    // distribution, cosine in this case. Method 3 (invented by fizzer) specializes 
+    // the whole math to the cosine distribution and simplfies the result to a more 
+    // compact version that does not depend on a full frame of reference.
+
+    // Method by fizzer: http://www.amietia.com/lambertnotangent.html
+    float a = 6.2831853*v;
+    u = 2.*u - 1.;
+    return normalize(n + vec3(sqrt(1. - u*u)*vec2(cos(a), sin(a)), u));
+    
+}
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original, but I've 
+// added in exements of XT95's faux path tracing ambient occlusion from his 
+// shader, here:
+//
+// Alien cocoons - XT95.
+// https://www.shadertoy.com/view/MsdGz2
+//
+float calcAO(in vec3 p, in vec3 n){
+ 
+    float sca = 2., occ = 0.;
+    for(int i = 0; i<12; i++){
+    
+        float hr = (float(i) + 1.)*.35/12.; 
+        //float fi = float(i + 1);
+        //vec3 rnd = vec3(hash31(p + fi), hash31(p + fi + .1), hash31(p + fi + .3)) - .5;
+        //vec3 rn = normalize(n + rnd*.15);
+        vec3 rn = cosDir(p + n*hr, n); // Random half hemisphere vector.
+        float d = map(p + rn*hr);
+        
+        occ = occ + max(hr - d, 0.)*sca;
+        sca *= .7;
+    }
+    
+    return clamp(1. - occ, 0., 1.);    
+    
+}
+
+vec4 render(vec3 ro, vec3 rd, vec2 uv){
+
+    // Lights.
+    #if LIGHT_TYPE == 0
+    // Point light.
+    vec3 lp = ro + vec3(3, 1, 2);
+    #else
+    // Direct light.
+    vec3 ld = normalize(vec3(3, 1, 2));
+    float lDist = FAR;
+    #endif
+    
+    // Raymarch the scene.
+    float t = rayMarch(ro, rd);
+
+    // Saving the local cell coorinates and cell ID.
+    vec3 svP = gP;
+    vec4 svGID = gID;
+
+
+    // Initializing.
+    vec3 col = vec3(0);
+   
+    // If we've hit something, color it up.
+    if (t < FAR){
+  
+        // Position and normal.
+        vec3 p = ro + rd*t;
+        vec3 n = normal(p);
+        
+        // Light.
+        #if LIGHT_TYPE == 0
+        vec3 ld = lp - p;
+        float lDist = length(ld);
+        ld /= lDist;
+        #endif
+        
+         
+        // Shadow and ambient occlusion.
+        float shd = softShadow(p + n*.0015, ld, lDist, 8.);
+        float ao = calcAO(p, n);
+
+ 
+        // Block ID and corresponding height.
+        vec2 id = svGID.zw;
+    
+        // Object color.
+        vec3 oCol = mix(vec3(.8, .8, 1), vec3(.65, .6, .9)/1.25, hash21(id + .13))/2.;
+        #ifdef ADD_COLOR
+        if(mod(id.x + 3., 4.)>2. && svP.y>0.) 
+            oCol = .7 + .55*cos(6.2831859*hash21(id + .07)/8. + vec3(0, 1, 2)*1.25+.25);
+        else if(mod(id.x + 3., 4.)<3. && svP.y<0.) 
+            oCol = .7 + .55*cos(6.2831859*hash21(id + .07)/8. + vec3(0, 1, 2)*1.25+.25);
+        #endif 
+        
+        // Extra coloring.
+        //oCol *= vec3(1.2, 1, .8);
+        
+        
+        // Sunset effect.
+        //oCol = mix(vec3(.2, .25, .4), mix(vec3(1, .2, .2), vec3(1, .4, .1), 
+        //       smoothstep(.2, .8, uv.y + .5)), uv.y + .5);
+        
+        // Another sunset effect.
+        //oCol = mix(vec3(.1), vec3(1, .4, .1), uv.y + .5);
+       
+        // Pinkish gradient sides.
+        //oCol = mix(oCol, oCol.xzy, smoothstep(0., 1., -svP.y*5.));
+      
+        // Edges.
+        float ew = .007;
+        
+        // Face border coloring, etc.
+        if(svP.y>0.) {
+           
+           vec3 svCol = oCol;
+           oCol = mix(oCol*1.1, vec3(1), .25);
+           oCol = mix(oCol, oCol*.1, 1. - smoothstep(0., .003, svGID.y + .035));
+           oCol = mix(oCol, svCol*.9, 1. - smoothstep(0., .003, svGID.y + .035 + ew*2.5));
+           
+        }
+        
+        // Polar "map" function values.
+        // vec4(iR, ia, a, aNum)
+        vec2 pO = p.xz;
+        vec4 dm = getGrid(p.xz);
+        float iR = dm.x; // Radial.
+        float ia = dm.y; // Angular.
+        float a = dm.z;
+        float aNum = dm.w;
+        float iaF = (ia + .5)/aNum*TAU;
+
+       
+        #if 1
+        // Quick hacky face dot pattern... It needs extra work.
+        float pat = abs(mod(dm.z*dm.w*12. + PI*0., TAU)/TAU - .5)*2.;
+        float pat2 = abs(mod(svP.x/rSpacing*32. + .5, 1.) - .5)*2.;
+        pat = min(pat, pat2) - .35;
+        pat = min(pat, -(svGID.y + .121));
+        if(svP.y>0.) oCol = mix(oCol/8., oCol, 1. - smoothstep(0., .005, pat));
+        #endif
+       
+       
+        // Blue gradient tinge.
+        //oCol = mix(oCol, oCol*vec3(1, 1.5, 3), max(svP.x + svP.z, 0.)*10.);
+   
+        
+        // Apply edges.  
+        float d = abs(svGID.y - ew/2.*0.);
+        d = max(d, -svP.y + ew/2.) - ew/2.;
+        oCol = mix(oCol, oCol*.0, 1. - smoothstep(0., .003, d));
+             
+       
+         
+        // Leftover effect from another shader. Interesting... but no. :)
+        //vec2 id2 = floor(id/2.);
+        //if(mod(id2.x + id2.y, 2.)<.5) oCol = mix(oCol, oCol.zyx, .5);
+      
+        // Texture coordinates that match the animation.
+        vec2 aspect = vec2(viewPort.y/viewPort.x, 1);
+        
+        // Tri-planar texturing, rotate to tie in with the animation.
+        vec3 txP = p;
+        vec3 txN = n;
+        txP.xz = rot2(dm.z)*txP.xz;
+        txN.xz = rot2(dm.z)*txN.xz;
+        vec3 tx = tex3D(iChannel0, txP/2., txN);
+         // Subtle texture color.
+        oCol = oCol*(tx*2. + .05);
+         
+       
+         
+        // Cheap specular reflections.
+        float speR = pow(max(dot(normalize(ld - rd), n), 0.), 5.);
+        vec3 rf = reflect(rd, n); // Surface reflection.
+        vec3 rTx = texture(iChannel2, rf).zyx; rTx *= rTx;
+        oCol = oCol + oCol*speR*rTx*4.;
+        
+      
+        // I wanted to use a little more than a constant for ambient light this 
+        // time around, but without having to resort to sophisticated methods, then I
+        // remembered Blackle's example, here:
+        // Quick Lighting Tech - blackle
+        // https://www.shadertoy.com/view/ttGfz1
+        //
+        // Studio.
+        float am = pow(length(sin(n*2.)*.5 + .5)/sqrt(3.), 2.); 
+        // Outdoor.
+        //float am = length(sin(sn*2.)*.5 + .5)/sqrt(3.)*smoothstep(-1., 1., -sn.z); 
+        
+  
+
+        // Greyscale texture value -- used for varying surface roughness.
+        float gr = dot(tx, vec3(.299, .587, .114));
+ 
+        // Material type: Dielectics, with varying roughnesss and reflectance.
+        float matType = 1., roughness = gr*gr*4. + .15, reflectance = .725;
+        /*
+        if(svP.y<0.){
+           // Sides with less reflectance and more roughness.
+           reflectance = .5;
+           roughness = gr*gr*1. + .05;
+        }
+        */
+
+        // Cook-Torrance based lighting.
+        vec3 ct = BRDF(oCol, n, ld, -rd, matType, roughness, reflectance, vec3(4));
+
+        // Combining the ambient and microfaceted terms to form the final color:
+        // None of it is technically correct, but it does the job. Note the hacky 
+        // ambient shadow term. Shadows on the microfaceted metal doesn't look 
+        // right without it... If an expert out there knows of simple ways to 
+        // improve this, feel free to let me know. :)
+        col = (oCol*am*(shd*.5 + .5) + ct*(shd))*ao;
+        
+
+
+        // Light attenuation. Barely visible, but it's there
+        float rt = t/FAR;
+        col *= 1.25/(1. + rt*.2); 
+
+    }
+  
+    // Fog. Not visible, but it's there anyway.
+    col = mix(col, vec3(0), smoothstep(.0, .99, t/FAR));
+    
+    // Returning the final color for this pass... There's only one
+    // pass here, but a render function is useful when you want to
+    // bounce light around.
+    return vec4(col, t);
+  
+}
+
+
+
+
+void main() {
+ 
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Coordinates.
+    vec2 u = (fragCoord - viewPort.xy*.5)/viewPort.y;
+    
+    // Look vector and camera origin.
+    vec3 lk = vec3(0, 0, 0);
+    vec3 ro = lk + vec3(cos(iTime/4.)*.15, 3, -1.5 + sin(iTime/2.)*.075);
+  
+    // Setting up a camera using the usual process. The variable names
+    // here suggest that this lot came from one of IQ's examples.
+    vec3 ww = normalize(lk - ro);
+    vec3 uu = normalize(cross(vec3(0, 1, 0), ww ));
+    vec3 vv = cross(ww, uu);
+    const float FOV = 3.14159/2.; // Field of view.
+    vec3 rd = normalize(u.x*uu + u.y*vv + ww/FOV); // Unit direction vector.
+    
+    /*
+    // A bit of ray warping just to mix things up.
+    vec2 offs = vec2(fbm(rd.xz*12.), fbm(rd.xz*12. + .35));
+    const float oFct = .01;
+    rd.xz -= (offs - .5)*oFct; 
+    rd = normalize(rd);
+    */
+    
+    /*
+    // Mouse movement.
+    if(iMouse.z>1.){
+        rd.yz *= rot2((iMouse.y - viewPort.y*.5)/viewPort.y*3.1459);  
+        rd.xz *= rot2((iMouse.x - viewPort.x*.5)/viewPort.x*3.1459);  
+    } 
+    */
+
+    // Render... I was going to perform a couple of passes, but decided against 
+    // it. However, it's usually a good idea to have a separate render function.
+    vec4 c4 = render(ro, rd, u);
+    vec3 col = c4.xyz;
+    
+    
+    // Vignette and very rough Reinhard tone mapping.
+    col *= smoothstep(1.5, .5, length(2.*fragCoord/viewPort.xy - 1.)*.7);
+    col /= 1. + col/2.5;
+
+    
+    // Output the fragment color to the buffer.
+    outColor = vec4(max(col, 0.), c4.w);
+    
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,260 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="eye" type="vec3" state="CAMERA_POSITION" />
+	<param name="iFrame" type="int" state="FRAME" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="eye" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform samplerCube iChannel1;
+// uniform float aperture, DoFdist;
+
+#define MAX_T 20.0f
+const float c_pi = 3.14159265359f;
+const float c_twopi = 2.0f * c_pi;
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+struct searchInfo {
+	float rngState;
+};
+
+
+vec2 hash2(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+//copied from https://www.shadertoy.com/view/tsBBWW
+uint wang_hash(inout uint seed)
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+//copied from https://www.shadertoy.com/view/tsBBWW
+float RandomFloat01(inout uint state)
+{
+    return float(wang_hash(state)) / 4294967296.0;
+}
+
+//copied from https://www.shadertoy.com/view/tsBBWW
+vec3 RandomUnitVector(inout uint state)
+{
+    float z = RandomFloat01(state) * 2.0f - 1.0f;
+    float a = RandomFloat01(state) * c_twopi;
+    float r = sqrt(1.0f - z * z);
+    float x = r * cos(a);
+    float y = r * sin(a);
+    return vec3(x, y, z);
+}
+
+struct Hitinfo
+{
+    float t;
+    vec3 n;
+    vec3 albedo;
+    vec3 emissive;
+    float smoothness;
+};
+
+//Inigo's box sdf - https://iquilezles.org/articles/distfunctions/
+float sdBox( vec3 p, vec3 b )
+{
+  vec3 q = abs(p) - b;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+float map(vec3 p, inout Hitinfo i)
+{
+    vec3 q = p;
+    q.x = abs(q.x);
+    float d = length(q - vec3(.5,.25,0)) - .3;
+    if ( d < .001)
+    {
+        i.emissive = vec3(0);
+        i.albedo = vec3(.1, .1, .1);
+        i.smoothness = 1.f;
+        return d;
+    }
+    vec3 q2 = p;
+    q2.y = abs(q2.y + .2);
+    float d2 = q2.y;
+    if (d2 < .001)
+    {
+        i.emissive = vec3(0);
+        i.albedo = vec3(1.1, 1.5, 1.1);
+        i.smoothness = .3;
+        return d2;
+    }
+    
+    float wh = 10.;
+    float d3 = sdBox(p - vec3(0,20,0), vec3(wh * 2.,.1,wh));
+    
+    if (d3 < .001)
+    {
+        i.emissive = vec3(55,.3,.3);
+        i.albedo = i.emissive;
+        i.smoothness = 0.;
+        return d3;
+    }
+    
+    return min(d, min(d2,d3));
+}
+
+vec3 calcNormal(vec3 p)
+{
+    vec2 e = vec2(.001, .0);
+    Hitinfo i;
+    return normalize(
+        vec3(
+            map(p + e.xyy, i) - map(p - e.xyy, i),
+            map(p + e.yxy, i) - map(p - e.yxy, i),
+            map(p + e.yyx, i) - map(p - e.yyx, i)
+        )
+    );
+}
+
+void RayIntersect(vec3 ro, vec3 rd, inout Hitinfo info)
+{
+    for(float t = .01; t < 50.0;)
+    {
+        vec3 p = ro + rd * t;
+        float d = map(p, info);
+        if (d < .001)
+        {
+            info.t = t;
+            info.n = calcNormal(p);
+            return;
+        }
+        t += d;
+    }
+}
+
+vec3 GetRayColor(vec3 ro, vec3 rd, inout uint rngState)
+{
+    vec3 col = vec3(0);
+    vec3 throughPut = vec3(1.);
+    vec3 rayOrigin = ro;
+    vec3 rayDirection = rd;
+    for(int rb = 0; rb < 10; ++rb)
+    {
+        Hitinfo i;
+        i.t = -1.0f;
+        RayIntersect(rayOrigin, rayDirection, i);
+        if(i.t < 0.0f)
+        {
+            col += texture(iChannel1, rayDirection).rgb * throughPut * .01;   
+            break;
+        }
+        rayOrigin = rayOrigin + rayDirection * i.t + i.n * .001;
+        vec3 r1 = normalize(i.n + RandomUnitVector(rngState));
+        vec3 r2 = reflect(rayDirection, i.n);
+        rayDirection = mix(r1, r2, i.smoothness);
+        col += i.emissive * throughPut * 1000.;
+        throughPut *= i.albedo;
+    }
+    
+    return col;
+}
+
+void main()
+{
+    searchInfo search;
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    uint rngState = uint(uint(fragCoord.x) * uint(1973) + uint(fragCoord.y) * uint(9277) + uint(iFrame) * uint(26699)) | uint(1);
+    // vec2 uv = (2.0f * fragCoord.xy - viewPort.xy) / viewPort.y;
+    
+    vec2 screenPos = jit_in.uv*2 - 1;
+    float ratio = viewPort.x / viewPort.y;
+    screenPos.x *= ratio;
+    vec2 jittering = hash2(search)-0.5;
+	jittering /= viewPort;
+	screenPos += jittering*3;
+
+    vec3 camOrigin = eye;
+
+    vec3 target = vec3(0.);
+    vec3 front = normalize(target - camOrigin);
+    vec3 right = cross( vec3(0., 1., 0.), front);
+    vec3 up = cross(front, right);
+
+    vec3 pixPos = vec3(screenPos, 4);
+    vec3 rd = normalize(pixPos.x*right + pixPos.y*up + pixPos.z*front);
+    
+	vec3 ro = camOrigin;
+
+    vec3 col = GetRayColor(ro, rd, rngState);
+    col = pow(col, vec3(.4545));
+    col /= col + 1.;
+
+    // vec3 lastFrameColor = texture(iChannel0, fragCoord / viewPort.xy).rgb;
+    // col = mix(lastFrameColor, col, 1.0f / float(iFrame+1));
+    outColor = vec4(col, 1.0f);
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

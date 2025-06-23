@@ -1,0 +1,327 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="iChannel0" type="int" default="0" />
+	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="SOD_common.glsl" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform sampler2D iChannel0;
+			
+			
+			const float epsilon = 0.01;
+			const float pi = 3.14159265359;
+			const vec3 color1 = vec3(0.8, 0.8, 0.8);
+			const vec3 color2 = vec3(1.0, 0.4, 0.2);
+			const vec3 color3 = vec3(0.1, 0.1, 0.1);
+			const vec3 lightColor = vec3(0.4, 1.0, 0.5);
+			const vec3 specularColor = vec3(0.5, 1.0, 0.5) * 1.5;
+			const vec3 fogColor = vec3(0.0, 0.0, 1.0);
+
+			vec2 PipeProfil(vec2 pos, vec2 minRadius, vec2 maxRadius, vec2 minSize, vec2 maxSize, vec2 tiling)
+			{
+			    return minRadius + (clamp(abs(fract(pos * tiling)-0.5) * 2.0, minSize, maxSize) - minSize) * maxRadius;
+			}
+
+			//https://www.shadertoy.com/view/MsdBDj
+			vec4 distfunc(vec3 pos)
+			{ 
+			    pos.xy += path(pos.z, iTime);
+			    
+			    vec4 repos = opRep(pos.zzzz, vec4(4.0, 0.5, 1.0, 2.0));
+			    
+			    float incl = min(pos.y, 0.3) * 0.5;
+			    
+			    float main = -circle(pos.xy, 1.0);
+			    float box1 = -box(pos.xy, vec2(3.0, 0.5));
+			    float box2 = -box(abs(pos.xy) - vec2(0.125, 0.0), vec2(0.05, 1.115));
+			    
+			    vec2 box3Profil;
+			    box3Profil.x = -pos.y*0.7 - 0.4;
+			    box3Profil.y = clamp(abs(repos.z - 0.5), 0.2, 0.35)*0.35 + 0.05;
+			    float box3 = box(pos.xy - vec2(0.0, -1.0), box3Profil);
+			        
+			    vec2 pipesProfils = PipeProfil(pos.zz, vec2(0.125, 0.03), vec2(1.0, 0.5), vec2(0.85, 0.3), vec2(0.9, 0.35), vec2(0.5, 0.5));
+			    
+			    vec2 pipe1Pos = abs(pos.xy) - vec2(0.5, 0.8);
+			    float pipe1 = circle(pipe1Pos, pipesProfils.x);
+			    float pipe12 = circle(pipe1Pos, 0.25); 
+			    
+			    float pipe2 = circle(abs(pos.xy) - vec2(1.25, 0.2) + vec2(incl, 0.0), pipesProfils.y);
+			    
+			    float tunnelShape = max(-pipe12, max(max(main, box1), box2));
+			    
+			    vec3 cube1Pos = pos;
+			    cube1Pos.z = repos.x;
+			    cube1Pos.xy = abs(pos.xy) - vec2(1.25, 0.5);
+			    cube1Pos.x += incl;
+			    float cube1 = sdBox(cube1Pos, vec3(0.1, 0.45, 0.5));
+			        
+			    vec3 cube2Pos = pos;
+			    cube2Pos.z = repos.y;
+			    cube2Pos.x = abs(pos.x) - 2.15 + incl;
+			    float cube2 = sdBox(cube2Pos, vec3(0.45, 3.0, 0.2));
+			    
+			    vec3 cube3Pos = pos;
+			    cube3Pos.z = repos.x;
+			    cube3Pos.x = abs(pos.x) - 1.15 - incl;
+			    cube3Pos.y += 0.5;
+			    float cube3 = sdBox(cube3Pos, vec3(0.1, 0.075, 1.5));
+			    
+			    vec3 ligtsPos1 = pos;
+			    ligtsPos1.z = repos.x;
+			    ligtsPos1.x = abs(pos.x) - 1.15;
+			    ligtsPos1.x += incl;
+			    ligtsPos1.y -= 0.3;
+			    float lightsCube1 = sdBox(ligtsPos1, vec3(0.025, 0.025, 0.2));
+			    
+			    vec3 ligtsPos2 = pos;
+			    ligtsPos2.z = repos.x;
+			    ligtsPos2.y += 0.825;
+			    float lightsCube2 = sdBox(ligtsPos2, vec3(0.1, 0.01, 0.01));
+			    
+			    float lightsCubes = min(lightsCube1, lightsCube2);
+			    
+			    float mat_1 = min(min(pipe1, cube2), pipe2);
+			    float mat_2 = max(-cube3, tunnelShape);
+			    float mat_3 = min(cube1, box3);
+			    float geom = min(lightsCubes, min(mat_3, min(mat_1, mat_2)));
+			    
+				return vec4(geom, lightsCubes, mat_2, mat_3);
+			}
+
+			struct rayMarchResult
+			{
+			    float dist;
+			    float totalDist;
+			    vec3 mat;
+			    float glow;
+			};
+
+			rayMarchResult rayMarch(vec3 rayDir, vec3 cameraOrigin)
+			{
+			    rayMarchResult o;
+			    
+			    const int maxItter = 256;
+				const float maxDist = 20.0;
+			    
+			    float totalDist = 0.0;
+				vec3 pos = cameraOrigin;
+			    
+				o.dist = epsilon;
+			    o.totalDist = epsilon;
+			    o.mat = vec3(0.0);
+
+			    for(int i = 0; i < maxItter; i++)
+				{
+			        vec4 d = distfunc(pos);
+			       	o.dist = d.x;
+			        o.totalDist += d.x; 
+			        o.mat = d.yzw;
+			        o.glow += (d.x/d.y);
+			            
+					pos += d.x * rayDir;
+			        
+			        if(d.x < epsilon || totalDist > maxDist)
+					{
+						break;
+					}
+				}
+			    
+			    o.glow /= float(maxItter);
+			    
+			    return o;
+			}
+
+			float AO(vec3 pos, vec3 n)
+			{
+				vec4 res = vec4(0.0);
+			    
+				for( int i=0; i<4; i++ )
+				{
+					vec3 aopos = pos + n*0.1*float(i);
+					float d = distfunc(aopos).x;
+					res += d;
+				}
+
+				return clamp(res.w*1.5, 0.0, 1.0);   
+			}
+
+
+			//Camera Function by iq :
+			//https://www.shadertoy.com/view/Xds3zN
+			mat3 setCamera( in vec3 ro, in vec3 ta, float cr )
+			{
+				vec3 cw = normalize(ta-ro);
+				vec3 cp = vec3(sin(cr), cos(cr), 0.0);
+				vec3 cu = normalize( cross(cw,cp) );
+				vec3 cv = normalize( cross(cu,cw) );
+			    return mat3( cu, cv, cw );
+			}
+
+			//Normal and Curvature Function by Nimitz;
+			//https://www.shadertoy.com/view/Xts3WM
+			vec4 norcurv(in vec3 p)
+			{
+			    vec2 e = vec2(-epsilon, epsilon);   
+			    float t1 = distfunc(p + e.yxx).x, t2 = distfunc(p + e.xxy).x;
+			    float t3 = distfunc(p + e.xyx).x, t4 = distfunc(p + e.yyy).x;
+
+			    float curv = .25/e.y*(t1 + t2 + t3 + t4 - 4.0 * distfunc(p)).x;
+			    return vec4(normalize(e.yxx*t1 + e.xxy*t2 + e.xyx*t3 + e.yyy*t4), curv);
+			}
+
+			vec3 lighting(vec3 n, vec3 rayDir, vec3 reflectDir, vec3 pos, float specMap)
+			{
+			    pos.xy += path(pos.z, iTime);
+			    pos *= vec3(0.5, 0.25, 0.25);
+			    pos -= vec3(0.0, 0.56, 0.0);
+			    pos = (fract(pos) - 0.5) * 2.0;
+			    
+			    vec3 lightVec = -pos;
+				vec3 lightDir = normalize(lightVec);
+			    float atten = clamp(1.0 - length(lightVec), 0.0, 1.0);
+			    vec2 diff = smoothstep(vec2(-1.0, 0.0), vec2(1.0, 0.2), vec2(dot(lightDir, n))) * atten;
+			    float spec = pow(max(0.0, dot(reflectDir, lightDir)), 5.0) * atten * specMap;
+			    float rim = (1.0 - max(0.0, dot(-n, rayDir)));
+
+			    return vec3((diff.x + diff.y)/2.0, spec, rim); 
+			}
+
+			vec3 TriplanarTexture(vec3 n, vec3 pos)
+			{
+			    n = abs(n);
+			    vec3 t1 = texture(iChannel0, pos.yz).xyz * n.x;
+			    vec3 t2 = texture(iChannel0, pos.zx).xyz * n.y;
+			    vec3 t3 = texture(iChannel0, pos.xy).xyz * n.z;
+			    
+			    return t1 * n.x + t2 * n.y + t3 * n.z;
+			}
+
+			void main()
+			{
+				vec2 fragCoord = jit_in.texcoord * iResolution;
+			    vec2 uv = fragCoord.xy/iResolution.xy;
+
+			    float camX = 0.0;
+			    float camY = 0.0;
+			    float camZ = iTime*5.0;                
+			    vec3 cameraOrigin = vec3(camX, camY, camZ);
+			    
+				vec3 cameraTarget = cameraOrigin + vec3(0.0, 0.0, 5.0);
+			    cameraTarget.xy -= path(cameraTarget.z+0.5, iTime);
+			    cameraOrigin.xy -= path(cameraOrigin.z-0.5, iTime);
+			        
+				vec2 screenPos = uv * 2.0 - 1.0;
+			    
+				screenPos.x *= iResolution.x/iResolution.y;
+			    
+			    mat3 cam = setCamera(cameraOrigin, cameraTarget, cameraOrigin.x * -0.25);
+			    
+			    vec3 rayDir = cam*normalize(vec3(screenPos.xy,0.75));
+			    rayMarchResult result = rayMarch(rayDir, cameraOrigin);
+			    
+			    vec4 res;
+
+				if(result.dist < epsilon)
+			    {
+			        vec3 pos = cameraOrigin + result.totalDist * rayDir;
+			        
+			        vec4 n = norcurv(pos);
+			        float ao = AO(pos, n.xyz);
+			        vec3 r = reflect(rayDir, n.xyz);
+			        
+			        vec3 tex = smoothstep(vec3(0.2), vec3(0.9), TriplanarTexture(n.xyz, pos));
+			        
+					vec3 l = lighting(n.xyz, rayDir, r, pos, tex.x);
+			        
+			        float fog = clamp(1.0 / exp(result.totalDist * 0.15), 0.0, 1.0);
+			        fog *= smoothstep(-5.0, 0.0, pos.y);
+			        
+			        float distFromCenter = smoothstep(1.5, 0.5, length(pos.xy + path(pos.z, iTime)));
+			        
+			        vec3 mat = smoothstep(vec3(0.05), vec3(0.0), result.mat);
+			        
+			        vec2 rim = smoothstep(vec2(0.6, 0.3), vec2(0.8, 0.1), l.zz);
+			        
+			        vec3 light = l.x * distFromCenter * lightColor;
+			        vec3 specularLight = (l.y*3.0 + rim.x * 0.3 + rim.y*0.5*(1.0 - mat.z)) * distFromCenter * specularColor;
+			        
+			        vec3 alb = mix(mix(color2, color3, mat.z), color1, mat.y);
+			        alb = mix(alb, alb + tex, smoothstep(-0.1, 0.25, n.w));
+			        
+			        light *= alb;
+			        specularLight *= alb;
+			           
+			        ao = mix(ao, 1.0, l.x);
+			        
+			        alb = mix(alb * ao * 0.65, lightColor, mat.x);
+			        
+			        vec3 col = alb + light + specularLight;    
+					col += lightColor * result.glow * 25.0;
+			            
+			        res.xyz = mix(fogColor, col, fog);
+			        res.w = mat.x + result.glow * 10.0;
+			    }
+			    else
+			    {
+			        res.xyz = fogColor;
+			        res.w = 0.0;
+			    }
+			    
+				fragColor = res;
+			}
+		]]>
+		</program>
+	</language>
+</jittershader>

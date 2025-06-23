@@ -1,0 +1,513 @@
+<jittershader name="Path tracing">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iMouse" type="vec3" default="0.0 0.0 0.0" />
+	<param name="iFrame" type="int" state="FRAME" />
+	// <param name="iChannel0" type="int" default="0" />
+	<param name="envTex" type="int" default="0" />
+	
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iFrame" program="fp" />
+		// <bind param="iChannel0" program="fp" />
+		<bind param="envTex" program="fp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 iMouse;
+uniform int iFrame;
+// uniform sampler2D iChannel0;
+uniform samplerCube envTex;
+
+// Settings
+#define MAX_BOUNCES 16
+#define CAMERA_POSITION vec3(0.0, 2.0, 0.25)
+#define LENS_DISTANCE 1.0
+#define APERTURE_RADIUS 0.04
+#define FOCUS_DISTANCE 3.0
+
+// Constants
+#define TAU 6.28318530718
+#define PI 3.14159265359
+#define RHO 1.57079632679
+#define EPSILON 0.001
+
+// Structs
+struct Ray {
+    vec3 orig;
+    vec3 dir;
+};
+
+struct HitInfo {
+    bool fromInside;
+    float hitDist;
+    vec3 hitPos;
+    vec3 surfNor;
+    vec2 surfUv;
+    int objId;
+};
+
+struct Material {
+    vec3 albedo;
+    vec3 specular;
+    vec3 absorption;
+    vec3 emission;
+    float specularAmount;
+    float specularRoughness;
+    float refractionAmount;
+    float refractionRoughness;
+    float refractiveIndex;
+};
+
+// Defaults
+HitInfo noHit() {
+    HitInfo hit;
+    hit.fromInside = false;
+    hit.hitDist = -1.0;
+    hit.hitPos = vec3(0.0);
+    hit.surfNor = vec3(0.0);
+    hit.surfUv = vec2(0.0);
+    hit.objId = -1;
+    return hit;
+}
+
+Material baseMaterial() {
+    Material mtl;
+    mtl.albedo = vec3(0.0);
+    mtl.specular = vec3(0.0);
+    mtl.absorption = vec3(0.0);
+    mtl.emission = vec3(0.0);
+    mtl.specularAmount = 0.0;
+    mtl.specularRoughness = 0.0;
+    mtl.refractionAmount = 0.0;
+    mtl.refractionRoughness = 0.0;
+    mtl.refractiveIndex = 1.0;
+    return mtl;
+}
+
+// Schlick aproximation
+float getFresnel(in float n1, in float n2, in vec3 normal, in vec3 incident, in float f0, in float f90) {
+    float r0 = (n1 - n2) / (n1 + n2);
+    r0 *= r0;
+    float cosX = -dot(normal, incident);
+    if (n1 > n2) {
+        float n = n1 / n2;
+        float sinT2 = n * n * (1.0 - cosX * cosX);
+        if (sinT2 > 1.0) return f90; // Total internal reflection
+        cosX = sqrt(1.0 - sinT2);
+    }
+
+    float x = 1.0 - cosX;
+    float x2 = x * x;
+    return mix(f0, f90, mix(r0, 1.0, x2 * x2 * x));
+}
+
+// RNG utilities
+uint wangHash(inout uint seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 668265261u;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+float rand01(inout uint state) {
+    return float(wangHash(state)) / 4294967296.0;
+}
+
+vec2 randInUnitDisc(inout uint state) {
+    float a = rand01(state) * TAU;
+    return vec2(cos(a), sin(a)) * sqrt(rand01(state));
+}
+
+vec3 randUnitVec(inout uint state) {
+    float z = rand01(state) * 2.0 - 1.0;
+    float a = rand01(state) * TAU;
+    float r = sqrt(1.0 - z * z);
+    float x = r * cos(a);
+    float y = r * sin(a);
+    return vec3(x, y, z);
+}
+
+// Camera basis matrix
+mat3 getCameraBasis(in vec2 an) {
+    mat3 matrix;
+    vec2 c = cos(an), s = sin(an);
+    matrix[0] = vec3(c.x, 0.0, s.x);
+    matrix[1] = vec3(s.x * -s.y, c.y, c.x * s.y);
+    matrix[2] = vec3(s.x * c.y, s.y, -c.x * c.y);
+    return matrix;
+}
+
+// Replaces the current hit with a new one if it is closer
+void addRayHit(inout HitInfo curHit, in HitInfo newHit, in int objId) {
+    if (newHit.hitDist > 0.0 && (curHit.hitDist < 0.0 || newHit.hitDist < curHit.hitDist)) {
+        curHit = newHit;
+        curHit.objId = objId;
+    }
+}
+
+// Transformations
+mat4 Translate(in vec3 t) {
+    mat4 matrix = mat4(1.0);
+    matrix[3].xyz = t;
+    return matrix;
+}
+
+mat4 Scale(in vec3 s) {
+    mat4 matrix = mat4(1.0);
+    matrix[0][0] = s.x;
+    matrix[1][1] = s.y;
+    matrix[2][2] = s.z;
+    return matrix;
+}
+
+mat4 Rotate(in float a, in int i, in int j) {
+    mat4 matrix = mat4(1.0);
+    float co = cos(a), si = sin(a);
+    matrix[i][i] = co;
+    matrix[i][j] = si;
+    matrix[j][i] = -si;
+    matrix[j][j] = co;
+    return matrix;
+}
+
+// Primitive intersectors
+// Ray vs. Plane intersection
+HitInfo planeIsect(in Ray ray, in mat4 mat) {
+    HitInfo hit = noHit();
+    mat4 matInv = inverse(mat);
+    ray.orig = (matInv * vec4(ray.orig, 1.0)).xyz;
+    ray.dir = (matInv * vec4(ray.dir, 0.0)).xyz;
+
+    hit.hitDist = -ray.orig.y / ray.dir.y;
+    hit.hitPos = ray.orig + ray.dir * hit.hitDist;
+    hit.fromInside = ray.orig.y < 0.0;
+    hit.surfNor = transpose(matInv)[1].xyz * sign(ray.orig.y);
+    hit.surfUv = hit.hitPos.xz;
+    hit.hitPos = (mat * vec4(hit.hitPos, 1.0)).xyz;
+
+    return hit;
+}
+
+// Ray vs. Sphere intersection
+HitInfo sphereIsect(in Ray ray, in mat4 mat) {
+    HitInfo hit = noHit();
+    mat4 matInv = inverse(mat);
+    ray.orig = (matInv * vec4(ray.orig, 1.0)).xyz;
+    ray.dir = (matInv * vec4(ray.dir, 0.0)).xyz;
+
+    float a = dot(ray.dir, ray.dir);
+    float b = dot(ray.orig, ray.dir);
+    float c = dot(ray.orig, ray.orig) - 1.0;
+
+    float dis = b * b - a * c;
+    if (dis < 0.0) return hit;
+
+    hit.hitDist = (-b - sign(c) * sqrt(dis)) / a;
+    hit.hitPos = ray.orig + ray.dir * hit.hitDist;
+    hit.fromInside = c < 0.0;
+    hit.surfNor = (transpose(matInv) * vec4(hit.hitPos, 0.0)).xyz * sign(c);
+    hit.surfUv = vec2(atan(hit.hitPos.z, hit.hitPos.x), atan(hit.hitPos.y, length(hit.hitPos.xz)));
+    hit.hitPos = (mat * vec4(hit.hitPos, 1.0)).xyz;
+
+    return hit;
+}
+
+// Not so primitive intersectors
+// Ray vs. Bilinear Patch intersection
+float cross2D(in vec2 a, in vec2 b) { return a.x * b.y - a.y * b.x; }
+HitInfo patchIsect(in Ray ray, in vec3 a, in vec3 b, in vec3 c, in vec3 d, in bool solid) {
+    HitInfo hit = noHit();
+    vec2 m = ray.dir.yz / ray.dir.x;
+    vec3 p = a - b + c - d, q = d - a, r = b - a;
+    vec2 ip = p.yz - p.x * m, iq = q.yz - q.x * m, ir = r.yz - r.x * m;
+    vec2 ia = (a.yz - ray.orig.yz) - (a.x - ray.orig.x) * m;
+
+    // Reversed coefficients (solving for 1/x seems most stable)
+    float qa = cross2D(iq, ia);
+    float qb = cross2D(ip, ia) + cross2D(iq, ir);
+    float qc = cross2D(ip, ir);
+
+    float dis = qb * qb - 4.0 * qa * qc;
+    if (dis > 0.0) {
+        vec2 v = 2.0 * qa / (vec2(-1.0, 1.0) * sqrt(dis) - qb);
+        vec2 u = -(ia.x + ir.x * v) / (ip.x * v + iq.x);
+        vec2 t = (p.x * u * v + q.x * u + r.x * v + a.x - ray.orig.x) / ray.dir.x;
+
+        // Check the validity of both intersections
+        bvec2 valid = bvec2(
+            t.x > 0.0 && u.x >= 0.0 && u.x <= 1.0 && v.x >= 0.0 && v.x <= 1.0,
+            t.y > 0.0 && u.y >= 0.0 && u.y <= 1.0 && v.y >= 0.0 && v.y <= 1.0
+        );
+
+        // Choose closest intersection in the patch
+        if (valid.y && (!valid.x || t.y < t.x)) {
+            u = u.yx;
+            v = v.yx;
+            t = t.yx;
+            valid = valid.yx;
+        }
+
+        if (valid.x) {
+            hit.hitDist = t.x;
+            hit.hitPos = ray.orig + ray.dir * t.x;
+            hit.surfNor = cross(p * u.x + r, p * v.x + q);
+            float viewAngle = dot(hit.surfNor, -ray.dir);
+            hit.fromInside = solid && viewAngle < 0.0;
+            hit.surfNor *= sign(viewAngle);
+            hit.surfUv = vec2(u.x, v.x);
+        }
+    }
+
+    return hit;
+}
+
+HitInfo traceRay(in Ray ray) {
+    HitInfo hit = noHit();
+
+    addRayHit(hit, planeIsect(ray, mat4(1.0)), 1);
+    addRayHit(hit, sphereIsect(ray, Translate(vec3(0.0, 0.7, -3.0)) * Scale(vec3(0.4))), 2);
+    addRayHit(hit, sphereIsect(ray, Translate(vec3(3.5, 1.5, -5.0)) * Scale(vec3(0.75))), 3);
+
+    mat4 jellyMat = Translate(vec3(0.0, 1.5, -4.5)) * Rotate(-0.25, 2, 1) * Scale(vec3(0.75));
+    mat4 topTwist = Rotate(-1.5, 0, 2);
+    mat4 bottomTwist = Rotate(0.0, 0, 2);
+    float wiggle = 0.5;
+    vec3 v0 = (jellyMat * bottomTwist * vec4(-1.0, -1.0 + wiggle, -1.0, 1.0)).xyz;
+    vec3 v1 = (jellyMat * bottomTwist * vec4(-1.0, -1.0 - wiggle,  1.0, 1.0)).xyz;
+    vec3 v2 = (jellyMat *    topTwist * vec4(-1.0,  1.0 - wiggle, -1.0, 1.0)).xyz;
+    vec3 v3 = (jellyMat *    topTwist * vec4(-1.0,  1.0 + wiggle,  1.0, 1.0)).xyz;
+    vec3 v4 = (jellyMat * bottomTwist * vec4( 1.0, -1.0 - wiggle, -1.0, 1.0)).xyz;
+    vec3 v5 = (jellyMat * bottomTwist * vec4( 1.0, -1.0 + wiggle,  1.0, 1.0)).xyz;
+    vec3 v6 = (jellyMat *    topTwist * vec4( 1.0,  1.0 + wiggle, -1.0, 1.0)).xyz;
+    vec3 v7 = (jellyMat *    topTwist * vec4( 1.0,  1.0 - wiggle,  1.0, 1.0)).xyz;
+    addRayHit(hit, patchIsect(ray, v7, v5, v4, v6, true), 4);
+    addRayHit(hit, patchIsect(ray, v2, v0, v1, v3, true), 4);
+    addRayHit(hit, patchIsect(ray, v2, v3, v7, v6, true), 4);
+    addRayHit(hit, patchIsect(ray, v1, v0, v4, v5, true), 4);
+    addRayHit(hit, patchIsect(ray, v6, v4, v0, v2, true), 4);
+    addRayHit(hit, patchIsect(ray, v3, v1, v5, v7, true), 4);
+
+    addRayHit(hit, sphereIsect(ray, Translate(vec3(1.3, 1.5, -3.0)) * Scale(vec3(0.75))), 5);
+    addRayHit(hit, sphereIsect(ray, Translate(vec3(3.0, 1.5, -2.0)) * Scale(vec3(0.75))), 6);
+    addRayHit(hit, sphereIsect(ray, Translate(vec3(1.0, 1.2, -1.0)) * Scale(vec3(0.25))), 7);
+
+    return hit;
+}
+
+Material getMaterial(in vec2 surfUv, in int objId) {
+    Material mtl = baseMaterial();
+
+    if (objId == 1) {
+        mtl.albedo = vec3(mod(floor(surfUv.x) + floor(surfUv.y), 2.0));
+        mtl.specular = vec3(1.0, 0.4, 0.2);
+        mtl.specularAmount = 0.5;
+        mtl.specularRoughness = 0.7;
+    }
+
+    if (objId == 2) {
+        mtl.absorption = vec3(0.0, 0.0, 2.0);
+        mtl.specular = vec3(1.0);
+        mtl.specularAmount = 0.1;
+        mtl.specularRoughness = 0.3;
+        mtl.refractionAmount = 0.9;
+        mtl.refractionRoughness = 0.5;
+        mtl.refractiveIndex = 1.5;
+    }
+
+    if (objId == 3) {
+        mtl.specular = vec3(1.0);
+        mtl.absorption = vec3(1.0, 0.5, 0.0);
+        mtl.specularAmount = 0.1;
+        mtl.refractionAmount = 0.9;
+        mtl.refractiveIndex = 1.5;
+    }
+
+    if (objId == 4) {
+        surfUv *= 8.0;
+        mtl.albedo = vec3(mod(floor(surfUv.x) + floor(surfUv.y), 2.0));
+    }
+
+    if (objId == 5) {
+        mtl.albedo = vec3(0.9, 0.25, 0.25);
+        mtl.specular = vec3(0.8);
+        mtl.specularAmount = 0.02;
+    }
+
+    if (objId == 6) {
+        mtl.albedo = vec3(0.9, 0.25, 0.25);
+        mtl.specular = vec3(0.8);
+        mtl.absorption = vec3(0.0, 1.5, 3.0);
+        mtl.specularAmount = 0.02;
+        mtl.refractionAmount = 0.98;
+        mtl.refractiveIndex = 1.5;
+    }
+
+    if (objId == 7) {
+        mtl.albedo = vec3(0.0, 1.0, 0.0);
+        mtl.specular = vec3(0.0, 1.0, 0.0);
+        mtl.specularAmount = 1.0;
+        mtl.specularRoughness = 0.5;
+    }
+
+    return mtl;
+}
+
+void main() {
+    
+		vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Calculate a seed value
+    uint rngState = (uint(fragCoord.x) * 1973u + uint(fragCoord.y) * 9277u + uint(iFrame) * 26699u) | 1u;
+
+    // Read the current average sample
+    // outColor = texture(iChannel0, fragCoord / viewPort.xy);
+
+    // Reset on mouse down
+    if (iMouse.z > 0.0) outColor = vec4(0.0);
+
+    // Jitter within the pixel for antialiasing
+    fragCoord += vec2(rand01(rngState), rand01(rngState));
+    vec2 viewportCenter = 0.5 * viewPort.xy;
+    vec2 uv = (fragCoord - viewportCenter) / viewPort.y;
+
+    // Calculate a ray for the pixel
+    vec2 mouse = (iMouse.xy - viewportCenter) / viewPort.y;
+    if (iMouse.xy == vec2(0.0)) mouse = vec2(0.07, -0.04);
+    mat3 camBasis = getCameraBasis(mouse * TAU);
+
+    // Adding depth of field as a bonus
+    // Based on this lesson https://pathtracing.home.blog/depth-of-field/
+    Ray primaryRay = Ray(CAMERA_POSITION, camBasis * normalize(vec3(uv, LENS_DISTANCE)));
+    vec3 aperturePoint = camBasis * vec3(randInUnitDisc(rngState) * APERTURE_RADIUS, 0.0);
+    Ray ray = Ray(primaryRay.orig + aperturePoint, normalize(primaryRay.dir * FOCUS_DISTANCE - aperturePoint));
+
+    // Pathtrace!
+    vec3 acc = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+        HitInfo hit = traceRay(ray);
+        if (hit.hitDist < 0.0) {
+            acc += pow(texture(envTex, ray.dir).rgb, vec3(2.2)) * throughput;
+            break;
+        }
+
+        hit.surfNor = normalize(hit.surfNor);
+        Material mtl = getMaterial(hit.surfUv, hit.objId);
+
+        // If the ray hit inside, some light gets absorbed
+        if (hit.fromInside) throughput *= exp(-mtl.absorption * hit.hitDist);
+
+        // Initial chances of reflecting or refracting
+        float specularChance = mtl.specularAmount;
+        float refractionChance = mtl.refractionAmount;
+
+        if (specularChance > 0.0) {
+            // Adjust specular chance to account for the Fresnel effect
+            specularChance = getFresnel(
+                hit.fromInside ? mtl.refractiveIndex : 1.0,
+                hit.fromInside ? 1.0 : mtl.refractiveIndex,
+                ray.dir, hit.surfNor, mtl.specularAmount, 1.0
+            );
+
+            // Make sure diffuse / refraction ratio is the same
+            // Diffuse chance is implied (1 - specularChance - refractionChance)
+            float correctionRatio = (1.0 - specularChance) / (1.0 - mtl.specularAmount);
+            refractionChance *= correctionRatio;
+        }
+
+        // Choose whether to diffuse, reflect, or refract
+        float doSpecular = 0.0;
+        float doRefraction = 0.0;
+        float rayProbability = 1.0 - specularChance - refractionChance;
+        float selector = rand01(rngState);
+        if (specularChance > 0.0 && selector < specularChance) {
+            doSpecular = 1.0;
+            rayProbability = specularChance;
+        } else if (refractionChance > 0.0 && selector < specularChance + refractionChance) {
+            doRefraction = 1.0;
+            rayProbability = refractionChance;
+        }
+
+        // Step to the intersection and push off the surface a tiny bit
+        ray.orig = hit.hitPos + hit.surfNor * (doRefraction == 1.0 ? -EPSILON : EPSILON);
+
+        // Calculate a new ray direction
+        // Diffuse uses a random reflection from a cosine distribution about the normal
+        // Specular uses the perfect reflection across the normal
+        // Refraction uses the perfect refraction across the normal
+        // Squaring the roughness is just a convention to make roughness appear more linear
+        vec3 diffuseRay = normalize(hit.surfNor + randUnitVec(rngState));
+        vec3 specularRay = reflect(ray.dir, hit.surfNor);
+        specularRay = normalize(mix(specularRay, diffuseRay, mtl.specularRoughness * mtl.specularRoughness));
+        vec3 refractionRay = refract(ray.dir, hit.surfNor, hit.fromInside ? mtl.refractiveIndex : 1.0 / mtl.refractiveIndex);
+        refractionRay = normalize(mix(refractionRay, normalize(-hit.surfNor + randUnitVec(rngState)), mtl.refractionRoughness * mtl.refractionRoughness));
+        ray.dir = mix(diffuseRay, specularRay, doSpecular);
+        ray.dir = mix(ray.dir, refractionRay, doRefraction);
+
+        // Accumulate light emission from the surface
+        acc += mtl.emission * throughput;
+
+        // Update the throughput for diffuse and specular reflections only
+        if (doRefraction == 0.0) throughput *= mix(mtl.albedo, mtl.specular, doSpecular);
+
+        // Adjust the throughput to account for the actions that got discarded
+        throughput /= max(EPSILON, rayProbability);
+
+        // Russian roulette optimization
+        // Increases the chance of terminating as the throughput decreases
+        // Surviving samples get boosted to make up for the eliminated ones
+        float stopChance = max(throughput.r, max(throughput.g, throughput.b));
+        if (rand01(rngState) > stopChance) break;
+        throughput /= stopChance;
+    }
+
+    // Combine the new sample with the current average
+    outColor.w += 1.0;
+    outColor.rgb = mix(outColor.rgb, acc, 1.0 / outColor.w);
+}
+
+]]>
+	</program>
+	</language>
+</jittershader>
+

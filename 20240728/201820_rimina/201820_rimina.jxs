@@ -1,0 +1,400 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+//Simple path tracer. I used Iq's great article as a tutorial for this.
+//https://iquilezles.org/articles/simplepathtracing
+
+#define STEPS 50
+#define FAR 60.0
+#define EPSILON 0.5/viewPort.x
+#define PI 3.14159265359
+
+#define BOUNCES 3
+#define SAMPLES 10.0
+
+#define FOG_COLOR vec3(0.65, 0.7, 0.8)
+#define SUN_COLOR vec3(0.8, 0.75, 0.7)
+
+//Hash method from https://www.shadertoy.com/view/4djSRW
+//#define HASHSCALE3 vec3(.1031, .1030, .0973)
+#define HASHSCALE3 vec3(443.897, 441.423, 437.195)
+
+vec2 hash23(vec3 p3){
+	p3 = fract(p3 * HASHSCALE3);
+    p3 += dot(p3, p3.yzx+19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+vec2 hash21(float p){
+	vec3 p3 = fract(vec3(p) * HASHSCALE3);
+	p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+//from http://amietia.com/lambertnotangent.html
+vec3 lambertNoTangent(vec3 normal, vec2 uv){
+   float theta = 6.283185 * uv.x;
+   uv.y = 2.0 * uv.y - 1.0;
+   vec3 spherePoint = vec3(sqrt(1.0 - uv.y * uv.y) * vec2(cos(theta), sin(theta)), uv.y);
+   return normalize(normal + spherePoint);
+}
+
+//Distance functions from Mercury's SDF library
+//http://mercury.sexy/hg_sdf/
+
+// Maximum/minumum elements of a vector
+float vmax3(vec3 v) {
+	return max(max(v.x, v.y), v.z);
+}
+
+float fSphere(vec3 p, float r) {
+	return length(p) - r;
+}
+
+// Plane with normal n (n is normalized) at some distance from the origin
+float fPlane(vec3 p, vec3 n, float distanceFromOrigin) {
+	return dot(p, n) + distanceFromOrigin;
+}
+
+// Cheap Box: distance to corners is overestimated
+float fBoxCheap(vec3 p, vec3 b) { //cheap box
+	return vmax3(abs(p) - b);
+}
+
+// Box: correct distance to corners
+float fBox(vec3 p, vec3 b) {
+	vec3 d = abs(p) - b;
+	return length(max(d, vec3(0))) + vmax3(min(d, vec3(0)));
+}
+
+// Repeat space along one axis. Use like this to repeat along the x axis:
+// <float cell = pMod1(p.x,5);> - using the return value is optional.
+float pMod1(inout float p, float size) {
+	float halfsize = size*0.5;
+	float c = floor((p + halfsize)/size);
+	p = mod(p + halfsize, size) - halfsize;
+	return c;
+}
+
+// Repeat in two dimensions
+vec2 pMod2(inout vec2 p, vec2 size) {
+	vec2 c = floor((p + size*0.5)/size);
+	p = mod(p + size*0.5,size) - size*0.5;
+	return c;
+}
+
+// Repeat around the origin by a fixed angle.
+// For easier use, num of repetitions is use to specify the angle.
+float pModPolar(inout vec2 p, float repetitions) {
+	float angle = 2.0*PI/repetitions;
+	float a = atan(p.y, p.x) + angle/2.0;
+	float r = length(p);
+	float c = floor(a/angle);
+	a = mod(a,angle) - angle/2.0;
+	p = vec2(cos(a), sin(a))*r;
+	// For an odd number of repetitions, fix cell index of the cell in -x direction
+	// (cell index would be e.g. -5 and 5 in the two halves of the cell):
+	if (abs(c) >= (repetitions/2.0)) c = abs(c);
+	return c;
+}
+
+// Rotate around a coordinate axis (i.e. in a plane perpendicular to that axis) by angle <a>.
+// Read like this: R(p.xz, a) rotates "x towards z".
+// This is fast if <a> is a compile-time constant and slower (but still practical) if not.
+void pR(inout vec2 p, float a){
+	p = cos(a)*p + sin(a)*vec2(p.y, -p.x);
+}
+
+// Shortcut for 45-degrees rotation
+void pR45(inout vec2 p) {
+	p = (p + vec2(p.y, -p.x))*sqrt(0.5);
+}
+
+// The "Columns" flavour makes n-1 circular columns at a 45 degree angle:
+float fOpUnionColumns(float a, float b, float r, float n) {
+	if ((a < r) && (b < r)) {
+		vec2 p = vec2(a, b);
+		float columnradius = r*sqrt(2.0)/((n-1.0)*2.0+sqrt(2.0));
+		pR45(p);
+		p.x -= sqrt(2.0)/2.0*r;
+		p.x += columnradius*sqrt(2.0);
+		if (mod(n,2.0) == 1.0) {
+			p.y += columnradius;
+		}
+		// At this point, we have turned 45 degrees and moved at a point on the
+		// diagonal that we want to place the columns on.
+		// Now, repeat the domain along this direction and place a circle.
+		pMod1(p.y, columnradius*2.0);
+		float result = length(p) - columnradius;
+		result = min(result, p.x);
+		result = min(result, a);
+		return min(result, b);
+	} else {
+		return min(a, b);
+	}
+}
+
+// first object gets a v-shaped engraving where it intersect the second
+float fOpEngrave(float a, float b, float r) {
+	return max(a, (a + r - abs(b))*sqrt(0.5));
+}
+
+
+vec2 dist(vec3 p){
+    float flr = fPlane(p, vec3(0.0, 1.0, 0.0), 2.0);
+    float ball = fSphere(p-vec3(0.0, 2.0, 0.0), 1.5);
+    
+    vec3 disp = vec3(20.0, 0.0, 0.0);
+    vec3 pp = p;
+    
+    float index = pModPolar(pp.xz, disp.x);
+    pp -= disp;
+    pMod2(pp.xz, vec2(5.0, 4.0));
+    float box = fBox(pp, vec3(1.0, 1.5, 1.0));
+    float sphere = fSphere(pp-vec3(0.0, 1.0, 0.0), 1.0);
+    
+    float field = fOpEngrave(box, sphere, 0.5);
+    
+    float scene = fOpUnionColumns(flr, fOpUnionColumns(field, ball, 0.5, 3.0), 1.0, 4.0);
+    
+    float id = 0.0;
+    if(ball < flr && ball < field || 
+      sphere < flr && sphere < ball && sphere < box){
+        id = 1.0;
+    }
+    else if(flr < ball && flr < field){
+        id = 2.0;
+    }
+    
+    return vec2(scene, id);
+}
+
+vec3 normals(vec3 p){
+    vec3 eps = vec3(EPSILON, 0.0, 0.0);
+    return normalize(vec3(
+        dist(p+eps.xyy).x-dist(p-eps.xyy).x,
+        dist(p+eps.yxy).x-dist(p-eps.yxy).x,
+        dist(p+eps.yyx).x-dist(p-eps.yyx).x
+    ));
+}
+
+//Enhanced sphere tracing algorithm introduced by Mercury
+
+// Sign function that doesn't return 0
+float sgn(float x) {
+	return (x < 0.0)?-1.0:1.0;
+}
+
+vec2 march(vec3 ro, vec3 rd){
+    float t = 0.001;//EPSILON;
+    float step = 0.0;
+
+    float omega = 1.3;//muista testata eri arvoilla! [1,2]
+    float prev_radius = 0.0;
+
+    float candidate_t = t;
+    float candidate_error = 1000.0;
+    float sg = sgn(dist(ro).x);
+
+    vec3 p = vec3(0.0);
+
+	for(int i = 0; i < STEPS; ++i){
+		p = rd*t+ro;
+		float sg_radius = sg*dist(p).x;
+		float radius = abs(sg_radius);
+		step = sg_radius;
+		bool fail = omega > 1. && (radius+prev_radius) < step;
+		if(fail){
+			step -= omega * step;
+			omega = 1.;
+		}
+		else{
+			step = sg_radius*omega;
+		}
+		prev_radius = radius;
+		float error = radius/t;
+
+		if(!fail && error < candidate_error){
+			candidate_t = t;
+			candidate_error = error;
+		}
+
+		if(!fail && error < EPSILON || t > FAR){
+			break;
+		}
+		t += step;
+	}
+    //discontinuity reduction
+    float er = candidate_error;
+    for(int j = 0; j < 6; ++j){
+        float radius = abs(sg*dist(p).x);
+        p += rd*(radius-er);
+        t = length(p-ro);
+        er = radius/t;
+
+        if(er < candidate_error){
+            candidate_t = t;
+            candidate_error = er;
+        }
+    }
+	if(t <= FAR || candidate_error <= EPSILON){
+		t = candidate_t;
+	}
+    
+    p = ro+rd*t;
+    float id = dist(p).y;
+    
+	return vec2(t, id);
+}
+
+vec3 light(vec3 p, vec3 rd, vec3 ld){
+    vec3 n = normals(p);
+    float lambertian = max(dot(n, ld), 0.0);
+    
+    return SUN_COLOR+lambertian*FOG_COLOR;
+}
+
+vec3 color(float obj){
+    vec3 base = vec3(0.0);
+    if(obj == 0.0){
+        base = vec3(0.45, 0.45, 0.42);
+    }
+    else if(obj == 1.0){
+        base = vec3(0.75, 0.65, 0.55);
+    }
+    else if(obj == 2.0){
+        base = vec3(0.4, 0.4, 0.45);
+    }
+    return base;
+}
+
+
+vec3 render(vec3 o, vec3 d, vec3 rt, vec2 uv){
+    vec3 ro = o;
+    vec3 rd = d;
+    vec3 ld = (rt-ro)/distance(ro, rt);
+    vec3 ld2 = (rt-vec3(0.0, -2.0, 6.0))/distance(vec3(0.0, -2.0, 6.0), rt);
+    
+    vec3 tcol = vec3(0.0);
+    vec3 fcol = vec3(1.0);
+    
+    for(int i = 0; i < BOUNCES; ++i){
+        vec2 t = march(ro, rd);
+        vec3 p = ro+rd*t.x;
+        if(t.y < 0.0 || t.x > FAR){
+            fcol = FOG_COLOR;
+            tcol += fcol;
+            break;
+        }
+        vec3 scol = color(t.y);
+        vec3 dcol = light(p, rd, ld);
+        dcol += light(p, rd, ld2);
+        dcol *=0.5;
+        fcol *= scol;
+        tcol += fcol * dcol;
+        
+        vec3 n = normals(p);
+        
+        ro = p+(n*0.2);
+        rd = lambertNoTangent(n, hash23(vec3(uv, float(i)+iTime*0.01)));
+        
+        
+    }
+    
+    return tcol;
+}
+
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = fragCoord.xy / viewPort.xy;
+    vec2 q = -1.0+2.0*uv;
+    q.x *= viewPort.x/viewPort.y;
+    
+    //vec3 ro = vec3(5.0*sin(iTime*0.5), 2.0, 5.0*cos(iTime*0.5));
+    //vec3 rt = vec3(0.0, 0.5, 0.0);
+    
+    vec3 ro = vec3(10.0*cos(iTime*0.1), 3.5+sin(iTime*0.05), 12.0*sin(iTime*0.1));
+    vec3 rt = vec3(0.0, 2.5, 0.0);
+    
+    vec3 z = normalize(rt-ro);
+    vec3 x = normalize(cross(z, vec3(0.0, 1.0, 0.0)));
+    vec3 y = normalize(cross(x, z));
+    //vec3 rd = normalize(mat3(x, y, z)*vec3(q, radians(90.0)));
+    
+    vec3 color = vec3(0.0);//render(ro, rd, rt);
+    
+    
+    for(float i = 0.0; i < SAMPLES; ++i){
+    	vec3 rd = normalize(mat3(x, y, z)*vec3(q, radians(90.0)));
+    	color += render(ro, rd, rt, uv);
+    }
+    color /= SAMPLES;
+    
+    //color = smoothstep(0.0, 1.1, color);
+    
+     //Vigenting
+    float vigentOffset = 0.005;
+    float darkness = 0.4;
+	float dist = distance(uv, vec2( 0.5 ));
+	color *= smoothstep(0.8, vigentOffset * 0.799, dist *( darkness + vigentOffset ));
+    
+    color = pow(color, 1.0/vec3(1.7));
+	outColor = vec4(color, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

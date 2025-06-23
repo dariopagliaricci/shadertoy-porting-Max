@@ -1,0 +1,1476 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+    <param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+    <param name="iChannel1" type="int" default="1" />
+    <param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+        <bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+        <bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+	
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform samplerCube iChannel2;
+
+
+/*
+
+    Cube Animation
+    --------------
+    
+    As the title says, this is a cube animation. :) This is not a Blender 
+    quality rendering by any stretch of the imagination, but it does at least 
+    convey that feel. I probably wouldn't recommend the realtime pixelshader 
+    environment for producing these kinds of animations, but I wanted to show 
+    that it was possible.
+    
+    The code in this particular example looks a little overblown, partly due to
+    the amount of "define" options I included. However, most of it is just an 
+    application of a series of rudimentary tasks. At its core, this is a bunch
+    of grid cells containing some decorated cubes that follow an animated 
+    pattern sequence. The flat shaded non-textured version with no compiler 
+    options is much, much shorter. In fact, I might post that later.
+    
+    Rolling a cube along a floor in a straight line is a simple enough exercise. 
+    If you're comfortable with 3D rotations about pivot points and keyframing, 
+    then rolling it through four quadrants of a square floor cell requires just 
+    a little more effort. Starting from random quadrants and direction changes 
+    add some extra code but is also easy... Then there's texturing; That last 
+    bit can take your nice neat code and turn it into a difficult-to-follow mess. :)
+
+    
+    
+
+    Similar examples:
+   
+    // There are not a lot of rolling textured dice examples on Shadertoy, 
+    // but here's one. 
+    Dice Leaping - Dr2
+    https://www.shadertoy.com/view/3st3WS
+    
+    // Byt3_m3chanic puts together a lot of interesting examples.
+    Dice Game | Die Die Die - byt3_m3chanic
+    https://www.shadertoy.com/view/Nl23Rw
+    
+    // A die following a 3D path. Needs an overhaul. :)
+    Marching Die - Shane
+    https://www.shadertoy.com/view/3sVBDd
+ 
+
+*/
+
+
+// Max ray distance.
+#define FAR 20.
+
+////// Variable Defines /////
+
+// Scene color - White: 0, Primary Colors: 1, Green: 2, Pink and Purple: 3.
+#define COLOR 1
+
+// Cube pattern curve type.
+// Circle: 0, Square: 1, Diamond: 2, Octagon: 3, Dodecahedron: 4.
+#define CTYPE 3
+
+// Floor pattern curve type.
+// Circle: 0, Square: 1, Diamond: 2, Octagon: 3, Dodecahedron: 4.
+#define CTYPE2 3
+
+
+// Pattern Offset: Zero or One. Other numbers won't work.
+#define OFFS 0. // Only "0." or "1." will work.
+
+// Reverse the pattern.
+//#define REVERSE
+
+// Subdide the square cells, or not.
+#define SUBDIV
+
+// Surface displacement: No displacement, resulting in flat surfaces, bump mapping, 
+// which is cheaper, but not quite as effective as the real thing, or distance
+// based displacement, which is more expensive but more convincing. 
+//
+// The default settings are a compromise. I've displaced the cube the expensive
+// way, and the floor the cheap way, since there wasn't a discernible difference.
+//
+// No displacement: 0, Bump map: 1, Distance map: 2
+#define SURF_DISP_CUBE 2
+#define SURF_DISP_FLOOR 1
+
+// Global scene object scale. Kind of redundant here, considering the
+// eventual scale I chose... All that extra work for nothing. :)
+#define GSCALE 1.
+
+/////////////////////
+
+
+// Scene object ID to separate the mesh object from the terrain.
+float svObjID, objID;
+
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+
+
+ 
+// Fabrice's fork of "Integer Hash - III" by IQ: https://shadertoy.com/view/4tXyWN
+float hash21(vec2 f){
+
+    // The first line relates to ensuring that icosahedron vertex identification
+    // points snap to the exact same position in order to avoid hash inaccuracies.
+    uvec2 p = floatBitsToUint(f);
+    p = 1664525U*(p>>1U^p.yx);
+    return float(1103515245U*(p.x^(p.y>>3U)))/float(0xffffffffU);
+}
+
+// IQ's "uint" based uvec3 to float hash.
+float hash31(vec3 f){
+
+    uvec3 p = floatBitsToUint(f);
+    p = 1103515245U*((p >> 2U)^(p.yzx>>1U)^p.zxy);
+    uint h32 = 1103515245U*(((p.x)^(p.y>>3U))^(p.z>>6U));
+
+    uint n = h32^(h32 >> 16);
+    return float(n & uint(0x7fffffffU))/float(0x7fffffff);
+    
+}
+
+
+// Tri-Planar blending function: Based on an old Nvidia writeup:
+// GPU Gems 3 - Ryan Geiss: http://http.developer.nvidia.com/GPUGems3/gpugems3_ch01.html
+vec3 tex3D(sampler2D tex, in vec3 p, in vec3 n){    
+    
+    // Ryan Geiss effectively multiplies the first line by 7. It took me a while to realize that 
+    // it's largely redundant, due to the division process that follows. I'd never noticed on 
+    // account of the fact that I'm not in the habit of questioning stuff written by Ryan Geiss. :)
+    n = max(n*n - .2, .001); // max(abs(n), 0.001), etc.
+    n /= dot(n, vec3(1)); 
+    //n /= length(n); 
+    
+    // Texure samples. One for each plane.
+    vec3 tx = texture(tex, p.yz).xyz;
+    vec3 ty = texture(tex, p.zx).xyz;
+    vec3 tz = texture(tex, p.xy).xyz;
+    
+    // Multiply each texture plane by its normal dominance factor.... or however you wish
+    // to describe it. For instance, if the normal faces up or down, the "ty" texture sample,
+    // represnting the XZ plane, will be used, which makes sense.
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear space 
+    // (squaring is a rough approximation) prior to working with them... or something like that. :)
+    // Once the final color value is gamma corrected, you should see correct looking colors.
+    return mat3(tx*tx, ty*ty, tz*tz)*n; // Equivalent to: tx*tx*n.x + ty*ty*n.y + tz*tz*n.z;
+
+}
+
+
+// Cube face texturing -- Hacked together quickly, but it'll work.
+vec3 texCube(sampler2D iCh, in vec3 p, in vec3 n){
+
+    
+    // Use the normal to determine the face. Z facing normals 
+    // imply the XY plane, etc.
+    n = abs(n);
+    p.xy = n.x>.5? p.yz : n.y>.5? p.xz : p.xy; 
+    
+    // Reusing "p" for the color read.
+    p = texture(iCh, p.xy).xyz;
+ 
+    // Rough conversion from sRGB to linear.
+    return p*p;
+
+}
+
+
+
+// Texture sample.
+//
+vec3 getTex(sampler2D iCh, vec2 p){
+    
+    // Strething things out so that the image fills up the window. You don't need to,
+    // but this looks better. I think the original video is in the oldschool 4 to 3
+    // format, whereas the canvas is along the order of 16 to 9, which we're used to.
+    // If using repeat textures, you'd comment the first line out.
+    //p *= vec2(iResolution.y/iResolution.x, 1);
+    vec3 tx = texture(iCh, p/8.).xyz;
+    return tx*tx; // Rough sRGB to linear conversion.
+}
+
+// Height map value, which is just the pixel's greyscale value.
+float hm(in vec2 p, in vec3 sc){ 
+    return sc.z/2.;
+    //return dot(getTex(iChannel0, p), vec3(.299, .587, .114)); 
+}
+
+
+//////////
+// Cube mapping - Adapted from one of Fizzer's routines. 
+vec4 cubeMap(vec3 p){
+
+    // Elegant cubic space stepping trick, as seen in many voxel related examples.
+    vec3 f = abs(p); f = step(f.zxy, f)*step(f.yzx, f); 
+
+    /*
+    vec3 idF = step(0., p)*2. - 1.;
+    vec3 faceID = (idF + 1.)/2. + vec3(0, 2, 4);
+    */    
+    
+    // Integer version.
+    ivec3 idF = ivec3(step(0., p))*2 - 1;
+    ivec3 faceID = (idF + 1)/2 + ivec3(0, 2, 4);
+    
+    
+    return f.x>.5? vec4(p.yz/p.x, idF.x, faceID.x) : 
+           f.y>.5? vec4(p.xz/p.y, idF.y, faceID.y) : vec4(p.xy/p.z, idF.z, faceID.z); 
+}
+
+float dist(vec2 p, int type){
+
+    
+    if(type == 0) return length(p); // Circle.
+
+    p = abs(p);
+    if(type == 1) return max(p.x, p.y); // Square.
+    if(type == 2) return abs(p.x + p.y)*.7071; // Diamond.
+    if(type == 3) return max(max(p.x, p.y), abs(p.x + p.y)*.7071); // Octagon.
+    if(type == 4){    
+        // Dodecahedron.
+        vec2 p2 = p*.8660254 + p.yx*.5;
+        p = vec2(max(p2.x, p2.y), max(p.y, p.x));
+        return max(p.x, p.y);
+    }
+}
+
+// lev: Cube level. A value of 1 means its been subdivided.
+float getPat(vec2 p, vec2 sc, vec2 id, float fID, int type, int sm){
+   
+   //p *= 2.;
+   
+   //p *= GSCALE;  
+   
+ 
+   sc *= 2.;
+   //if(sm==0) sc /=2.;
+   
+   vec2 oID = floor(p/(sc/2.));
+   
+    
+   id = id + floor(p/(sc/2.))/2.;
+   p = mod(p, sc/2.) - sc/4.;
+   sc/=2.; 
+   
+  
+   
+   id += fID/12.;
+    
+  
+   float rnd = hash21(id + .06);
+   if(rnd<.5) p = rot2(3.14159/2.)*p;
+
+   float tF = type == 2? .7071 : 1.;
+   float d = dist(p - sc/2., type) - sc.x/2.*tF;
+   d = min(d, dist(p + sc/2., type) - sc.x/2.*tF);
+   
+   //float d = abs(p.x + p.y)*.7071;
+   //float d = length(p - (vec2(hash21(id + .1), hash21(id + .2)) - .5)*sc/4.);
+   
+   if(mod(oID.x + oID.y, 2.)<.5) d = -d;
+   if(rnd<.5) d = -d;
+
+   
+   // Extra pattern flipping for the small cubes. The large has four Truchet
+   // blocks per face, so doesn't need this.
+   if(sm==1) if(mod(fID, 2.)==1.) d = -d;
+
+   return d;
+
+}
+/////////////////
+
+
+
+// IQ's 3D signed box formula: I tried saving calculations by using the unsigned one, and
+// couldn't figure out why the edges and a few other things weren't working. It was because
+// functions that rely on signs require signed distance fields... Who would have guessed? :D
+float sBoxS(vec3 p, vec3 b, float sf){
+
+  p = abs(p) - b + sf;
+  return min(max(p.x, max(p.y, p.z)), 0.) + length(max(p, 0.)) - sf;
+}
+
+
+
+// Subdivided rectangle grid.
+vec4 getGrid(vec2 p, inout vec2 sc){
+    
+    // Block offsets.
+    vec2 ipOffs = vec2(0);
+    // Row or column offset. Values like "1/3" would offset more
+    // haphazardly, but I wanted to maintain a little symmetry.
+    /*
+    const float offDst = .25; 
+    if(mod(floor(p.y/sc.y), 2.)<.5){
+        p.x -= sc.x*offDst; // Row offset.
+        ipOffs.x += offDst;
+    }
+    */
+    /*
+    if(mod(floor(p.x/sc.x), 2.)<.5){
+        p.y -= sc.y*offDst; // Column offset.
+        ipOffs.y += offDst;
+    }
+    /*
+    float ii = floor(p.y/sc.y);
+    float offDst = mod(ii, 4.)/4.; 
+    p.x -= sc.x*offDst; // Row offset.
+    ipOffs.x += offDst;
+    */
+    
+         
+    // Current block ID.
+    vec2 ip = floor(p/sc) + .5;
+    
+    #ifdef SUBDIV
+    // Random subdivision.
+    if(hash21(ip + .253)<.333){
+       sc /= 2.;
+       ip = floor(p/sc) + .5; 
+    }
+    #endif
+    
+    // Local coordinates and cell ID.
+    return vec4(p - ip*sc, (ip + ipOffs)*sc);
+
+}
+
+// Global cell boundary distance variables.
+vec3 gDir; // Cell traversing direction.
+vec3 gRd; // Ray direction.
+float gCD; // Cell boundary distance.
+// Box dimension and local XY coordinates.
+vec3 svSc, gSc; 
+vec3 svP, gP;
+
+
+
+// Global overall position matrix.
+mat3 svM3, m3;
+
+// Total running time, tmID, and time segment.
+float tmTotal, tmID, tmSeg;
+
+mat3 aM3[12];
+
+// Quater rotation matrices around the X and Y axes.
+const float ca = cos(3.14159/2.), sa = sin(3.14159/2.);
+const mat3 mRYZ = mat3(1, 0, 0, 0, ca, sa, 0, -sa, ca);
+const mat3 mRXZ = mat3(ca, 0, sa, 0, 1, 0, -sa, 0, ca);   
+const mat3 mRYZN = mat3(1, 0, 0, 0, ca, -sa, 0, sa, ca);
+const mat3 mRXZN = mat3(ca, 0, -sa, 0, 1, 0, sa, 0, ca); 
+
+
+void posMat(){
+    
+    // Indentity matrix;
+    m3 = mat3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+
+    // All 12 starting position matrices. If you were looping from
+    // last position to first, you'd need the inverse matrices:
+    // "m3 *= inverse(A), or m3 = m3*A".
+    for(int i=0; i<=11; i++){
+          
+        int iM4 = i&3;
+        if(iM4==3) m3 *= mRXZ;
+        else if(iM4==2) m3 *= mRYZ;
+        else if(iM4==1) m3 *= mRXZN;
+        else if(iM4==0) m3 *= mRYZN;
+        
+        aM3[i] = m3;
+    } 
+}
+
+
+
+ 
+// An extruded subdivided rectangular block grid. Use the grid cell's 
+// center pixel to obtain a height value (read in from a height map), 
+// then render a pylon at that height.
+
+vec4 blocks(vec3 q3){
+    
+ 
+    // Local coordinates.
+    vec2 p = q3.xy;
+
+
+    vec3 sc = vec3(GSCALE); // Scale.
+    // Local coordinates and cell ID.
+    vec4 p4 = getGrid(p, sc.xy); 
+    p = p4.xy;
+    vec2 id = p4.zw;
+    
+    sc.z = sc.y;
+
+
+    // The distance from the current ray position to the cell boundary
+    // wall in the direction of the unit direction ray. This is different
+    // to the minimum wall distance, so you need to trace out instead
+    // of merely doing a box calculation. Anyway, the following are pretty 
+    // standard cell by cell traversal calculations. The resultant cell
+    // distance, "gCD", is used by the "trace" and "shadow" functions to 
+    // restrict the ray from overshooting, which in turn restricts artifacts.
+    vec3 rC = (gDir*sc - vec3(p, q3.z))/gRd;
+    //vec2 rC = (gDir.xy*sc.xy - p)/gRd.xy; // For 2D, this will work too.
+    
+    // Minimum of all distances, plus not allowing negative distances, which
+    // stops the ray from tracing backwards... I'm not entirely sure it's
+    // necessary here, but it stops artifacts from appearing with other 
+    // non-rectangular grids.
+    //gCD = max(min(min(rC.x, rC.y), rC.z), 0.) + .0015;
+    gCD = max(min(rC.x, rC.y), 0.) + .0015; // Adding a touch to advance to the next cell.
+
+
+    // The extruded block height. See the height map function, above.
+    float h = hm(id, sc);
+    //h = (h*.975 + .025)*2.5;
+
+
+    // Change the prism rectangle scale just a touch to create some subtle
+    // visual randomness. You could comment this out if you prefer more order.
+    //sc.xy -= .05;//*(hash21(id)*.9 + .1);
+
+    // Lower box prism.
+    vec3 bxSc = sc/2. - .01;
+    vec3 q = vec3(p, q3.z + h/2.);
+    
+    vec3 svQ = q;
+    
+     
+    
+    // Keyframing: This breaks time into 12 equal segments lasting one second each.
+    // The time is also offset, depending on what cell the object is in.
+     
+    tmTotal = iTime + hash21(id + .17)*.25; // Moving slightly out of sync.
+    tmID = floor(tmTotal);
+    // Fractional time segment: Same as fract(tmTotal).
+    float fTm = tmTotal - tmID; // Range: [0. 1].
+    
+    tmSeg = mod(tmID + floor(hash21(id)*72.), 12.);//  + floor(hash21(grd.zw)*72.)
+
+    //posMat(tmSeg);
+    
+    // Using smoothstep to smoothly interpolate the time period between
+    // zero and one.
+    fTm = smoothstep(.25, .75, fTm);
+    
+    float ang;
+    
+    float reverse = hash21(id + .17)<.5? -1. : 1.;
+    
+    mat4x2 v = mat4x2(vec2(-1, 1), vec2(1), vec2(1, -1), vec2(-1));
+ 
+    // If traversing the quadrants in the reverse order, reverse the
+    // quadrant postions.
+    if(reverse<0.) v = mat4x2(vec2(-1, 1),  vec2(-1), vec2(1, -1), vec2(1));
+    
+ 
+    float tmSegM4 = mod(tmSeg, 4.);
+    
+    mat3 mA = mat3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+       
+    for(int i=0; i<12; i++){
+     
+        if(tmSegM4 == float(i)){
+            
+            // Move to quadrant.
+            int j = i&3;
+            //int jp1 = (j + 1)&3;
+            q.xy -= v[j]*bxSc.xy/2.;
+
+            // The first rotation involves pivoting about the positive-Z, 
+            // positive-X edge by 90 degrees in the counter clockwise direction.
+            ang = mix(0., -3.14159/2., fTm); // 90 degrees CCW.
+            vec2 piv = vec2(1); // Positive XZ edge.
+            if(j==1 || j==2){ ang = -ang; piv = vec2(-1, 1); }//piv = vec2(-1, 1);
+
+            // Reverse the angles, pivot points and XZ-YZ order, if going in reverse.
+            int YZFirst = 0;
+            if(reverse<0.){
+               piv.x = -piv.x;
+               ang = -ang;
+               YZFirst = 1;
+            }
+
+            // Pivot rotation matrix.
+            float cr = cos(ang), sr = sin(ang);
+            
+         
+            if((i&1)==YZFirst){
+                
+                // XZ pivot rotation matrix.
+                mA = mat3(cr, 0, sr, 0, 1, 0, -sr, 0, cr); 
+            
+                // Left and right pivots. In particular, pivoting from quadrant
+                // zero to one, then back the other way from two to three.
+                //
+                q.xz -= piv*bxSc.xz/2.; // Move to the pivot point.
+                q = mA*q; // Rotation about the pivot point.
+                q.xz += piv*bxSc.xz/2.; // Move back to the center of rotationn.
+ 
+            
+            }
+            else {
+            
+                // YZ pivot rotation matrix.
+                mA = mat3(1, 0, 0, 0, cr, sr, 0, -sr, cr); 
+            
+          
+                // Up and down pivots. In particular, pivoting from quadrant
+                // one to two, then back the other way from three to zero..
+                q.yz -= piv*bxSc.yz/2.;                  
+                q = mA*q;
+                q.yz += piv*bxSc.yz/2.;
+             
+            } 
+ 
+            
+            break;
+        }
+    }
+
+    
+    // Set the global matrix to the correct position matrix.
+    // If we're reversing direction, reverse the indices... whilst
+    // accounting for the zero position staying the same... Sigh.
+    // I much prefer vertex\UV, etc., pipelines when it comes to
+    // texturing. :)
+    int index = int(tmSeg);
+    m3 = reverse<0.? aM3[(12 - index)%12] : aM3[index];
+    
+    // Apply the precalculated position matrix to the current cell position.
+    q = m3*q;
+    
+    // Adding the pivot matrix to the stored position matrix. The pivot was 
+    // already added to the position "q" above, but hasn't yet been added to
+    // the position matrix that is used for normal rotation.
+    m3 = m3*mA;
+ 
+    float d = sBoxS(q, bxSc/2., sqrt(bxSc.x)*.03);
+    /*
+    float ew = .02;
+    float edge = max(d, -sBoxS(q.xy, bxSc.xy/2. - ew, 0.));
+    edge = max(edge, -sBoxS(q.xz, bxSc.xz/2. - ew, 0.));
+    edge = max(edge, -sBoxS(q.yz, bxSc.yz/2. - ew, 0.));
+   
+    d += ew;
+    */
+    float edge = 1e5;
+
+ 
+    // Saving the box dimensions and local coordinates.
+    gSc = sc;//vec3(sc.xy, h);
+ 
+    gP = q;
+
+        
+   
+    // Return the distance, position-base ID and box ID.
+    return vec4(d, id, edge);
+}
+
+
+// Block ID -- It's a bit lazy putting it here, but it works. :)
+vec4 svGID, gID;
+
+// The extruded image.
+float map(vec3 p){
+    
+    // Floor.
+    float fl = -p.z;
+
+    // The extruded blocks.
+    vec4 d4 = blocks(p);
+    gID = d4; // Individual block ID.
+    
+////////////// 
+
+    // Using the Truchet pattern to displace the cube and
+    // floor surfaces.
+    
+    int type;
+    float tF, th, pat;
+    #if SURF_DISP_CUBE == 2
+    
+    vec3 txP = gP;
+
+    vec4 q3 = cubeMap(txP);
+    float faceID = q3.w;
+
+    type = CTYPE;
+    vec2 offs = vec2(.5*OFFS);
+    vec2 sc = gSc.xy/GSCALE;
+    int lev = 0;
+    if(gSc.x==GSCALE/2.){ offs += 1. + .5*OFFS; sc *= 4.; lev = 1; }
+    //else if(sc.x==GSCALE/4.){ sc *= 8.; lev = 2; }//offs += sc/2.; 
+    pat = getPat(q3.xy + offs, sc, gID.yz, faceID, type, lev);
+
+    tF = type == 2? .7071 : 1.;
+    th = .1*tF;//*sc.x/GSCALE*2.5;
+    if(offs.x>.01) th *= 2.;
+    //if(lev==2) th *= 4.;
+    pat = min(pat + th*1.5, abs(pat - th) - th);
+    #ifndef REVERSE
+    pat = -pat;
+    #endif  
+
+    //d4.x -= smoothstep(0., .1, min((pat + th/4.)*2., th))*.01 - .005;
+    d4.x -= smoothstep(0., th, pat + th*.65)*.01 - .005;
+    //d4.x -= smoothstep(0., th, pat + th*.5)*.01 - .005;
+    
+    #endif
+/////////////////
+ 
+    #if SURF_DISP_FLOOR == 2
+    type = CTYPE2;
+            
+    vec2 scl = vec2(GSCALE/2.);
+    vec2 q = p.xy;
+    if(type==1) q += scl/4.; // Move the pattern half a small cell for squares.
+    vec2 ip = (floor(q/scl) + .5)*scl;
+    // Grid color squares.
+    vec2 ip2 = floor(q/scl*4. + .5);
+    // Grid local coordinates and ID.
+    vec4 grd = vec4(q - ip, ip);
+ 
+
+    pat = getPat(grd.xy, scl/2., grd.zw, 0., type, 0);
+    tF = type == 2? .7071 : 1.;
+    #ifdef REVERSE
+    th = .015*tF*GSCALE;
+    #else
+    th = .05*tF*GSCALE;
+    #endif
+    
+    pat = min(pat + th*1.5, abs(pat - th) - th);
+    #ifdef REVERSE
+    pat = -pat;
+    #endif
+    
+    fl -= smoothstep(0., th/2., pat + th/4.)*.005 - .0025;
+    //fl -= smoothstep(0., .1, min((pat + th/4.)*2., th))*.01 - .005;
+     
+    #endif
+    
+///////////////// 
+    // Overall object ID.
+    objID = d4.x<d4.w && d4.x<fl? 0. : d4.w<fl? 1. : 2.;
+    
+    // Combining the floor with the extruded image
+    return  min(min(d4.x, d4.w), fl);
+ 
+}
+
+ 
+// Basic raymarcher.
+float trace(in vec3 ro, in vec3 rd){
+
+    // Overall ray distance and scene distance.
+    float d, t = 0.;//hash31(ro + rd)*.05;
+    
+    //vec2 dt = vec2(1e5, 0); // IQ's clever desparkling trick.
+    
+    // Set the global ray direction varibles -- Used to calculate
+    // the cell boundary distance inside the "map" function.
+    gDir = sign(rd)*.5;
+    gRd = rd; 
+    
+    int i;
+    const int iMax = 128;
+    for (i = min(iFrame, 0); i<iMax; i++){ 
+    
+        d = map(ro + rd*t);       
+        //dt = d<dt.x? vec2(d, dt.x) : dt; // Shuffle things along.
+        
+        // Note the "t*b + a" addition. Basically, we're putting less emphasis on accuracy, 
+        // as "t" increases. It's a cheap trick that works in most situations.
+        if(abs(d)<.001 || t>FAR) break; 
+        
+        //t += i<32? d*.75 : d; 
+        t += min(d*.9, gCD); 
+    }
+    
+    // If we've run through the entire loop and hit the far boundary, 
+    // check to see that we haven't clipped an edge point along the way. 
+    // Obvious... to IQ, but it never occurred to me. :)
+    //if(i>=iMax - 1) t = dt.y;
+
+    return min(t, FAR);
+}
+
+
+// Normal function. It's not as fast as the tetrahedral calculation, but more symmetrical.
+vec3 normal(in vec3 p) {
+    
+    //return normalize(vec3(map(p + e.xyy) - map(p - e.xyy), map
+    //                      map(p + e.yxy) - map(p - e.yxy),    
+    //                      map(p + e.yyx) - map(p - e.yyx)));
+    
+    // This mess is an attempt to speed up compiler time by contriving a break... It's 
+    // based on a suggestion by IQ. I think it works, but I really couldn't say for sure.
+    float sgn = 1.;
+    vec3 e = vec3(.001, 0, 0), mp = e.zzz; // Spalmer's clever zeroing.
+    for(int i = min(iFrame, 0); i<6; i++){
+        mp.x += map(p + sgn*e)*sgn;
+        sgn = -sgn;
+        if((i&1)==1){ mp = mp.yzx; e = e.zxy; }
+    }
+    
+    return normalize(mp);
+}
+
+
+// Cheap shadows are hard. In fact, I'd almost say, shadowing particular scenes with 
+// limited iterations is impossible... However, I'd be very grateful if someone could 
+// prove me wrong. :)
+float softShadow(vec3 ro, vec3 lp, vec3 n, float k){
+
+    // More would be nicer. More is always nicer, but not always affordable. :)
+    const int maxIterationsShad = 64; 
+    
+    ro += n*.0015; // Coincides with the hit condition in the "trace" function.
+    vec3 rd = lp - ro; // Unnormalized direction ray.
+    
+
+    float shade = 1.;
+    float t = 0.; 
+    float end = max(length(rd), 0.0001);
+    //float stepDist = end/float(maxIterationsShad);
+    rd /= end;
+    
+    // Set the global ray direction varibles -- Used to calculate
+    // the cell boundary distance inside the "map" function.
+    gDir = sign(rd)*.5;
+    gRd = rd;
+
+    // Max shadow iterations - More iterations make nicer shadows, but slow things down. 
+    // Obviously, the lowest number to give a decent shadow is the best one to choose. 
+    for (int i = min(iFrame, 0); i<maxIterationsShad; i++){
+
+        float d = map(ro + rd*t);
+        
+        
+        shade = min(shade, k*d/t);
+        //shade = min(shade, smoothstep(0., 1., k*h/dist)); // Thanks to IQ for this tidbit.
+        // So many options here, and none are perfect: dist += min(h, .2), 
+        // dist += clamp(h, .01, stepDist), etc.
+        t += clamp(min(d*.9, gCD), .01, .25); 
+        
+        
+        // Early exits from accumulative distance function calls tend to be a good thing.
+        if (d<0. || t>end) break; 
+    }
+
+    // Shadow.
+    return max(shade, 0.); 
+}
+
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original.
+float calcAO(in vec3 p, in vec3 n){
+
+    float sca = 2., occ = 0.;
+    for(int i = 0; i<5; i++){
+    
+        float hr = float(i + 1)*.125/5.;        
+        float d = map(p + n*hr);
+        occ += (hr - d)*sca;
+        sca *= .7;
+    }
+    
+    return clamp(1. - occ, 0., 1.);    
+    
+}
+
+
+// Surface bump function..
+float bumpSurf3D(in vec3 p, in vec3 n){
+
+    
+    
+    float bump = 0.;
+    
+    
+    #if SURF_DISP_CUBE == 1
+    if(svObjID==0.){
+        
+       
+        vec3 txP = p;   
+
+        vec4 q3 = cubeMap(txP);
+        float faceID = q3.w;
+
+        int type = CTYPE;
+        vec2 offs = vec2(.5*OFFS);
+        vec2 sc = svSc.xy/GSCALE;
+        int lev = 0;
+        if(gSc.x==GSCALE/2.){ offs += 1. + .5*OFFS; sc *= 4.; lev = 1; }
+        //else if(sc.x==GSCALE/4.){ sc *= 8.; lev = 2; }//offs += sc/2.; 
+        float pat = getPat(q3.xy + offs, sc, svGID.yz, faceID, type, lev);
+
+        float tF = type == 2? .7071 : 1.;
+        float th = .1*tF;//*sc.x/GSCALE*2.5;
+        if(offs.x>.01) th *= 2.;
+        //if(lev==2) th *= 4.;
+        pat = min(pat + th*1.5, abs(pat - th) - th);
+        #ifndef REVERSE
+        pat = -pat;
+        #endif   
+        
+        
+        /*
+        map(p);
+        vec3 txP = gP;//p;   
+
+        vec4 q3 = cubeMap(txP);
+        float faceID = q3.w;
+
+        int type = CTYPE;
+        vec2 offs = vec2(.5*OFFS);
+        vec2 sc = gSc.xy/GSCALE;
+        int lev = 0;
+        if(gSc.x==GSCALE/2.){ offs += 1. + .5*OFFS; sc *= 4.; lev = 1; }
+        //else if(sc.x==GSCALE/4.){ sc *= 8.; lev = 2; }//offs += sc/2.; 
+        float pat = getPat(q3.xy + offs, sc, gID.yz, faceID, type, lev);
+
+        float tF = type == 2? .7071 : 1.;
+        float th = .1*tF;//*sc.x/GSCALE*2.5;
+        if(offs.x>.01) th *= 2.;
+        //if(lev==2) th *= 4.;
+        pat = min(pat + th*1.5, abs(pat - th) - th);
+        #ifndef REVERSE
+        pat = -pat;
+        #endif 
+        */
+
+ 
+        bump = smoothstep(0., th, pat + th*.65)*.01;
+        //bump = smoothstep(0., .1, min((pat + th/4.)*2., th));    
+    
+    
+    }
+    #endif
+    
+    #if SURF_DISP_FLOOR == 1
+    if(svObjID==2.){
+    
+        int type = CTYPE2;
+
+        vec2 scl = vec2(GSCALE/2.);
+        vec2 q = p.xy;
+        if(type==1) q += scl/4.; // Move the pattern half a small cell for squares.
+        vec2 ip = (floor(q/scl) + .5)*scl;
+        // Grid color squares.
+        vec2 ip2 = floor(q/scl*4. + .5);
+        // Grid local coordinates and ID.
+        vec4 grd = vec4(q - ip, ip);
+
+
+        float pat = getPat(grd.xy, scl/2., grd.zw, 0., type, 0);
+        float tF = type == 2? .7071 : 1.;
+        #ifdef REVERSE
+        float th = .015*tF*GSCALE;
+        #else
+        float th = .05*tF*GSCALE;
+        #endif
+
+        pat = min(pat + th*1.5, abs(pat - th) - th);
+        #ifdef REVERSE
+        pat = -pat;
+        #endif
+
+
+        bump = smoothstep(0., th/2., pat + th/4.)*.005;
+        //bump = smoothstep(0., .1, min((pat + th/4.)*2., th))*.01;
+    }
+    #endif
+    
+    return bump;
+
+}
+
+
+ 
+// Standard function-based bump mapping routine: This is the cheaper four tap version. 
+// There's a six tap version (samples taken from either side of each axis), but this 
+// works well enough.
+vec3 doBumpMap(in vec3 p, in vec3 n, float bumpfactor){
+    
+    // Larger sample distances give a less defined bump, but can sometimes lessen the 
+    // aliasing.
+    const vec2 e = vec2(.001, 0);  
+    
+    // Bump mapping the moving cube surface requires some transformations
+    // prior to performing the calculations. It's annoying to code, but worth
+    // it, since it is way faster than displacing the surface inside the 
+    // raymarched distance function.
+    vec3 v0 = e.xyy;
+    vec3 v1 = e.yxy;
+    vec3 v2 = e.yyx;
+    
+    if(svObjID==0.){
+       p = svP;
+       v0 = svM3*v0;
+       v1 = svM3*v1;
+       v2 = svM3*v2; 
+       
+    } 
+    
+    
+    
+    mat4x3 p4 = mat4x3(p, p - v0, p - v1, p - v2);
+    //mat4x3 p4 = mat4x3(p, p - e.xyy, p - e.yxy, p - e.yyx);
+    
+    // This utter mess is to avoid longer compile times. It's kind of 
+    // annoying that the compiler can't figure out that it shouldn't
+    // unroll loops containing large blocks of code.
+ 
+    vec4 b4;
+    for(int i = min(iFrame, 0); i<4; i++){
+        b4[i] = bumpSurf3D(p4[i], n);
+        if(n.x>1e5) break; // Fake break to trick the compiler.
+    }
+    
+    // Gradient vector: vec3(df/dx, df/dy, df/dz);
+    vec3 grad = (b4.yzw - b4.x)/e.x; 
+   
+    
+    // Six tap version, for comparisson. No discernible visual difference, in a lot of 
+    //cases.
+    //vec3 grad = vec3(bumpSurf3D(p - e.xyy) - bumpSurf3D(p + e.xyy),
+    //                 bumpSurf3D(p - e.yxy) - bumpSurf3D(p + e.yxy),
+    //                 bumpSurf3D(p - e.yyx) - bumpSurf3D(p + e.yyx))/e.x*.5;
+    
+  
+    // Adjusting the tangent vector so that it's perpendicular to the normal. It's some 
+    // kind of orthogonal space fix using the Gram-Schmidt process, or something to that 
+    // effect.
+    grad -= n*dot(n, grad);          
+         
+    // Applying the gradient vector to the normal. Larger bump factors make things more 
+    // bumpy.
+    return normalize(n + grad*bumpfactor);
+    
+}
+
+///////////////////////////
+
+
+// Microfaceted normal distribution function.
+float D_GGX(float NoH, float roughness) {
+    float alpha = pow(roughness, 4.);
+    float b = (NoH*NoH*(alpha - 1.) + 1.);
+    return alpha/(3.14159265*b*b);
+}
+
+// Surface geometry function.
+float G1_GGX_Schlick(float NoV, float roughness) {
+    //float r = roughness; // original
+    float r = .5 + .5*roughness; // Disney remapping.
+    float k = (r*r)/2.;
+    float denom = NoV*(1. - k) + k;
+    return max(NoV, .001)/denom;
+}
+
+float G_Smith(float NoV, float NoL, float roughness) {
+    float g1_l = G1_GGX_Schlick(NoL, roughness);
+    float g1_v = G1_GGX_Schlick(NoV, roughness);
+    return g1_l*g1_v;
+}
+
+// Bidirectional Reflectance Distribution Function (BRDF). 
+//
+// If you want a quick crash course in BRDF, see the following:
+// Microfacet BRDF: Theory and Implementation of Basic PBR Materials
+// https://www.youtube.com/watch?v=gya7x9H3mV0&t=730s
+//
+vec3 BRDF(vec3 col, vec3 n, vec3 l, vec3 v, 
+          float type, float rough, float fresRef){
+     
+  vec3 h = normalize(v + l); // Half vector.
+
+  // Standard BRDF dot product calculations.
+  float nv = clamp(dot(n, v), 0., 1.);
+  float nl = clamp(dot(n, l), 0., 1.);
+  float nh = clamp(dot(n, h), 0., 1.);
+  float vh = clamp(dot(v, h), 0., 1.);  
+
+  
+  // Specular microfacet (Cook- Torrance) BRDF.
+  //
+  // F0 for dielectics in range [0., .16] 
+  // Default FO is (.16 * .5^2) = .04
+  // Common Fresnel values, F(0), or F0 here.
+  // Water: .02, Plastic: .05, Glass: .08, Diamond: .17
+  // Copper: vec3(.95, .64, .54), Aluminium: vec3(.91, .92, .92), Gold: vec3(1, .71, .29),
+  // Silver: vec3(.95, .93, .88), Iron: vec3(.56, .57, .58).
+  vec3 f0 = vec3(.16*(fresRef*fresRef)); 
+  // For metals, the base color is used for F0.
+  f0 = mix(f0, col, type);
+  vec3 F = f0 + (1. - f0)*pow(1. - vh, 5.);  // Fresnel-Schlick reflected light term.
+  // Microfacet distribution... Most dominant term.
+  float D = D_GGX(nh, rough); 
+  // Geometry self shadowing term.
+  float G = G_Smith(nv, nl, rough); 
+  // Combining the terms above.
+  vec3 spec = F*D*G/(4.*max(nv, .001));
+  
+  
+  // Diffuse calculations.
+  vec3 diff = vec3(nl);
+  diff *= 1. - F; // If not specular, use as diffuse (optional).
+  diff *= (1. - type); // No diffuse for metals.
+
+  
+  // Combining diffuse and specular.
+  // You could specify a specular color, multiply it by the base
+  // color, or multiply by a constant. It's up to you.
+  return (col*diff + spec*3.14159265);
+  
+}
+
+void main(){
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Screen coordinates.    
+    vec2 uv = (fragCoord - viewPort.xy*.5)/viewPort.y;
+    
+    // Camera Setup.
+    vec3 ro = vec3(iTime/4. - .5, 0, -3); // Camera position, doubling as the ray origin.
+    vec3 lk = ro + vec3(.0, .1, .25);//vec3(0, -.25, iTime);  // "Look At" position.
+ 
+    // Light positioning.
+    vec3 lp = ro + vec3(1.5, 2, 0);// Put it a bit in front of the camera.
+    
+
+    // Using the above to produce the unit ray-direction vector.
+    float FOV = 3.14159/3.; // FOV - Field of view.
+    vec3 fwd = normalize(lk - ro);
+    vec3 rgt = normalize(vec3(fwd.z, 0., -fwd.x ));
+    vec3 up = cross(fwd, rgt); 
+
+    // rd - Ray direction.
+    //vec3 rd = normalize(fwd + FOV*uv.x*rgt + FOV*uv.y*up);
+    vec3 rd = normalize(uv.x*rgt + uv.y*up + fwd/FOV);
+    
+    // Rotation.
+    rd.xy *= rot2(.2); 
+    
+    /*    
+    // Mouse camera movement.
+    if(iMouse.z>1.){
+        rd.yz *= rot2(-.5*(iMouse.y - iResolution.y*.5)/iResolution.y*3.1459);  
+        rd.xz *= rot2(-.25*(iMouse.x - iResolution.x*.5)/iResolution.x*3.1459);
+    }
+    */
+ 
+    
+    // Calculate all 12 matrix positions.
+    posMat();
+ 
+     
+    
+    // Raymarch to the scene.
+    float t = trace(ro, rd);
+    
+    // Save the block ID and object ID.
+    svGID = gID;
+    
+    // Scene object ID. Either the pylons or the floor.
+    svObjID = objID;
+    
+    // Saving the bloxk scale and local 2D base coordinates.
+    svSc = gSc;
+    svP = gP;
+
+    // Saving the 3D orientation matrix.
+    svM3 = m3;
+   
+    
+    
+    // Initiate the scene color to black.
+    vec3 col = vec3(0);
+    
+    // The ray has effectively hit the surface, so light it up.
+    if(t < FAR){
+        
+    
+        // Surface position and surface normal.
+        vec3 sp = ro + rd*t;
+        //vec3 sn = getNormal(sp, edge, crv, ef, t);
+        vec3 sn = normal(sp);
+        
+        // Bump mapping the surface.
+        #if (SURF_DISP_CUBE == 1) || (SURF_DISP_FLOOR == 1)
+        sn = doBumpMap(sp, sn, 1.);
+        #endif
+        
+        // Light direction vector.
+        vec3 ld = lp - sp;
+
+        // Distance from respective light to the surface point.
+        float lDist = max(length(ld), .001);
+        
+        // Normalize the light direction vector.
+        ld /= lDist;
+        
+        
+                
+        // Shadows and ambient self shadowing.
+        float sh = softShadow(sp, lp, sn, 16.);
+        float ao = calcAO(sp, sn); // Ambient occlusion.
+        
+        // Light attenuation, based on the distances above.
+        float atten = 2./(1. + lDist*.125);
+        
+        
+        // Specular lighting.
+        float spec = pow(max(dot(reflect(ld, sn), rd), 0.), 16.); 
+           
+        // Obtaining the texel color. 
+        vec3 objCol; 
+        
+
+        // Combining the above terms to procude the final color.
+        float matType = 0.; // Dielectric.
+        float reflectance = .5;
+        float roughness = .5;
+        
+        //float toneF = .0; // Grey toning. Not used.
+        
+        vec3 shade = vec3(.9, .95, 1); // Metal color shading.
+
+        // The boxes and edging.
+        if(svObjID<1.5){
+            
+ 
+            
+            
+            // Texture and normal. The texture position has been saved from 
+            // the distance field. The normal position also needs to be 
+            // rotated to the correct position.
+            vec3 txP = svP;
+            vec3 txN = svM3*sn;
+
+            // Cubemap texturing.
+            vec4 q3 = cubeMap(txP);
+            float faceID = q3.w; // Face ID.
+            // Cube texture.
+            vec3 tx = texCube(iChannel1, txP*1. + .5*0., txN);
+ 
+
+            // Coloring.
+            float cRnd = hash21(svGID.yz);
+            #if COLOR == 2
+            vec3 lCol = .5 + .45*cos(6.2831589*cRnd/6. + vec3(0, 1, 2).yxz*1.1 + .5);
+            #else
+            vec3 lCol = .5 + .45*cos(6.2831589*cRnd/6. + vec3(0, 1, 2)*1.25);
+            #endif
+
+            // Random grid cell number.
+            cRnd = hash21(svGID.yz + .21);
+
+            // Alternate coloring.
+            #if COLOR == 3
+            lCol = lCol.xzy;
+            if(cRnd<.5) lCol = lCol.zyx;
+            #else
+            if(cRnd<.35) lCol = lCol.zyx;
+            #endif
+   
+       
+            
+            // Running a diffuse gradient effect over the result.
+            #if COLOR == 3
+            lCol = mix(lCol, lCol.xzy, spec*.1);
+            #else
+            lCol = mix(lCol, lCol.zyx, spec*.125);
+            #endif
+            
+            // White.
+            #if COLOR == 0
+            lCol = vec3(.9)*dot(lCol, vec3(.299, .587, .114));
+            #endif
+           
+            #if COLOR == 2 || COLOR == 3
+            lCol *= sqrt(lCol);
+            #else
+            lCol *= lCol*1.5; 
+            #endif
+  
+            // Color tweaking.
+            lCol /= 1./3. + dot(lCol, vec3(.299, .587, .114));
+            lCol *= (tx*2. + .5)*1.5;
+            
+            
+            
+            // Edge coloring. Not used here.
+            //if(svObjID>.5) objCol = vec3(.1);
+                      
+ 
+            // Using the cube face coordinates to calculate the cube pattern.
+            int type = CTYPE;
+            vec2 offs = vec2(.5*OFFS);
+            vec2 sc = svSc.xy/GSCALE;
+            int lev = 0;
+            if(svSc.x==GSCALE/2.){ offs += 1. + .5*OFFS; sc *= 4.; lev = 1; }
+            //else if(sc.x==GSCALE/4.){ sc *= 8.; lev = 2; }//offs += sc/2.; 
+            float pat = getPat(q3.xy + offs, sc, svGID.yz, faceID, type, lev);
+             
+            float oPat = pat;
+            float tF = type == 2? .7071 : 1.;
+            float th = .1*tF;//*sc.x/GSCALE*2.5;
+            if(offs.x>.01) th *= 2.;
+            //if(lev==2) th *= 4.;
+            pat = min(pat + th*1.5, abs(pat - th) - th);
+            //pat = min(pat + th*1.5, abs(pat - th) - th);
+            #ifndef REVERSE
+            pat = -pat;
+            #endif
+            
+            // Appling the colors, shade, pattern and lines. -- Standard stuff.
+            objCol = vec3(1)*shade;
+            objCol *= tx*2. + .05;
+  
+            // The metallic part of the pattern.
+            objCol = mix(objCol*.75, objCol*.375, 1. - smoothstep(0., .015, pat));
+            
+            // Grey factor - Not used here.
+            //objCol = mix(objCol, vec3(1)*dot(objCol, vec3(.299, .587, .114)), toneF);
+        
+            // Reverse pattern option.
+            #ifdef REVERSE
+            objCol = mix(objCol, lCol, 1. - smoothstep(0., .015, -oPat + th*2.));
+            #else
+            objCol = mix(objCol, lCol, 1. - smoothstep(0., .015, oPat + th*1.5));
+            #endif
+
+            // Dark lines.
+            objCol = mix(objCol, objCol*.25, 
+                         1. - smoothstep(0., .015, abs(pat + .03) - .015));
+             
+             
+            // Metal or dielectric material, depending on the section of the
+            // pattern we're in.
+            matType = mix(1., 0.,  1. - smoothstep(0., .02, oPat + th*1.5));
+           
+             
+            // Roughness factor: More for the metal.
+            float rghF = mix(2.5, 1.,  1. - smoothstep(0., .02, oPat + th*1.5));
+            // Adding texture-based roughness.
+            roughness = min(dot(tx*rghF, vec3(.299, .587, .114)), 1.);
+            reflectance = .5; // Reflectance.
+            
+ 
+        }
+        else {
+            
+            // The dark floor in the background. Hidden behind the pylons, but
+            // you still need it.
+            vec2 txP = sp.xy;
+            vec3 tx = getTex(iChannel1, txP*4. + .5);
+
+
+            // Background floor pattern.
+            
+            int type = CTYPE2;
+            vec2 scl = vec2(GSCALE/2.);
+            vec2 q = sp.xy;
+            if(type==1) q += scl/4.; // Move the pattern half a small cell for squares.
+            vec2 ip = (floor(q/scl) + .5)*scl;
+            // Grid color squares.
+            vec2 ip2 = floor(q/scl*4. + .5);
+            // Grid local coordinates and ID.
+            vec4 grd = vec4(q - ip, ip);
+  
+
+
+            // Calculating the background pattern.
+            float pat = getPat(grd.xy, scl/2., grd.zw, 0., type, 0);
+            float oPat = pat;
+            float tF = type == 2? .7071 : 1.;
+            #ifdef REVERSE
+            float th = .015*tF*GSCALE;
+            #else
+            float th = .05*tF*GSCALE;
+            #endif
+            pat = min(pat + th*1.5, abs(pat - th) - th);
+            #ifdef REVERSE
+            pat = -pat;
+            #endif
+            
+            /*
+            // Colored markings. Didn't work.
+            vec3 lCol = .5 + .45*cos(6.2831589*hash21(ip2)/6. + vec3(0, 1, 2)*1.25);
+
+            float cRnd = hash21(ip2 + .21);
+            // if(cRnd<.35) lCol = lCol.zyx;
+            lCol /= 1./3. + dot(lCol, vec3(.299, .587, .114));
+            // Running a diffuse gradient effect over the result.
+            lCol = mix(lCol, lCol.zyx, spec*.125);
+           
+            lCol *= tx*2. + .5;
+            lCol *= lCol*3.;
+            */
+
+            // Coloring.
+            vec3 lCol = vec3(.75);
+            lCol *= (tx*2. + .05)*shade;
+           
+            // Metallic texturing and shading, depending on pattern region.
+            objCol = vec3(.5)*(tx*2. + .05)*shade;
+            objCol = mix(objCol*.75, objCol*.375, 1. - smoothstep(0., .005, pat));
+   
+            // Reverse pattern option.
+            #ifdef REVERSE
+            objCol = mix(objCol, lCol, 1. - smoothstep(0., .005, (abs(oPat - th) - th)));
+            #else
+            objCol = mix(objCol, lCol, 1. - smoothstep(0., .005, oPat + th*1.5));
+            #endif           
+            
+            // Dark edges.
+            objCol = mix(objCol, objCol*.25, 
+                         1. - smoothstep(0., .005, abs(pat + .01) - .005));
+  
+            
+            // Grey factor - Not used here.
+            //objCol = mix(objCol, vec3(1)*dot(objCol, vec3(.299, .587, .114)), toneF);
+       
+       
+            // Material type, reflectance and texture-based roughness.
+            //matType = mix(1., 0.,  1. - smoothstep(0., .005, oPat + th*1.5));
+            matType = 1.;
+            reflectance = .5;
+            roughness = min(dot(tx*2.5, vec3(.299, .587, .114)), 1.);
+           
+        }
+        
+        
+            
+        
+         
+        // Cheap specular reflections. Requires loading the "Forest" cube map 
+        // into "iChannel3".
+        float speR = pow(max(dot(normalize(ld - rd), sn), 0.), 5.);
+        vec3 rf = reflect(rd, sn); // Surface reflection.
+        vec3 rTx = texture(iChannel2, rf.xzy*vec3(1, -1, -1)).xyz; rTx *= rTx;
+        float rF = svObjID==2.? 2.: 4.;
+        objCol = objCol + (objCol)*speR*dot(rTx, vec3(.299, .587, .114))*rF;
+ 
+ 
+        // Ambient light.
+        // I wanted to use a little more than a constant for ambient light, but 
+        // without having to resort to sophisticated methods, then I remembered 
+        // Blackle's example, here:
+        // Quick Lighting Tech - blackle
+        // https://www.shadertoy.com/view/ttGfz1
+        float ambience = pow(length(sin(sn*2.)*.45 + .5)/sqrt(3.), 2.)*2.; // Studio.
+        //float ambience = length(sin(sn*2.)*.5 + .5)/sqrt(3.)*
+        //                  smoothstep(-1., 1., -sn.z); // Outdoor.
+
+        
+        // Cook-Torrance based lighting.
+        vec3 ct = BRDF(objCol, sn, ld, -rd, matType, roughness, reflectance);
+        
+        // Combining the ambient and microfaceted terms to form the final color:
+        // None of it is technically correct, but it does the job. Note the hacky 
+        // ambient shadow term. Shadows on the microfaceted metal doesn't look 
+        // right without it... If an expert out there knows of simple ways to 
+        // improve this, feel free to let me know. :)
+        col = (objCol*ambience*(sh*.5 + .5) + ct*(sh));
+        
+        
+        // Shading.
+        col *= ao*atten;
+        
+         
+    
+    }
+    
+    
+    
+    // Applying fog: This fog begins at 90% towards the horizon.
+    col = mix(col, vec3(0), smoothstep(.25, .9, t/FAR));
+ 
+    // For all the toning formulae out there, this one liner -- based on 
+    // Reinhart, does a really good job. The figure on the end (3, in this case) 
+    // regulates the high tones. Obviously, the higher the number, the less
+    // dramatic the toning.
+    col /= (1. + col/3.);   
+    
+     
+    /*
+    vec4 prev = texture(iChannel0, fragCoord/iResolution.xy);
+    col = mix(col, prev.xyz, 1./2.);
+    t = mix(t, prev.w, 1./2.);
+    */ 
+   
+ 
+    // Store to the buffer.
+    outColor = vec4((max(col, 0.)), t);
+    
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

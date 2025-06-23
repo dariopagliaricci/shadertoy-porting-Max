@@ -1,0 +1,135 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+/*
+
+    Voronoi Tech Texture
+    --------------------
+
+    See "Buffer A" for an explanation.
+    
+*/
+
+// Custon chromatic hardware bloom.
+ 
+// Fabrice's fork of "Integer Hash - III" by IQ: https://shadertoy.com/view/4tXyWN
+float hash21(vec2 f){
+
+    // The first line relates to ensuring that icosahedron vertex identification
+    // points snap to the exact same position in order to avoid hash inaccuracies.
+    uvec2 p = floatBitsToUint(f + 16384.);
+    p = 1664525U*(p>>1U^p.yx);
+    return float(1103515245U*(p.x^(p.y>>3U)))/float(0xffffffffU);
+}
+ 
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+
+
+void main(){
+
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Screen coordinates.
+    vec2 uv = fragCoord/viewPort.xy;
+    
+    
+    // Just the texture with no after effects.
+    vec3 col = texture(iChannel0, uv).xyz;
+    
+    #if 1
+    // Hardware bloom algorithm.
+    vec3 acc = vec3(0);
+    float a = 0., w = 1.;//sqrt(.5);
+    for (int i = 0; i<16; i++){
+        
+        // Random offset, or jitter, if you prefer.
+        vec2 offs = (texture(iChannel1, uv + vec2(4*i, 7*i)/32. + 
+                     fract(iTime*.071)).xy - .5)*2.;
+        // Random circles. Hexagons, diamonds, etc., are also an option.
+		//vec2 offs = vec2(float(i)/16. + .003)*rot2(float(i*4) + hash21(fragCoord)*7.);
+
+        // Averaging the color over all the random samples.
+        vec2 uv2 = uv + offs*8./450.;
+        acc += textureLod(iChannel0, uv2, 2.).xyz/16.;
+
+    }
+    
+    
+    // Add in the bloom, but favor the brighter end of the spectrum.
+    col += acc*smoothstep(.35, .5, dot(acc, vec3(.289, .587, .114)))*.5;
+    
+    //float gr = dot(acc, vec3(.299, .587, .114));
+    //col += smoothstep(.35, .7, gr)*acc*.5;
+     
+    #endif
+    
+    // Cheap vignette.
+    col *= max(1.1 - dot(uv - .5, uv - .5)*2., 0.);
+    
+    // Rough gamma correction.
+    outColor = vec4(pow(col, vec3(1./2.2)), 1);
+    
+}
+
+]]>
+</program>
+</language>
+</jittershader>

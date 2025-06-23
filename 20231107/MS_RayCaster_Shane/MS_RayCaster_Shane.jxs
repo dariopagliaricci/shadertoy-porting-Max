@@ -1,0 +1,722 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannelResolution0" type="vec2" state="TEXDIM0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel3" type="int" default="3" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannelResolution0" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel3" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec2 iChannelResolution0;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel3;
+
+/*
+
+    Multisample Raycaster
+    ---------------------
+    
+    This is a realtime path traced cell by cell square grid traversal. The scene 
+    is lit entirely by rendered square emitters on the sides of the square prisms
+    and a small portion of atmospheric haze. No Blinn-Phong was harmed during the 
+    making of this shader. :D
+    
+    I've been meaning to post one of these for a while. Individually, all the 
+    concepts involved are pretty simple. However, tying them all together involves 
+    more thinking than I enjoy, so I've been procrastinating on it for a while. :)
+    
+    Since this is realtime path tracing, things aren't going to be perfect on an
+    average system -- and apologies in advance for those with slower systems. A 
+    basic static path traced scene normally takes seconds to minutes to produce in 
+    a fast application like Blender, but realtime requirements only allow for a 
+    fraction of a second per frame, so perfect quality is a big ask.
+    
+    Realtime path traced cell by cell traversals are not common, but they're 
+    nothing new, and there's even a few examples on Shadertoy -- By the way, check 
+    out 0b5vr's work on here, if you're into this kind of thing. A lot of realtime 
+    path traced examples that have been appearing in demo competitions feel like 
+    they're based on W23's "past racer by jetlag" engine, which is fair enough, as 
+    it lends itself well to that kind of thing. This particular example was coded 
+    off the top of my head, and uses simple traditional techniques that have been 
+    around for ages. The grid traversal code is also standard and the very simple 
+    emitter and throughput lighting code is as basic as it gets.
+    
+    As mentioned in other examples, the only genuinely interesting thing is the use 
+    of IQ's temporal reprojection code. Under the right circumstances it can give 
+    the appearance of a huge sample boost.
+    
+    In regard to scene design, there is none. It's a textured square grid with some 
+    tiny colored squares painted on the sides and some dark edging. That's the 
+    beauty of path traced light emitters. Once everything's in place, the algorithm 
+    does a lot of the aesthetic work for you.
+    
+    
+    
+    Other examples:
+    
+    // A lot of the realtime path tracing demos out there
+    // are based on elements from this example.
+    past racer by jetlag - w23
+    https://www.shadertoy.com/view/Wts3W7
+    
+    // Like everyone else, I really like this example.
+    20210930_CLUB-CAVE-09 - 0b5vr
+    https://www.shadertoy.com/view/ss3SD8
+    
+    // Path tracing a heap of boxes in realtime with the help of camera
+    // reprojection -- It's one of IQ's many understated examples that 
+    // does something amazing.
+    Some boxes - iq
+    https://www.shadertoy.com/view/Xd2fzR
+
+
+*/
+
+
+// Unfortunately, if you have a slow machine IQ's temporal reprojection option
+// will usually result in blur. Regular accumulation might work, but you'll 
+// probably have to use straight samples (BUFF_ACCUM 0).
+// Buffer accumulation style:
+// 0: No accumulation -- Noisy, sharper picture, but with no blur. 
+// 1: Regular accumulation with no reprojection -- A mixture.
+// 2: Temporal reprojection. -- Smoother for faster machines.
+#define BUFF_ACCUM 2
+
+
+// Far plane. I've kept it close.
+#define FAR 25.
+
+
+///////////////
+
+// Random seed value.
+vec2 seed = vec2(.13, .27);
+
+// Basic random function.
+vec3 rnd23() {
+    
+    //seed += vec2(.723, .647);
+    //return texture(iChannel2, seed*43266.1341).xyz;
+    
+    seed = fract(seed + vec2(.723, .647));
+    vec3 p = vec3(dot(seed.xy, vec2(12.989, 78.233)), 
+                          dot(seed.xy, vec2(41.898, 57.267)),
+                          dot(seed.xy, vec2(65.746, 83.765)));
+                          
+    return fract(sin(p)*vec3(43758.5453, 23421.6361, 34266.8747));
+    
+}
+
+// Basic random function. Not a lot of thought was put into it. Using one of
+// the more reliable positive integer based ones might be better... Common sense
+// would dictate that integers work faster, but on a GPU, I'm not really sure.
+vec2 hash22() {
+    
+    //seed += vec2(.723, .647);
+    //return texture(iChannel2, seed*43266.1341).xy;
+    
+    seed = fract(seed + vec2(.723, .647));
+    return fract(sin(vec2(dot(seed.xy, vec2(12.989, 78.233)), dot(seed.xy, vec2(41.898, 57.263))))
+                    *vec2(43758.5453, 23421.6361));
+}
+
+
+// IQ's vec2 to float hash.
+float hash21(vec2 p){  return fract(sin(dot(p, vec2(27.619, 57.583)))*43758.5453); }
+
+float hash31(in vec3 p){ return fract(sin(dot(p, vec3(91.537, 151.761, 72.453)))*435758.5453); }
+
+
+ 
+// A nice random hemispherical routine taken out of one of IQ's examples.
+// The routine itself was written by Fizzer.
+vec3 cosDir( in float seed, in vec3 n){
+
+    vec2 rnd = hash22();
+    float u = rnd.x;
+    float v = rnd.y;
+    
+    // Method 1 and 2 first generate a frame of reference to use with an arbitrary
+    // distribution, cosine in this case. Method 3 (invented by fizzer) specializes 
+    // the whole math to the cosine distribution and simplfies the result to a more 
+    // compact version that does not depend on a full frame of reference.
+
+    // Method by fizzer: http://www.amietia.com/lambertnotangent.html
+    float a = 6.2831853*v;
+    u = 2.*u - 1.;
+    return normalize(n + vec3(sqrt(1. - u*u)*vec2(cos(a), sin(a)), u));
+    
+}
+
+////////////////
+
+
+
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+
+// Rectangle scale. Smaller scales mean smaller squares, thus more of
+// them. Sometimes, people (including myself) will confuse matters
+// and use the inverse number. :)
+vec2 s = vec2(1, 1)/2.; 
+
+ // Ray origin, ray direction, point on the line, normal. 
+float rayLine(vec2 ro, vec2 rd, vec2 p, vec2 n){
+   
+   // This it trimmed down, and can be trimmed down more. Note that 
+   // "1./dot(rd, n)" can be precalculated outside the loop. However,
+   // this isn't a GPU intensive example, so it doesn't matter here.
+   return dot(p - ro, n)/dot(rd, n);
+
+}
+
+// Grid cell function.
+vec2 gridID(vec2 p){
+    // Using the rectangle's center position for the ID. 
+    return floor(p/s) + .5;
+
+}
+
+
+float h(vec2 p){
+
+    // Only one texture read.
+    vec3 tx = texture(iChannel0, p/iChannelResolution0.xy*4.).xyz;  tx *= tx;///iChannelResolution[0].xy
+    // Greyscale height. Using "tx.x" would work, too.
+	float f = dot(tx, vec3(.299, .587, .114));
+    float f2 = f;
+    
+    //f = sin(f*6.2831 + iTime)*.5 + .5;
+    
+    f *= min(p.x*p.x/16., 1.);
+    
+    return floor((f*12. + f2*4.)*8.)/8.;
+
+}
+ 
+// A standard square cell by cell traversal. Not optimized enough for path tracing
+// purposes, but it's reasonable quick otherwise.
+vec4 raycast(vec3 ro, vec3 rd){
+   
+    // Initial result.
+    vec4 res = vec4(FAR, 0, 0, 0);
+    
+    // Rectangle normals: Any two will do. By the way, there's nothing
+    // stopping you from declaring all four normals for all surrounding
+    // walls, but since you know only two will be in front of the
+    // direction ray at any given time, it makes sense to only choose
+    // two.
+    //
+    // Declare two normals. Any side by side ones will do.
+    vec2 n1 = vec2(-1, 0), n2 = vec2(0, -1); // Right and top edges.
+    
+    // If the cell wall is behind the ray (or the ray is facing the opposing cell
+    // wall, if you prefer), use the normal index from the back cell wall. This 
+    // trick is possible because of the rectangle symmetry. As an aside, for 
+    // anyone who doesn't know, dotting the direction ray with the face normal 
+    // is something you do in software engines for back face culling.
+    float d1 = dot(rd.xz, n1);
+    float d2 = dot(rd.xz, n2);
+    n1 = d1<0.? -n1 : n1;
+    n2 = d2<0.? -n2 : n2;
+    
+    // Initiate the ray position at the ray origin.
+    vec3 pos = ro;
+    
+    // Obtain the coordinates of the cell that the current ray position 
+    // is contained in -- I've arranged for the cell coordinates to 
+    // represent the cell center to make things easier.
+    vec2 ip = gridID(pos.xz);
+    
+    float t1 = 1e8, t2 = 1e8, tT = 1e8;
+    
+    int hit = 0;
+    
+    
+    // Iterate through 24 cells -- Obviously, if the cells were smaller,
+    // you'd need more to cover the distance.
+    for(int i = 0; i<64; i++){ 
+
+         
+        // Height. 
+        float ma = h(ip*s);
+        
+         
+        // At this point, we haven't advanced the ray to the back of the cell boundary,
+        // so we're at one of the front cell face positions. Therefore, check to see if 
+        // we're under the pylon height. If so, we've hit a face, so mark the face as hit, 
+        // then break.
+        if(pos.y<ma){
+            // Hit a side.
+            hit = 1;
+            break; 
+        
+        } 
+        
+        // Ray intersection from the currect cell position to each of the 
+        // visible cell walls. Normals face inward.
+        // You pass in the current position, the unit direction ray, a known 
+        // point on the cell wall (any will do) and the cell wall's normal.
+        t1 = rayLine(pos.xz, rd.xz, (ip + n1*.5)*s, -n1);
+        t2 = rayLine(pos.xz, rd.xz, (ip + n2*.5)*s, -n2);
+        
+        // Determine the closest edge then record the closest distance and
+        // asign its normal index.
+        vec3 tn = t1<t2? vec3(t1, n1) : vec3(t2, n2);
+        
+        // Top face distance.
+        tT = (ma - pos.y)/rd.y;
+        tT = tT<0. ? 1e8 : tT;
+        
+        
+        // We've now advanced to one of the back faces of the cell. Check to see whether
+        // we're still under the pylon height, and if so, we've hit the top face --  
+        // I always have to think about this, but the logic is that we haven't hit a front
+        // cell face and we're still under the height, so we've hit the top. Anyway, mark 
+        // the top face as hit, advance the distance in the Y direction to the top face, 
+        // then break.
+        if(tT<tn.x){
+            
+            //dist += tT;
+            pos += rd*tT; 
+            hit = 2;
+            break;
+             
+        }      
+         
+    
+        // If this cell's ID matches the ID of the backgound cell, 
+        // flag it as hit in order to color it, or whatever.
+        //if(length(cell - ip)<.001){ hit = 1; break; }
+        
+        // Advance the cell index position by the indices of the 
+        // cell wall normal that you hit. 
+        ip += tn.yz;
+        // Advance the ray position by the distance to the next cell wall.
+        pos += rd*tn.x;
+    
+    }
+    
+    float fID = tT<t1 && tT<t2? 0. : t1<t2? 1. : 2.;
+    if(fID == 1.){ fID = d1<0.? -fID : fID; }
+    else if(fID == 2.){ fID = d2<0.? -fID : fID; }
+    
+    res.x = length(pos - ro);
+    if(hit == 0) res.x = FAR;
+    
+    return vec4(res.x, fID, ip);
+    
+}
+
+// Standard normal function.
+vec3 nr(float fID, vec3 rd) {
+	
+    vec3 n = fID == 0.? vec3(0, 1, 0) : abs(fID) == 1.? vec3(1, 0, 0) : vec3(0, 0, 1);
+    //if(fID == 1.) n = dot(rd.xz, n.xz)<0.? -n : n;
+    //if(fID == 2.) n = dot(rd.xz, n.xz)<0.? -n : n;
+    n *= fID<-.001? -1. : 1.; 
+	return n;
+}
+
+// mat3 rotation... I did this in a hurry, but I think it's right. :)
+// I have a much better one than this somewhere. 
+mat3 rot(vec3 ang){
+    
+    vec3 c = cos(ang), s = sin(ang);
+
+    return mat3(c.x*c.z - s.x*s.y*s.z, -s.x*c.y, -c.x*s.z - s.x*s.y*c.z,
+                c.x*s.y*s.z + s.x*c.z, c.x*c.y, c.x*s.y*c.z - s.x*s.z,
+                c.y*s.z, -s.y, c.y*c.z);    
+}
+
+void main(){
+
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    #if BUFF_ACCUM == 2
+    // Initial hit point and distance.
+    vec3 resPos = vec3(0);
+    float resT = 0.;
+    #endif
+
+    // Screen pixel coordinates.
+    vec2 uv0 = (fragCoord - viewPort.xy*.5)/viewPort.y;
+    
+
+    // Initializing the seed value. It needs to be different every frame.
+    seed = uv0 + vec2(fract(iTime/113.671)*.123, fract(iTime/57.913)*.14527);
+    
+    // Ray origin.
+    vec3 ro = vec3(-s.x/2., 3.5, iTime*.25); 
+    // Setting the camera to the ray origin. The ray origin vector will change
+    // from bounce to bounce, so we'll need a record of the initial camera position.
+    vec3 cam = ro;
+    
+    
+    // Using the above to produce the unit ray-direction vector.
+    float FOV = 1.; // FOV - Field of view.
+    
+    // Lazy identity camera -- No to and from. I might update it later.
+    mat3 mCam = mat3(vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1));
+
+ 
+    mCam *= rot(vec3(0, 0, cos(iTime/8.*.25)/4.)); // Camera yaw.
+    mCam *= rot(vec3(-sin(iTime/4.*.25)/8., 0, 0)); // Camera roll.
+    mCam *= rot(vec3(0, .5, 0)); // Y axis tilt, or pitch.
+    
+/*
+    // Artistic black movie strips. 20% faster elite democoder move. :D
+    if(abs(uv0.y)>.4) { 
+        ivec2 q = ivec2(fragCoord);
+        vec4 c = vec4(0, 0, 0, 1); 
+    	if(q.y == 0 && q.x<3){
+    
+    	// Camera matrix in lower left three pixels, for next frame.
+        if(q.x == 0) c = vec4(mCam[0], -dot(mCam[0], cam));
+        else if(q.x == 1) c = vec4( mCam[1], -dot(mCam[1], cam));
+        else c = vec4( mCam[2], -dot(mCam[2], cam));
+        } 
+        outColor = c;
+        return; 
+    }
+*/
+    
+    // Accumulative color and sample number. 8 is all that my computer can 
+    // handle. Some computers would be able to handle more and others less.
+    vec3 atot = vec3(0);
+    const int sampNum = 8;
+    
+    for(int j = min(0, iFrame); j<sampNum; j++){
+    
+    
+        //vec2 jit = vec2(hash21(uv0 + seed + vec2(j, j + 1)), 
+        //                hash21(uv0 - seed + vec2(j + 5, j + 7))) - .5;
+        
+        vec2 jit = hash22() - .5;
+                        
+        vec2 uv = uv0 + jit/viewPort.y;
+    
+        // Unit direction vector.
+        vec3 rd = mCam*normalize(vec3(uv, 1./FOV)); 
+        
+        // Depth of field. I hacked this in as an afterthought... It seems
+        // about right, but I'll have to take a closer look later.
+        float fDist = 6.;
+        vec2 jitDOF = hash22()*2. - 1.;
+        vec3 vDOF = mCam*vec3(jitDOF, 0.)*.035;
+        rd = normalize(rd - vDOF/fDist);
+        ro = cam + vDOF;
+        
+        // Accumulative, and thoughput.
+        vec3 acc = vec3(0);
+        
+        vec3 through = vec3(1);
+
+        // First hit distance. It's used for fog, amongst other things.
+        float t0; 
+        
+  
+        for(int i = min(0, iFrame); i<3; i++){
+
+            // Raycasting
+            vec4 res = raycast(ro, rd);
+
+            float t = res.x, d;
+            float fID = res.y;
+            vec2 id = res.zw;
+
+            t = min(t, FAR); // Clipping to the far distance, which helps avoid artifacts.
+
+            if(i == 0) t0 = t; // Recording the first hit distance.
+
+
+            // Hit point.
+            vec3 p = ro + rd*t;
+            
+            #if BUFF_ACCUM == 2
+            if(i==0){
+                // Only save the initial hit point and distance. Ignore other bounces.
+                resPos += p/float(sampNum); // Accumulative position.
+                resT += t/float(sampNum); // Accumulative distance.
+            }
+            #endif
+
+            // If we've hit an object, light it up.
+            if(t<FAR - 1e-6){
+            
+                
+                // Surface normal.
+                vec3 n = nr(fID, rd);
+
+                // Scene object color.
+                //
+                // Texture coordinates, based on a cube mapping routine.
+                vec2 tuv = fID == 0.? p.xz : abs(fID) == 1.? p.zy : p.xy;
+                vec3 tx = texture(iChannel1, tuv/3.).xyz; tx *= tx;
+
+                vec3 oCol = .125 + tx*2.5;
+
+
+                // Edging routine.
+                float h0 = h(id*s); // Square prism height.
+
+                float minEdge = min(s.x, s.y)/4.;
+                float edge = s.y/4.;
+                float edge2 = s.x/4.;
+
+                // Local coordinates.
+                vec2 lc = p.xz - id*s;
+                // Domain.
+                vec2 ap = abs(lc) - s/2.;
+                // Face edges.
+                float fEdge = max(ap.x, ap.y);
+                fEdge = abs(fEdge);
+                fEdge = max(fEdge, -(p.y - h0)) - .015;
+                // Side edges.
+                float sEdge = min(ap.x, ap.y);
+                sEdge = max(-sEdge, (p.y - h0)) - .015;
+                // Combining.
+                fEdge = min(fEdge, sEdge);
+
+                // Smoothing facor... Not even sure if it's needed in a multisample
+                // example, but it's here anyway.
+                float sf = .001*(1. + res.x*res.x*.1);
+                
+                // Edge rendering.
+                oCol = mix(oCol, vec3(0), (1. - smoothstep(0., sf, fEdge))*.85);
+
+                // Window stips.
+                float strip = abs(p.y - h0 + 2./8.) - 1./8.;
+                oCol = mix(oCol, vec3(0), (1. - smoothstep(0., sf, abs(strip) - .02/2.))*.85);
+
+                // Top face markings, for debug purposes.
+                //c.xyz = mix(c.xyz, vec3(0), 1. - smoothstep(0., sf, length(p.xz - id*s) - .05));
+
+                // Windows.
+                vec2 tip = floor(tuv*8.);
+                vec2 tup = abs(tuv - (tip + .5)/8.);
+                float sq = max(tup.x, tup.y) - .5/8.;
+
+                // Surface roughness. Larger values are duller in appearance, and lower
+                // values are more relective.
+                float rough = .9;
+
+                // Substance emissive color. Initialized to zero.
+                vec3 emissive = vec3(0);
+                
+                // If we hit square prism strip, color random windows and set their emission color. 
+                if(strip<.0){
+                //if(hash21(id +.1)<.25 && strip<0.){
+                    
+                    // Render random square frames.
+                    oCol = mix(oCol, vec3(0), (1. - smoothstep(0., sf*8., abs(sq) - .01/2.))*.85);
+                
+                    // Random window color.
+                    vec3 eCol = .5 + .45*cos(6.2831*hash21(tip +.17)/5. + vec3(0, 1.4, 2));
+
+                    // Random emissive color.
+                    emissive = oCol*eCol; // Warm hues.
+                    if(hash21(id +.2)<.5) emissive = oCol*eCol.zyx; // Random cool hues.
+                    // Applying some random green.
+                    emissive = mix(emissive, emissive.xzy, floor(hash21(tip +.42)*4.999)/4.*.35);
+                    // Pink. Too much.
+                    //if(hash21(tip +.33)<.1) emissive = oCol*mix(oCol, eCol.xzy, .5);
+
+                    // Randomly turn lights on and off for some visual interest.
+                    float blink = smoothstep(.2, .3, sin(6.2831*hash21(tip + .09) + iTime/4.)*.5 + .5);
+                    emissive *= mix(1., 0., blink);
+                 
+                    // Ramp up the emissive power.
+                    emissive *= 8.; 
+                    
+                    // Make the windows less rough, and randomize a bit.
+                    rough = hash21(tip + .21)*.75;
+                }
+                else {
+                    // Subtly Color the pylons outside the strips.
+                    oCol *= (1. + .25*cos(hash21(id + .06)*6.2831/4. + vec3(0, 1, 2)));
+                }
+                 
+                // Applying the edging to the emission value. You don't have to, but it looks better. 
+                emissive = mix(emissive, vec3(0), (1. - smoothstep(0., sf, fEdge))*.95);
+
+                // Tapering emission into the distance.
+                //emissive = mix(emissive, vec4(0), smoothstep(.25, .99, t0/FAR));
+
+                // If an emissive sustance has been hit, use it to light the surface.
+                acc += emissive*through;
+                through *= oCol; // Integrate colors from previous surfaces. 
+
+                
+                vec3 ref = reflect(rd, n); // Purely reflected vector.
+                vec3 rrd = cosDir(0., n); // Random half hemisphere vector.
+
+                // Mimicking surface inconsistancies with fuzzy reflections.
+                // Rougher surfaces have a greater chance of random reflecting at any direction and
+                // smoother surfaces are more likely to purely reflect.
+                float rChance = step(0., rough - hash21(uv + vec2(i*277, j*113) + fract(iTime*.97 + .137)));
+                rd = (mix(ref, rrd, rChance));
+                // Other variations. Not physically correct, but they have their purposes.
+                //float rChance = rough*hash21(uv + vec2(i*277, j*113) + fract(iTime*.97 + .137));
+                //rd = normalize(ref + rrd*rChance);
+                //rd = normalize(mix(ref, rrd, rough));
+                //rd = normalize(ref + normalize(rnd23() - .5)*rChance);             
+                //rd = normalize(ref + rrd*rough);
+
+                // Bump the ray off of the hit surface to avoid self collision.
+                ro = p + n*.001;
+
+            }
+            else { 
+                // If the scene hasn't been hit, add a touch of atmospheric haze, then exit.
+                // Depending what you're after, you could include the throughput also --
+                // Infact, for some situations, I'm pretty sure you need it:
+                //acc += through*vec3(.4, .6, 1)*.05;
+                acc += vec3(.4, .6, 1)*.035;
+                break;
+            }
+
+    
+        }
+       
+        // Very simple sky fog, or whatever. Not really the way you apply atmosphere in a 
+        // path tracer, but way, way cheaper. :)
+        vec3 sky = mix(vec3(1, .7, .5), vec3(.4, .6, 1), uv0.y*2.5 - .15)*1.5;//vec4(.6, .75, 1, 0)/.6
+        //sky *= fBm((cam + r*t0)*128.)*2.;
+        acc = mix(acc, sky, smoothstep(.35, .99, t0/FAR));
+        
+        
+        // Add this sample to the running total.
+        atot += acc;
+        
+    }
+    
+    vec3 col = atot/float(sampNum);
+    
+    
+    
+    // This is IQ's temporal reprojection code: It's well written and
+    // it makes sense. I wrote some 2D reprojection code and was not
+    // looking forward to writing the 3D version, and then this 
+    // suddenly appeared on Shadertoy. If you're interested in rigid 
+    // realtime path traced scenes with slowly moving cameras, this is 
+    // much appreciated. :)
+    //
+    #if BUFF_ACCUM == 2
+    //-----------------------------------------------
+	// Reproject to previous frame and pull history.
+    //-----------------------------------------------
+    
+    float kFocLen = 1./FOV;
+    vec3 pos = resPos;
+    ivec2 q = ivec2(fragCoord);
+    col = clamp(col, 0., 1.);
+
+    // Fetch previous camera matrix from the bottom left three pixels.
+    mat3x4 oldCam = mat3x4(texelFetch(iChannel3, ivec2(0, 0), 0),
+                           texelFetch(iChannel3, ivec2(1, 0), 0),
+                           texelFetch(iChannel3, ivec2(2, 0), 0));
+    // World space point.
+    vec4 wpos = vec4(pos, 1.);
+    // Convert to camera space (note inverse multiply).
+    vec3 cpos = wpos*oldCam;
+    // Convert to NDC space (project).
+    vec2 npos = (kFocLen*2.)*cpos.xy/cpos.z;//*iRes/viewPort.y;
+    // Convert to screen space.
+    vec2 spos = .5 + .5*npos*vec2(viewPort.y/viewPort.x, 1);
+	// Convert to raster space.
+    vec2 rpos = spos*viewPort.xy;
+
+    // Read color+depth from this point's previous screen location.
+    vec4 ocolt = textureLod(iChannel3, spos, 0.);
+    // If we consider the data contains the history for this point.
+    if(iFrame>0 && resT<FAR && (rpos.y>1.5 ||rpos.x>3.5)){
+    
+        // Blend with history (it's an IIR low pas filter really).
+        col = mix( ocolt.xyz, col, 1./8.);
+    }
+    
+    // Color and depth.
+    outColor = vec4(col, resT);
+    
+    // Output.
+	if(q.y == 0 && q.x<3){
+    
+    	// Camera matrix in lower left three pixels, for next frame.
+        if(q.x == 0) outColor = vec4(mCam[0], -dot(mCam[0], cam));
+        else if(q.x == 1) outColor = vec4( mCam[1], -dot(mCam[1], cam));
+        else outColor = vec4( mCam[2], -dot(mCam[2], cam));
+    } 
+    #elif BUFF_ACCUM == 1
+    // Mix the previous frames in with no camera reprojection.
+    // It's OK, but full temporal blur will be experienced.
+    vec4 preCol = texelFetch(iChannel3, ivec2(fragCoord), 0);
+    float blend = (iFrame < 2) ? 1. : 1./4.; 
+    outColor = mix(preCol, vec4(clamp(col, 0., 1.), 1), blend);
+    #else
+    // No reprojection or temporal blur, for comparisson.
+    outColor = vec4(max(col, 0.), 1);
+    #endif
+    
+
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

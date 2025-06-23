@@ -1,0 +1,523 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+//Common//
+
+const float MAX_FLOAT = 1e5;
+const float PI = acos(-1.);
+const float TAU = PI * 2.;
+
+// Made in Blender exported to .obj
+// There is 11 triangles
+// The two main shape are made from the same 9 first triangles
+
+vec3 vertices[29] = vec3[29](
+    // Swan & cat
+    vec3(-0.600000, -1.200000, -0.780600),
+	vec3(-0.600000, 0.000000, -0.780600),
+	vec3(0.500000, 0.000000, -0.780600),
+	vec3(0.500000, 1.200000, -0.780600),
+	vec3(-0.000054, -0.769646, -0.780600),
+	vec3(-0.769148, -0.000552, -0.780600),
+	vec3(0.769040, -0.000552, -0.780600),
+	vec3(-0.000054, 0.768542, -0.780600),
+	vec3(0.330067, -1.068670, -0.780600),
+	vec3(-0.669933, 0.031330, -0.780600),
+	vec3(0.330067, 1.031330, -0.780600),
+	vec3(-0.503650, 1.519819, -0.780600),
+	vec3(1.014108, 0.002062, -0.780600),
+	vec3(-0.503650, -1.515697, -0.780600),
+	vec3(-1.426991, -0.714951, -0.780600),
+	vec3(0.719443, -0.714950, -0.780600),
+	vec3(0.719442, 1.431484, -0.780600),
+	vec3(0.494036, 0.004837, -0.780600),
+	vec3(-0.246427, -0.735627, -0.780600),
+	vec3(-0.250243, 0.741485, -0.780600),
+	vec3(-0.497295, 0.000317, -0.780600),
+	vec3(0.243168, 0.740781, -0.780600),
+	vec3(0.246985, -0.736331, -0.780600),
+
+    // Background
+	vec3(19.259647, -3.825654, -4.132116),
+	vec3(0.863690, -3.825655, -4.132116),
+	vec3(10.061668, 3.296956, -4.132116),
+	vec3(6.265424, -3.825655, -3.809915),
+	vec3(-21.581425, -3.825659, -3.809916),
+	vec3(-7.658000, 6.956183, -3.809916));
+
+ivec3 faces[11] = ivec3[11](
+    // Cat & Swan
+	ivec3(1, 2, 3),
+	ivec3(5, 6, 7),
+	ivec3(1, 0, 2),
+	ivec3(5, 4, 6),
+	ivec3(8, 10, 9),
+	ivec3(11, 13, 12),
+	ivec3(16, 14, 15),
+	ivec3(19, 18, 17),
+	ivec3(22, 21, 20),
+
+    // Background
+	ivec3(24, 23, 25),
+	ivec3(27, 26, 28));
+
+vec4 catpositions[9] = vec4[9](
+	vec4(1.67, -1., 0., 0.), // piece 7a
+	vec4(-.45, 2.2, 0., 0.), // piece 3a
+	vec4(1.67, -1., 0., 0.), // piece 7b
+	vec4(-.45, 2.2, 0., 0.), // piece 3b
+	vec4(-0.78, 0.4, 0., 0.), // piece 4
+	vec4(0.05, -0.08, 0., 0.), // piece 5
+	vec4(0.35, -1.5, 0., 0.), // piece 6
+	vec4(-.97, 2.92, 0., 0.), // piece 1
+	vec4(0.07, 2.92, 0., 0.)); // piece 2
+
+vec4 swanpositions[9] = vec4[9](
+	vec4(-0.5, .6 + 1.85, 0., 3.*PI / 4.), // piece 7a
+	vec4(0., 0.5, 0., 0.), // piece 3a
+	vec4(-0.42, -1. + 1.85, 0., 3.*PI / 4.), // piece 7b
+	vec4(0., 0.5, 0., 0.), // piece 3b
+	vec4(0.09, -.95, 0., PI), // piece 4
+	vec4(-1.82, -0.45, 0., PI / 2.), // piece 5
+	vec4(-0.95, -1.3, 0., 0.), // piece 6
+	vec4(.5, -0.26, 0., PI), // piece 1
+	vec4(0.28, 2.16, 0., -PI / 4.)); // piece 2
+
+//Main Code//
+
+/*
+@flopine
+@lsdlive
+CC-BY-NC-SA
+
+
+Cat Tracer by Ohno!
+
+
+Small party prod released at Outline 2019 in the 4k compo.
+
+This was a small exercice to learn and practice Pathtracing.
+The Pathtracing base engine is coming from "Raytracing in One Week End" by Peter Shirley.
+Random functions borrowed from Nimitz via reinder.
+Also, extended with triangle/plane intersection & a faster lambert importance sampling.
+
+
+"Raytracing in One Week End" by Peter Shirley
+https://github.com/petershirley/raytracinginoneweekend
+
+Understanding lot of math & technics behind raytracing & pathtracing:
+http://www.scratchapixel.com/
+
+Excellent video course about Pathtracing by @karoly_zsolnai:
+https://www.youtube.com/watch?v=pjc1QAI6zS0&list=PLujxSBD-JXgnGmsn7gEyN28P1DnRZG7qi
+
+Understanding hemispherical uniform sampling:
+http://corysimon.github.io/articles/uniformdistn-on-sphere/
+
+*/
+
+const int MAXSAMPLE = 40; // can be set to 20-40 on strong GPU
+const int MAXRECURSION = 4;
+
+#define CAT 1
+#define SWAN 2
+
+
+float bpm = .5*134. / 60.;
+
+float ts2 = 14.328;
+float ts3 = 21.492;
+float ts4 = 28.656;
+
+struct Camera {
+	vec3 origin;
+	vec3 lower_left_corner;
+	vec3 horizontal;
+	vec3 vertical;
+	vec3 u, v;
+	float lens_radius;
+};
+
+struct Ray {
+	vec3 origin;
+	vec3 direction;
+};
+
+struct Hit_record {
+	float dist;
+	vec3 pos, normal;
+	vec3 mat;
+};
+
+
+float g_seed = 0.;
+uint base_hash(uvec2 p) {
+	p = 1103515245U * ((p >> 1U) ^ (p.yx));
+	uint h32 = 1103515245U * ((p.x) ^ (p.y >> 3U));
+	return h32 ^ (h32 >> 16);
+}
+
+vec2 hash2(inout float seed) {
+	uint n = base_hash(floatBitsToUint(vec2(seed += .1, seed += .1)));
+	uvec2 rz = uvec2(n, n * 48271U);
+	return vec2(rz.xy & uvec2(0x7fffffffU)) / float(0x7fffffff);
+}
+
+// fizzer via iq
+// https://www.shadertoy.com/view/MsdGzl
+vec3 random_cos_weighted_hemisphere_direction(const vec3 n, inout float seed) {
+	vec2 r = hash2(seed);
+	float a = TAU * r.y;
+	r.x = 2. * r.x - 1.;
+	return normalize(n + vec3(sqrt(1. - r.x * r.x) * vec2(cos(a), sin(a)), r.x));
+}
+
+// reinder
+// https://www.shadertoy.com/view/XlGcWh
+vec2 random_unit_disk() {
+	vec2 h = hash2(g_seed) * vec2(1, TAU);
+	float phi = h.y;
+	float r = sqrt(h.x);
+	return r * vec2(sin(phi), cos(phi));
+}
+
+
+vec3 point_at_parameter(Ray r, float t) { return r.origin + t * r.direction; }
+
+Camera get_camera(vec3 lookfrom, vec3 lookat, vec3 vup, float vfov,
+	float aspect, float aperture, float focus_dist) {
+
+	vec3 u, v, w;
+	float theta = vfov * PI / 180.;
+	float half_height = tan(theta / 2.);
+	float half_width = aspect * half_height;
+	w = normalize(lookfrom - lookat);
+	u = normalize(cross(vup, w));
+	v = cross(w, u);
+	return Camera(lookfrom,
+		lookfrom - (half_width * u + half_height * v + w) * focus_dist,
+		2. * half_width * u * focus_dist,
+		2. * half_height * v * focus_dist, u, v, aperture / 2.);
+}
+
+Ray get_ray(Camera cam, vec2 uv) {
+	vec2 rd = cam.lens_radius * random_unit_disk();
+	vec3 offset = cam.u * rd.x + cam.v * rd.y;
+	return Ray(cam.origin + offset,
+		normalize(cam.lower_left_corner + uv.x * cam.horizontal +
+			uv.y * cam.vertical - cam.origin - offset));
+}
+
+mat2 r2d(float a) {
+	float c = cos(a), s = sin(a);
+	return mat2(c, s, -s, c);
+}
+
+// iq
+// https://www.shadertoy.com/view/ttfGWl
+float triangle_intersect(in vec3 ro, in vec3 rd, in vec3 v0, in vec3 v1, in vec3 v2,
+	out vec3 n) {
+	vec3 v1v0 = v1 - v0;
+	vec3 v2v0 = v2 - v0;
+	vec3 rov0 = ro - v0;
+
+	n = cross(v1v0, v2v0);
+	vec3 q = cross(rov0, rd);
+	float d = 1.0 / dot(rd, n);
+	float u = d * dot(-q, v2v0);
+	float v = d * dot(q, v1v0);
+	float t = d * dot(-n, rov0);
+
+	if (u < 0.0 || v < 0.0 || (u + v) > 1.0)
+		t = 1e6;
+
+	n = normalize(n);
+
+    // double sided triangle
+	if (dot(n, -rd) < 0.)
+		n = -n;
+
+	return t;
+}
+
+void animate_cat(inout vec3 p) {
+	// tilt movement
+	if (iTime <ts2 || iTime > ts3)
+		p.xz *= r2d(.4*(floor(sin(bpm*iTime*PI) + 1.) - .5));
+
+	// side movement
+	p.x += mix(7., -0.2, smoothstep(0., ts2 + 1.5, iTime));
+
+}
+
+void animate_swan(inout vec3 p) {
+	p.xy -= vec2(2, .2);
+
+	// tilt movement
+	if (iTime <ts2 || iTime > ts3)
+		p.xz *= r2d(.3*(floor(cos(bpm*iTime*PI) + 1.) - .5));
+
+	// side movement
+	p.x += mix(-7., 0.2, smoothstep(0., ts2 + 1.5, iTime));
+}
+
+void shrink(inout vec3 v0, inout vec3 v1, inout vec3 v2, int obj_id) {
+
+	float enable = smoothstep(ts2 - .1, ts2 + .5, iTime) * (1. - smoothstep(ts2 + 2.6, ts3, iTime));
+
+	float ts = (float(obj_id) + iTime) * enable;
+	v0.xz *= r2d(ts*1.);
+	v1.xy *= r2d(ts*.5);
+	v2.xz *= r2d(ts*1.);
+
+	if (obj_id == CAT) {
+		v0.xy += vec2(enable*sin(ts) * 2., enable*1.);
+		v1.xy += vec2(enable*cos(ts) * 2., enable*1.);
+		v2.xy += vec2(enable*sin(ts) * 2., enable*1.);
+
+	}
+	else {
+		v0.xy += vec2(enable*cos(ts) * 2., enable*2.);
+		v1.xy += vec2(enable*sin(ts) * 2., enable*2.);
+		v2.xy += vec2(enable*cos(ts) * 2., enable*2.);
+	}
+}
+
+bool catswan_hit(Ray r, float tmin, float tmax, inout Hit_record rec, int obj_id) {
+	bool ret = false;
+
+	for (int i = 0; i < 9; i++) {
+		vec3 v0 = vertices[faces[i].x];
+		vec3 v1 = vertices[faces[i].y];
+		vec3 v2 = vertices[faces[i].z];
+        
+		if (obj_id == CAT) {
+
+			shrink(v0, v1, v2, 1);
+
+			v0.xy *= r2d(catpositions[i].w);
+			v0 += catpositions[i].xyz;
+			v1.xy *= r2d(catpositions[i].w);
+			v1 += catpositions[i].xyz;
+			v2.xy *= r2d(catpositions[i].w);
+			v2 += catpositions[i].xyz;
+
+			animate_cat(v0);
+			animate_cat(v1);
+			animate_cat(v2);
+		}
+
+		else if (obj_id == SWAN) {
+
+			shrink(v0, v1, v2, 2);
+
+			v0.xy *= r2d(swanpositions[i].w);
+			v0 += swanpositions[i].xyz;
+			v1.xy *= r2d(swanpositions[i].w);
+			v1 += swanpositions[i].xyz;
+			v2.xy *= r2d(swanpositions[i].w);
+			v2 += swanpositions[i].xyz;
+
+			animate_swan(v0);
+			animate_swan(v1);
+			animate_swan(v2);
+		}
+
+        vec3 normal;
+		float t = triangle_intersect(r.origin, r.direction, v0, v2, v1, normal);
+		if (t < rec.dist && t > tmin && t < tmax) {
+			ret = true;
+			rec.dist = t;
+			rec.normal = normal;
+		}
+	}
+
+	return ret;
+}
+
+bool background_hit(Ray r, float tmin, float tmax, inout Hit_record rec) {
+	bool ret = false;
+
+	for (int i = 9; i < 11; i++) {
+		vec3 v0 = vertices[faces[i].x];
+		vec3 v1 = vertices[faces[i].y];
+		vec3 v2 = vertices[faces[i].z];
+
+        vec3 normal;
+		float t = triangle_intersect(r.origin, r.direction, v0, v2, v1, normal);
+		if (t < rec.dist && t > tmin && t < tmax) {
+			ret = true;
+			rec.dist = t;
+			rec.normal = normal;
+		}
+	}
+	return ret;
+}
+
+bool plane_hit(vec4 plane, Ray r, float tmin, float tmax, inout Hit_record rec) {
+	bool hit = false;
+
+	vec3 n = plane.xyz;
+	vec3 pos = n * plane.w;
+	float t = dot(pos - r.origin, n) / dot(r.direction, n);
+
+	if (t < rec.dist && t > tmin && t < tmax) {
+		hit = true;
+		rec.dist = t;
+		rec.normal = n;
+	}
+
+	return hit;
+}
+
+bool world_hit(Ray r, float tmin, float tmax, out Hit_record rec) {
+	rec.dist = tmax;
+	bool hit = false;
+
+	if (plane_hit(vec4(0, 1, 0, -2.3), r, tmin, rec.dist, rec)) {
+		hit = true, rec.mat = vec3(1., .84, 0);
+	}
+
+	if (plane_hit(vec4(0, 0, 1, -5.5), r, tmin, rec.dist, rec)) {
+		hit = true, rec.mat = vec3(1., .5, .8);
+	}
+    
+    if (background_hit(r, tmin, rec.dist, rec)) {
+		hit = true, rec.mat = vec3(.9, .2, .07);
+	}
+
+	if (catswan_hit(r, tmin, rec.dist, rec, CAT)) {
+		hit = true, rec.mat = vec3(.95);
+	}
+    
+    if (catswan_hit(r, tmin, rec.dist, rec, SWAN)) {
+		hit = true, rec.mat = vec3(.95);
+	}
+
+	rec.pos = point_at_parameter(r, rec.dist);
+
+	return hit;
+}
+
+// diffuse lambert only
+Ray scatter(in Hit_record rec) {
+	return Ray(rec.pos, random_cos_weighted_hemisphere_direction(rec.normal, g_seed));
+}
+
+vec3 color(in Ray r) {
+	vec3 col = vec3(0);
+	vec3 atten = vec3(1);
+	for (int i = 0; i < MAXRECURSION; i++) {
+		Hit_record rec;
+		if (world_hit(r, .001, MAX_FLOAT, rec)) {
+			r = scatter(rec);
+			atten *= rec.mat;
+
+		}
+		else {
+			col = atten * mix(vec3(1.5), vec3(.5, .7, 1), r.direction.y * .5 + .5);
+		}
+	}
+
+	return col;
+}
+
+void main() {
+
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+	g_seed = float(base_hash(floatBitsToUint(fragCoord.xy))) / float(0xffffffffU) + iTime;
+	float aspect = viewPort.x / viewPort.y;
+
+    // cam position
+	vec3 pos1 = vec3(-10, 5.4, 35);
+	vec3 pos2 = vec3(-3, 1.5, 23);
+	vec3 pos3 = vec3(3, 5.4, 30);
+
+	vec3 ro = mix(
+		mix(pos1, pos2, smoothstep(0., 15., iTime)),
+		pos3, smoothstep(16., 31., iTime));
+
+	//vec3 ro = vec3(25*sin(sin(iTime*.3)), 1.4 + sin(iTime), 25.*cos(sin(iTime*.5)));
+
+
+	vec3 ta = vec3(-1.5, 0, 0);
+
+	Camera cam = get_camera(ro, ta, vec3(0, 1, 0), 20., aspect, .5, length(ta - ro));
+
+	vec3 col = vec3(0);
+	for (int s = 0; s < MAXSAMPLE; s++) {
+		vec2 uv = (fragCoord.xy.xy + hash2(g_seed)) / viewPort.xy;
+		Ray r = get_ray(cam, uv);
+		col += color(r);
+
+	}
+	col /= float(MAXSAMPLE);
+
+    // gamma correct
+	col = clamp(col, 0., 1.);
+	col = pow(col, vec3(.4545));
+
+    // fading in & out
+	col = mix(
+		mix(vec3(0), col, smoothstep(0., 1., iTime)),
+		vec3(0),
+		smoothstep(ts4, ts4 + 2.5, iTime));
+
+	outColor = vec4(col, 1.);
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,119 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+
+	<param name="buff_B" type="int" default="0" />
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+
+		<bind param="buff_B" program="fp" />
+
+		
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="Phyllotaxes_common.glsl" program="fp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform int iFrame;
+			uniform sampler2D buff_B;
+			
+			
+		/*
+
+		    Phyllotaxes
+		    -----------
+
+			4k executable graphics entry for Nova 2020
+
+			Model from my earlier succulent shaders:
+
+			    Bloom [skull] https://www.shadertoy.com/view/WdScDG
+			    Echeveria II https://www.shadertoy.com/view/WtGXWm
+			    Echeveria https://www.shadertoy.com/view/wlVGRz
+
+			Lighting and tracing loop adapted from yx's Primitive Portrait:
+
+			    https://www.shadertoy.com/view/ts2cWm
+
+		*/
+
+
+		vec3 aces(vec3 x) {
+		  const float a = 2.51;
+		  const float b = 0.03;
+		  const float c = 2.43;
+		  const float d = 0.59;
+		  const float e = 0.14;
+		  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+		}
+
+		// colour grading from tropical trevor's scripts
+		// https://github.com/trevorvanhoof/ColorGrading
+		float Luma(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
+
+		void main() {
+
+			vec2 fragCoord = jit_in.texcoord * iResolution;
+			vec3 col = texelFetch(buff_B, ivec2(fragCoord.xy), 0).rgb / float(iFrame + 1);
+		    col *= 2.;
+		    vec3 uGain = vec3(1.8);
+		    vec3 uLift = vec3(.002,-.003,.007);
+		    vec3 uOffset = vec3(.00,.00,.00);
+		    vec3 uGamma = vec3(-.3);
+		    
+			col = mix(col, vec3(Luma(col)), .25);
+		    col = pow(max(vec3(0.0), col * (1.0 + uGain - uLift) + uLift + uOffset), max(vec3(0.0), 1.0 - uGamma));
+			col = max(col, vec3(0));
+		    col = pow( col, vec3(0.4545) );
+		    col = aces(col);
+			fragColor.rgb = col;
+		}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

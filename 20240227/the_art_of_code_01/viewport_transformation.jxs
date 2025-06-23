@@ -1,0 +1,99 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+
+
+void main() {
+
+
+// vec2 uv = jit_in.uv; //jit_in.uv is equal as (fragCoord/iResolution.xy) in Shadertoy
+// outColor = vec4(uv, 0., 1.0); // normalized coordinates 0 < > 1.
+
+/* coordinates ranging from -.5 to .5
+*/
+
+vec2 screenUV = jit_in.uv;
+screenUV -= .5; // coordinates range from -5; to .5;
+float aspectRatio = viewPort.x / viewPort.y;
+screenUV.x *= aspectRatio;
+outColor = vec4(screenUV, 0., 1.);
+
+// a  white circle
+
+// vec2 uv = jit_in.uv; //jit_in.uv is equal as (fragCoord/iResolution.xy) in Shadertoy
+// uv -= .5; // coordinates range from -5; to .5;
+// uv.x *= viewPort.x / viewPort.y; // aspectRatio
+
+// float d =  length(uv);
+// float c = d;
+
+// if(d < .3) c = 1.;
+// else c = .0;
+
+// outColor = vec4(uv, 0, 1.);
+
+/* 
+Now that we have screen percentage from 0 to 1, we want to change it to being 
+from -1 to 1 so that it’s actually just the x and y coordinate on the imaginary pixel rectangle.
+*/
+//https://learnopengl.com/Getting-started/Coordinate-Systems#:~:text=OpenGL%20expects%20all%20the%20vertices,range%20will%20not%20be%20visible.
+//http://www.songho.ca/opengl/gl_projectionmatrix.html
+// vec2 screenPos = jit_in.uv*2-1; // coordinates -1 < > 1 NDC (normalized device coordinates)
+// float ratio = viewPort.x / viewPort.y; // 0 is in the middle of x and y
+// screenPos.x *= ratio;
+// outColor = vec4(screenPos, 0., 1.); 
+
+}
+]]>
+</program>
+</language>
+</jittershader>

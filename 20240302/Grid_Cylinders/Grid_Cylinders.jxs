@@ -1,0 +1,392 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+    <param name="iChannelResolution0" type="vec2" state="TEXDIM1" />
+    <param name="iChannelResolution1" type="vec2" state="TEXDIM2" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+    <param name="iChannel2" type="int" default="2" />
+    <param name="iChannel3" type="int" default="3" />
+	
+
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec4" default="0.0 0.0 0.0 0.0" />
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+
+		<bind param="iTime" program="fp" />
+        <bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+        <bind param="iChannelResolution0" program="fp" />
+        <bind param="iChannelResolution1" program="fp" />
+        <bind param="iChannel0" program="fp" />
+        <bind param="iChannel1" program="fp" />
+        <bind param="iChannel2" program="fp" />
+        <bind param="iChannel3" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec4 iMouse;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+uniform sampler2D iChannel3;
+uniform vec2 iChannelResolution0;
+uniform vec2 iChannelResolution1;
+
+
+// Copyright Inigo Quilez, 2013 - https://iquilezles.org/
+// I am the sole copyright owner of this Work.
+// You cannot host, display, distribute or share this Work neither
+// as it is or altered, here on Shadertoy or anywhere else, in any
+// form including physical and digital. You cannot use this Work in any
+// commercial or non-commercial product, website or project. You cannot
+// sell this Work and you cannot mint an NFTs of it or train a neural
+// network with it without permission. I share this Work for educational
+// purposes, and you can link to it, through an URL, proper attribution
+// and unmodified screenshot, as part of your educational material. If
+// these conditions are too restrictive please contact me and we'll
+// definitely work it out.
+
+// Try 4, 15, 30 samples if yo have a powerful machine
+
+// #if HW_PERFORMANCE==0
+// #define VIS_SAMPLES 1
+// #else
+// #define VIS_SAMPLES 4
+// #define VIS_SAMPLES 15
+#define VIS_SAMPLES 30
+// #endif
+
+float hash1( float n ) { return fract(43758.5453123*sin(n)); }
+float hash1( vec2  n ) { return fract(43758.5453123*sin(dot(n,vec2(1.0,113.0)))); }
+vec2  hash2( float n ) { return fract(43758.5453123*sin(vec2(n,n+1.0))); }
+
+float gAnimTime;
+
+float map( vec2 p ) 
+{
+    float f = textureLod( iChannel0, p/iChannelResolution0.xy, 0.0 ).x;
+    f *= sqrt( textureLod( iChannel2, (0.03*p + 2.0*gAnimTime)/256.0, 0.0 ).x );
+    return 22.0*f;
+}
+
+vec3 calcNormal( in vec3 pos, in float ic )
+{
+    return mix( normalize(vec3(pos.x,0.0,pos.z)), vec3(0.0,1.0,0.0), ic );
+}
+
+vec4 raycast( in vec3 ro, in vec3 rd )
+{
+    vec2 pos = floor(ro.xz);
+    vec2 ri = 1.0/rd.xz;
+    vec2 rs = sign(rd.xz);
+    vec2 ris = ri*rs;
+    vec2 dis = (pos-ro.xz+ 0.5 + rs*0.5) * ri;
+    
+    vec4 res = vec4( -1.0, 0.0, 0.0, 0.0 );
+
+    // traverse regular grid (in 2D)
+    vec2 mm = vec2(0.0);
+    for( int i=0; i<200; i++ ) 
+    {
+
+        float ma = map(pos);
+        
+        // intersect capped cylinder        
+        vec3  ce = vec3( pos.x+0.5, 0.0, pos.y+0.5 );
+        vec3  rc = ro - ce;
+        float a = dot( rd.xz, rd.xz );
+        float b = dot( rc.xz, rd.xz );
+        float c = dot( rc.xz, rc.xz ) - 0.249;
+        float h = b*b - a*c;
+        if( h>=0.0 )
+        {
+            // cylinder         
+            float s = (-b - sqrt( h ))/a;
+            if( s>0.0 && (ro.y+s*rd.y)<ma )
+            {
+                res = vec4( s, 0.0, pos );
+                break; 
+            }
+            // cap          
+            s = (ma - ro.y)/rd.y;
+            if( s>0.0 && (s*s*a+2.0*s*b+c)<0.0 )
+            {
+                res = vec4( s, 1.0, pos );
+                break;
+            }
+        }
+
+        // step to next cell        
+        mm = step( dis.xy, dis.yx ); 
+        dis += mm*ris;
+        pos += mm*rs;
+    }
+
+
+    return res;
+}
+
+float castShadowRay( in vec3 ro, in vec3 rd )
+{
+    vec2 pos = floor(ro.xz);
+    vec2 ri = 1.0/rd.xz;
+    vec2 rs = sign(rd.xz);
+    vec2 ris = ri*rs;
+    vec2 dis = (pos-ro.xz+ 0.5 + rs*0.5) * ri;
+    float t = -1.0;
+    float res = 1.0;
+    
+    // first step we check noching  
+    vec2 mm = step( dis.xy, dis.yx ); 
+    dis += mm * ris;
+    pos += mm * rs;
+    
+    // traverse regular grid (2D)   
+    for( int i=0; i<16; i++ ) 
+    {
+        float ma = map(pos);
+        
+        // test capped cylinder     
+        vec3  ce = vec3( pos.x+0.5, 0.0, pos.y+0.5 );
+        vec3  rc = ro - ce;
+        float a = dot( rd.xz, rd.xz );
+        float b = dot( rc.xz, rd.xz );
+        float c = dot( rc.xz, rc.xz ) - 0.249;
+        float h = b*b - a*c;
+        if( h>=0.0 )
+        {
+            float t = (-b - sqrt( h ))/a;
+            if( (ro.y+t*rd.y)<ma )
+            {
+                res = 0.0;
+                break; 
+            }
+        }
+        mm = step( dis.xy, dis.yx ); 
+        dis += mm * ris;
+        pos += mm * rs;
+    }
+
+    return res;
+}
+
+vec3 cameraPath( float t )
+{
+    // procedural path  
+    vec2 p  = 200.0*sin( 0.01*t*vec2(1.2,1.0) + vec2(0.1,0.9) );
+         p += 100.0*sin( 0.02*t*vec2(1.1,1.3) + vec2(1.0,4.5) );
+    float y = 15.0 + 4.0*sin(0.05*t);
+    
+    // collision
+    float h;
+    h  = map( p+vec2(-1.0, 0.0) );
+    h += map( p+vec2( 1.0, 0.0) );
+    h += map( p+vec2( 0.0, 1.0) );
+    h += map( p+vec2( 0.0,-1.0) );
+    h /= 4.0;
+    h += 5.0;
+    y = max( y, h );
+
+    return vec3( p.x, y, p.y );
+}
+
+vec4 texcyl( sampler2D sam, in vec3 p, in vec3 n )
+{
+    vec4 x = texture( sam, vec2(p.y,0.5+0.5*atan(n.x,n.z)/3.14) );
+    vec4 y = texture( sam, p.xz );
+    return mix( x, y, abs(n.y) );
+}
+
+const vec3 lig = normalize(vec3(-0.7,0.25,0.6));
+
+vec3 render( in vec3 ro, in vec3 rd )
+{
+    // background color 
+    float sun = clamp( dot( rd, lig ), 0.0, 1.0 );
+
+    vec3 bgcol = vec3(0.9,1.0,1.0) + 0.3*pow(sun,4.0);
+
+    // raytrace
+    vec3 col = bgcol;
+    vec4 res = raycast( ro, rd );
+    vec2 vos = res.zw;
+    float t = res.x;
+    if( t>0.0 )
+    {
+        vec3  pos = ro + rd*t;
+        float id  = hash1( vos );
+        vec3  nor = calcNormal( fract(pos)-0.5, res.y );
+        float h = map(vos);
+
+        // material color           
+        vec3 mate = 0.55 + 0.45*sin( 2.0*id + 1.8 + vec3(0.0,0.5,1.0) );
+
+        vec3 uvw = pos - vec3(0.0,h,0.0);
+        vec3 tex = texcyl( iChannel3, 0.2*uvw + 13.1*hash1(id), nor ).xyz;
+        mate *= 0.2+4.0*tex*tex;
+        mate *= 0.02 + 0.98*smoothstep( 0.1,0.11, hash1(id) );  
+
+        // material cheap/wrong bump             
+        //vec3 bn = -1.0 + 2.0*texcyl( iChannel1, 0.2*uvw*vec3(1.0,0.2,1.0) + 13.1*hash1(id), nor ).xyz;
+        //nor = normalize(nor + 0.3*bn*(1.0-0.5*nor.y) );
+
+        // procedural occlusion
+        float occ = nor.y*0.75;
+        occ += 0.5*clamp( nor.x,0.0,1.0)*smoothstep( -0.5, 0.5, pos.y-map(vos+vec2( 1.0, 0.0)) );
+        occ += 0.5*clamp(-nor.x,0.0,1.0)*smoothstep( -0.5, 0.5, pos.y-map(vos+vec2(-1.0, 0.0)) );
+        occ += 0.5*clamp( nor.z,0.0,1.0)*smoothstep( -0.5, 0.5, pos.y-map(vos+vec2( 0.0, 1.0)) );
+        occ += 0.5*clamp(-nor.z,0.0,1.0)*smoothstep( -0.5, 0.5, pos.y-map(vos+vec2( 0.0,-1.0)) );
+        occ = 0.2 + 0.8*occ;
+        occ *= pow( clamp((0.1+pos.y)/(0.1+map(floor(pos.xz))),0.0,1.0),2.0);
+        occ = occ*0.5+0.5*occ*occ;
+        float rim = pow( clamp( 1.0+dot(rd,nor), 0.0, 1.0 ),5.0 );
+
+        //-------------
+        // lighitng
+        //-------------
+        float amb = 1.0;
+        //-------------
+        float bac = clamp( dot( nor, normalize(vec3(-lig.x,0.0,-lig.z)) ), 0.0, 1.0 ) * clamp(1.0-pos.y/20.0,0.0,1.0);;
+        //-------------
+        float dif = dot( nor, lig );
+        if( dif>0.0 ) dif *= castShadowRay( pos, lig );
+        dif = max( dif, 0.0 );
+        float spe = pow( clamp( dot(lig,reflect(rd,nor)), 0.0, 1.0 ),3.0 );
+        //-------------
+        vec3 lin  = 3.00*vec3(1.0,1.0,1.0)*dif;
+             lin += 0.80*vec3(0.4,1.0,1.7)*amb*occ;
+             lin += 0.30*vec3(0.8,0.5,0.3)*bac*occ;
+
+        col = mate*lin + tex.x*1.5*(0.3+0.7*rim)*spe*dif;
+
+        // fog
+        float ff = 1.0 - smoothstep( 0.0, 1.0, pow(t/160.0,1.8) );
+        col = mix( col, bgcol, 1.0-ff );
+        
+    }
+    col += 0.2*pow(sun,8.0)*vec3(1.0,0.7,0.2);
+
+    return col;
+}
+
+void main()
+{
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // inputs   
+    vec2 mo = iMouse.xy / viewPort.xy;
+    if( iMouse.z<=0.00001 ) mo=vec2(0.0);
+    
+    gAnimTime = iTime;
+    
+    // montecarlo   
+    vec3 tot = vec3(0.0);
+    #if VIS_SAMPLES<2
+    int a = 0;
+    {
+        vec2 p = -1.0 + 2.0*(fragCoord.xy) / viewPort.xy;
+        p.x *= viewPort.x/ viewPort.y;
+        float time = 4.0*iTime + 50.0*mo.x;
+    #else
+    for( int a=0; a<VIS_SAMPLES; a++ )
+    {
+        vec4 rr = texture( iChannel1, (fragCoord.xy+floor(256.0*hash2(float(a))))/iChannelResolution1.xy );
+        vec2 p = -1.0 + 2.0*(fragCoord.xy+rr.xz) / viewPort.xy;
+        p.x *= viewPort.x/ viewPort.y;
+        #if VIS_SAMPLES>3
+        float time = 4.0*(iTime + 1.0*(0.4/24.0)*rr.w) + 50.0*mo.x;
+        #else
+        float time = 4.0*(iTime) + 50.0*mo.x;
+        #endif
+    #endif  
+
+        // camera
+        vec3  ro = cameraPath( time );
+        vec3  ta = cameraPath( time+5.0 ); ta.y = ro.y - 5.5;
+        float cr = 0.2*cos(0.1*time*0.5);
+    
+        // build ray
+        vec3 ww = normalize( ta - ro);
+        vec3 uu = normalize(cross( vec3(sin(cr),cos(cr),0.0), ww ));
+        vec3 vv = normalize(cross(ww,uu));
+        float r2 = p.x*p.x*0.32 + p.y*p.y;
+        p *= (7.0-sqrt(37.5-11.5*r2))/(r2+1.0);
+        vec3 rd = normalize( p.x*uu + p.y*vv + 2.5*ww );
+
+        // dof
+        #if VIS_SAMPLES>2
+        vec3 fp = ro + rd * 17.0;
+        ro += (uu*(-1.0+2.0*rr.y) + vv*(-1.0+2.0*rr.w))*0.035;
+        rd = normalize( fp - ro );
+        #endif
+
+        // render
+        vec3 col = render( ro, rd );
+        
+        tot += col;
+    }
+
+    tot /= float(VIS_SAMPLES);
+
+    // tone mapping         
+    tot = tot*1.2/(1.0+tot);
+
+    // gamma    
+    tot = pow( clamp(tot,0.0,1.0), vec3(0.45) );
+
+    tot = tot*tot*(3.0-2.0*tot);
+    
+    // vignetting   
+    vec2 q = fragCoord.xy / viewPort.xy;
+    tot *= 0.5 + 0.5*pow( 16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.1 );
+    
+    outColor = vec4( tot, 1.0 );
+}  
+
+
+]]>
+</program>
+</language>
+</jittershader>

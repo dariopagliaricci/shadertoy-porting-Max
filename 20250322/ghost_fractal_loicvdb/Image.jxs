@@ -1,0 +1,89 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannelResolution1" type="vec2" state="TEXDIM2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannelResolution1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform vec2 iChannelResolution1;
+
+#define Log2BlurRadius 1.5
+#define NoiseStrength .4
+
+vec3 ACESFilm(vec3 x){
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return (x*(a*x+b))/(x*(c*x+d)+e);
+}
+
+void main(){
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    outColor = texture(iChannel0, fragCoord/viewPort.xy, Log2BlurRadius);
+    
+    // yes the noise is added afterwards
+    float random = texture(iChannel1, (fragCoord+vec2(iFrame*50))/iChannelResolution1.xy).x;
+    float noise = exp((random*.5-.5)*NoiseStrength);
+    outColor = vec4(ACESFilm(outColor.rgb*noise), 1.);
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,425 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+    <param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform samplerCube iChannel0;
+uniform sampler2D iChannel1, iChannel2;
+
+#define ZERO min(0,iFrame)
+
+vec2 hash2( float n ) { return fract(sin(vec2(n,n+3.0))*vec2(43758.5453123,22578.1459123)); }
+
+vec3 ihash3( uint n )
+{
+    uvec3 x = uvec3(n,n*7U+1U,n*13U+31U);
+    x = ((x>>8U)^x.yzx)*1103515245U;
+    x = ((x>>8U)^x.yzx)*1103515245U;
+    return vec3(x>>8)*(1.0/float(0x00ffffffU));
+}
+
+//=====================================================================
+
+struct Box
+{
+	vec3 cen;
+    vec3 rad;
+};
+
+// returns t and normal
+vec2 boxIntersect( in vec3 ro, in vec3 rd, in vec3 ird, in Box box, out vec3 nor ) 
+{
+    vec3 n = ird*(box.cen-ro);
+    vec3 k = abs(ird)*box.rad;
+	
+    vec3 t1 = n - k;
+    vec3 t2 = n + k;
+
+	float tN = max( max( t1.x, t1.y ), t1.z );
+	float tF = min( min( t2.x, t2.y ), t2.z );
+
+	nor = -sign(rd)*step(t1.yzx,t1.xyz)*step(t1.zxy,t1.xyz);
+
+	return vec2( tN, tF );
+}
+
+// returns t and normal
+bool boxIntersectAny( in vec3 ro, in vec3 rd, in vec3 ird, in Box box ) 
+{
+    vec3 n = ird*(box.cen-ro);
+    vec3 k = abs(ird)*box.rad;
+	
+    vec3 t1 = n - k;
+    vec3 t2 = n + k;
+
+	float tN = max( max( t1.x, t1.y ), t1.z );
+	float tF = min( min( t2.x, t2.y ), t2.z );
+	
+    return tN<tF && tF>0.0;
+}
+
+
+//=====================================================================
+
+struct Data
+{
+	Box  box;
+    uint id;
+};
+
+    
+Data stack[16];
+int stPtr;
+
+void stack_reset(void) { stPtr=-1; }
+bool stack_is_empty(void) { return stPtr==-1; }
+Data stack_pop( void ) { return stack[stPtr--]; }
+void stack_push( in Data s ) { stack[++stPtr] = s; }
+
+//=====================================================================
+
+Data generate( Data x, in uint id )
+{
+    vec3 ra = ihash3( x.id + 33U );
+    vec3 rb = ihash3( x.id + 14U );
+    vec3 nr = x.box.rad*(0.51+0.45*rb);
+    vec3 di = -1.0+2.0*ra.xyz;
+#ifdef ANIMATE    
+    float sc = (x.id>=(1U<<15U)) ? 0.2+0.8*smoothstep(-0.98,-0.9,cos( float(id)*0.005 + iTime*1.0 )) : 1.0;
+    return Data( Box(x.box.cen+(x.box.rad-nr)*di, nr*sc), id );
+#else    
+    return Data( Box(x.box.cen+(x.box.rad-nr)*di, nr), id );
+#endif
+}
+
+const uint  lths = (1U<<16U);
+const vec3  ibox = vec3(8.0,4.0,4.0);
+
+//=====================================================================
+
+vec4 iStructure( in vec3 ro, in vec3 rd, float tmax, out uint oID)
+{
+    vec3 ird = 1.0/rd;
+    vec4 res = vec4(-1.0);
+    
+    stack_reset();
+
+    // start with the root
+    Data x = Data( Box(vec3(0.0), ibox), 1U );
+    
+	for( int i=ZERO; i<2048; i++ )
+	{
+        // intersect node
+        vec3 nor;
+        vec2 tmp = boxIntersect( ro, rd, ird, x.box, nor );
+        if( tmp.x<tmp.y && tmp.y>0.0 && tmp.x<tmax )
+        {
+            // if leaf
+            if( x.id>=lths )
+            {
+                tmax = tmp.x;
+                res = vec4( tmp.x, nor );
+                oID = x.id;
+
+                // pop next node from the stach
+                if( stack_is_empty() ) break;
+                x = stack_pop();
+            }
+            // else, generate two children
+            else
+            {
+                stack_push( generate(x,(x.id<<1U)+0U) ); // push one on the stack
+                        x = generate(x,(x.id<<1U)+1U);   // and start traversing the other
+            }
+        }
+        // pop next node from the stack
+        else
+        {
+            if( stack_is_empty() ) break;
+            x = stack_pop();
+        }
+	}
+
+    return res;
+}
+
+bool iStructureAny( in vec3 ro, in vec3 rd, in vec3 ird )
+{
+    bool res = false;
+
+    // start with the root
+    Data x = Data( Box(vec3(0.0), ibox), 1U );
+
+    stack_reset();
+
+    for( int i=ZERO; i<2048; i++ )
+	{
+        // intersect node
+        if( boxIntersectAny( ro, rd, ird, x.box ) )
+        {
+            // if leaf
+            if( x.id>=lths )
+            {
+                res = true;
+                break;
+            }
+            // else, generate two children
+            else
+            {
+                stack_push( generate(x,(x.id<<1U)+0U) ); // push one on the stack
+                        x = generate(x,(x.id<<1U)+1U);   // and start traversing the other
+            }
+        }
+        // pop next node from the stack
+        else
+        {
+            if( stack_is_empty() ) break;
+            x = stack_pop();
+        }
+	}
+
+    return res;
+}
+
+//=====================================================================
+
+// method 3 by fizzer: http://www.amietia.com/lambertnotangent.html
+vec3 cosineDirection( in float seed, in vec3 nor)
+{
+    vec2 uv = hash2( seed);
+    float a = 6.2831853 * uv.y;
+    float u = 2.0*uv.x - 1.0;
+    return /*normalize*/( nor + vec3(sqrt(1.0-u*u) * vec2(cos(a), sin(a)), u) );
+}
+
+float iPlane( in vec3 ro, in vec3 rd )
+{
+    return (-0.21 - ro.y)/rd.y;
+}
+
+mat3 setCamera( in vec3 ro, in vec3 ta, float cr )
+{
+	vec3 cw = normalize(ta-ro);
+	vec3 cp = vec3(sin(cr), cos(cr),0.0);
+	vec3 cu = normalize( cross(cw,cp) );
+	vec3 cv =          ( cross(cu,cw) );
+    return mat3( cu, cv, -cw );
+}
+
+vec3 convertToCubeMapCoords(vec2 position) {
+    // Example conversion: map 2D coordinates to a 3D vector
+    float phi = position.x * 2.0 * 3.14159265359; // azimuth
+    float theta = position.y * 3.14159265359;     // elevation
+
+    float x = cos(phi) * sin(theta);
+    float y = cos(theta);
+    float z = sin(phi) * sin(theta);
+
+    return vec3(x, y, z);
+}
+
+//=====================================================================
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // inputs	
+	vec2  offs = ihash3(uint(iFrame)).xy;
+    float seed = texelFetch( iChannel2, ivec2(fragCoord+offs*1024.0)&255, 0 ).x;
+    
+	vec2 off = ihash3(uint(iFrame*3+17)).xy - 0.5;
+    vec2 p = (2.0*(fragCoord+off)-viewPort.xy)/viewPort.y;
+
+	// camera
+    float an = 0.6+0.0002*iTime;
+    float cr = 0.2*sin(-0.05*an);
+	vec3  ta = vec3(2.2,0.20,0.4);
+	vec3  ro = ta + vec3( 3.5*sin(an), 1.0, -3.5*cos(an) );
+    float fl = 3.52;
+
+	// camera
+    mat3 cam = setCamera( ro, ta, cr );
+    vec3 rd = normalize( cam * vec3(p,-fl) );
+
+
+    // background
+    vec3 col = vec3(0.07+0.04*rd.y);
+    float tmin = 100.0;
+
+    
+    vec3 pos, nor, sur;
+
+    // trace floor plane
+    {
+    float t1 = iPlane( ro, rd );
+    if( t1>0.0 )
+    {
+        tmin = t1;
+        pos = ro + tmin*rd;
+        nor = vec3(0.0,1.0,0.0);
+        sur = texture( iChannel1, pos.xz + 0.5 ).xyz;
+        sur *= 0.3;
+    }
+    }
+    
+    // trace boxes
+    {
+    uint id = 0U;
+    vec4 res = iStructure( ro, rd, tmin, id );
+    if( res.x>0.0 && res.x<tmin )
+    {
+        tmin = res.x;
+        pos = ro + tmin*rd;
+        nor = res.yzw;
+		sur = abs(nor.x)*texture( iChannel1, 2.0*pos.yz ).xyz + 
+              abs(nor.y)*texture( iChannel1, 2.0*pos.zx ).xyz + 
+              abs(nor.z)*texture( iChannel1, 2.0*pos.xy ).xyz;
+        
+        sur *= 0.6 + 0.4*sin(float(id)*0.005+vec3(0.0,0.5,1.0));
+        sur *= 1.0 + 0.3*sin(float(id+2U));
+	}
+    }
+
+    // shade and lit
+    if( tmin<1e9 )
+    {
+        // compute occlusion
+        float occ = 0.0;
+		for( int j=ZERO; j<1; j++ )
+		{
+            float s = seed + float(j) + float(iFrame)*13.1;
+            vec3 rr = cosineDirection( s, nor);
+            if( rr.y>0.0 )
+            {
+            vec3 irr = 1.0/rr;
+			occ += (iStructureAny( pos+nor*0.001, rr, irr ) ? 0.0 : 1.0 );
+            }
+		}
+		occ /= 1.0;
+        
+
+        col = sur*occ*mix(vec3(1.0,0.6,0.3),vec3(0.8,0.9,1.0),clamp(0.2+0.8*nor.y,0.0,1.0));
+        float spe = smoothstep(0.0,0.13,reflect(rd,nor).y);
+        float fre = 0.04+0.96*pow(clamp(1.0+dot(nor,rd),0.0,1.0),5.0);
+        col += spe*fre*occ*vec3(0.5,0.7,1.0)*sur.x*sur.x*1.5;
+        
+        // fog
+        col = mix( col, vec3(0.08,0.07,0.06), 1.0-exp( -0.002*tmin ) );
+    }
+    float t = tmin;
+
+    // gamma    
+    col = pow( col, vec3(0.4545) );
+
+
+
+    //------------------------------------------
+	// reproject from previous frame and average
+    //------------------------------------------
+
+    // mat4 oldCam = mat4( texelFetch(iChannel0,ivec2(0,0), 0),
+    //                     texelFetch(iChannel0,ivec2(1,0), 0),
+    //                     texelFetch(iChannel0,ivec2(2,0), 0),
+    //                     0.0, 0.0, 0.0, 1.0 );
+
+    mat4 oldCam = mat4( texture(iChannel0,vec3(0,0,0)),
+                        texture(iChannel0,vec3(1,0,0)),
+                        texture(iChannel0,vec3(2,0,0)),
+                        0.0, 0.0, 0.0, 1.0 );
+    
+    // world space
+    vec4 wpos = vec4(ro + rd*t,1.0);
+    // camera space
+    vec3 cpos = (wpos*oldCam).xyz; // note inverse multiply
+    // ndc space
+    vec2 npos = -fl * cpos.xy / cpos.z;
+    // screen space
+    vec2 spos = 0.5 + 0.5*npos*vec2(viewPort.y/viewPort.x,1.0);
+    // undo dither
+    spos -= off/viewPort.xy;
+	// raster space
+    vec2 rpos = spos * viewPort.xy - .5;
+    ivec2 ipos = ivec2(floor(rpos));
+    // blend pixel color history
+    if( (ipos.y>0 || ipos.x>2) && iFrame>0 )
+    {
+        vec3 spos3D = convertToCubeMapCoords(spos);
+		col = mix(textureLod(iChannel0, spos3D, 0.0).xyz, col, 0.01);
+        // col = mix( textureLod( iChannel0, spos, 0.0 ).xyz, col, 0.01 );
+        col = clamp(col,0.0,10.0);
+    }
+
+    //----------------------------------
+    // output
+	ivec2 ifc = ivec2(floor(fragCoord));
+	if( ifc.y==0 && ifc.x<=2 )
+    {
+        // camera
+        outColor = vec4( cam[ifc.x], -dot(cam[ifc.x],ro) );
+    }
+    else
+    {
+        // color
+        outColor = vec4( col, 1.0 );
+    }
+}
+]]>
+</program>
+</language>
+</jittershader>

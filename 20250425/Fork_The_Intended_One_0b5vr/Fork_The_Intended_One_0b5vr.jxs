@@ -1,0 +1,245 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0" />
+  <param name="iChannel0" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+    <bind param="iChannel0" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+#define lofi(i,j) (floor((i)/(j))*(j))
+#define fs(i) (fract(sin((i)*114.514)*1919.810))
+
+float time;
+float seed;
+
+float random(){
+  seed++;
+  return fs(seed);
+}
+
+mat2 r2d(float t){
+  return mat2(cos(t),sin(t),-sin(t),cos(t));
+}
+
+mat3 orthBas(vec3 z){
+  z=normalize(z);
+  vec3 up=abs(z.y)>.999?vec3(0,0,1):vec3(0,1,0);
+  vec3 x=normalize(cross(up,z));
+  return mat3(x,cross(z,x),z);
+}
+
+vec3 lamb(vec3 n){
+  float phi16=acos(-1.)*2.*random();
+  float ct=sqrt(random());
+  float st=sqrt(1.0-ct*ct);
+  return orthBas(n)*vec3(
+    cos(phi16)*st,
+    sin(phi16)*st,
+    ct
+  );
+}
+
+vec4 ibox(vec3 ro,vec3 rd,vec3 s){
+  vec3 src=ro/rd;
+  vec3 dst=abs(s/rd);
+  vec3 fv=-src-dst;
+  vec3 bv=-src+dst;
+  float f=max(max(fv.x,fv.y),fv.z);
+  float b=min(min(bv.x,bv.y),bv.z);
+  if(f<.0||b<f){return vec4(1E2);}
+  vec3 n=-sign(rd)*step(fv.zxy,fv)*step(fv.yzx,fv);
+  return vec4(n,f);
+}
+
+
+struct QTR {
+  vec3 cell;
+  vec3 size;
+  float len;
+  bool hole;
+};
+
+QTR qt(vec3 ro,vec3 rd){
+  QTR r;
+  r.hole=false;
+  r.size=vec3(1,1E3,1);
+  for(int i=0;i<8;i++){
+    r.size/=2.;
+    r.cell=lofi(ro+rd*1E-2*r.size.x,r.size)+r.size/2.;
+    r.hole=r.cell.y>0.;
+    if(r.hole){break;}
+    float di=fs(dot(r.cell,vec3(3,4,5)));
+    if(di>.5){break;}
+  }
+  vec3 src=(ro-r.cell)/rd;
+  vec3 dst=abs(r.size/2./rd);
+  vec3 bv=-src+dst;
+  r.len=min(min(bv.x,bv.y),bv.z);
+  
+  return r;
+}
+
+
+void main()
+{
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+  vec2 uv = vec2(fragCoord.x / viewPort.x, fragCoord.y / viewPort.y);
+  
+  time=iTime;
+  seed=texture(iChannel0,uv*8.).x;
+  seed+=fract(time);
+  
+  vec2 p=uv*2.-1.;
+  p.x*=viewPort.x/viewPort.y;
+  p*=r2d(.3);
+  
+  float h=mod(lofi(time,5.),2.);
+  float haha=exp(-5.0*fract(time/5.));
+  
+  vec3 co=vec3(0,1,2.+2.*h);
+  co.zx*=r2d(.2*time);
+  vec3 ct=vec3(0,-1,0);
+  vec3 cz=normalize(co-ct);
+  mat3 cb=orthBas(cz);
+
+  vec3 col=vec3(0);  
+  vec3 colRem=vec3(1);
+
+  vec3 ro0=co;
+  vec3 rd0=cb*normalize(vec3(p,-2));
+
+  vec3 neonPalette[5] = vec3[](
+          vec3(1.0, 0.2, 0.6), // pink
+          vec3(0.1, 1.0, 0.6), // turquoise
+          vec3(0.4, 0.8, 1.0), // light blue
+          vec3(1.0, 0.8, 0.2), // yellow
+          vec3(1.0, 0.4, 0.3)  // coral red
+        );
+  
+  for(int iS=0;iS<10;iS++){
+    vec3 ro=ro0;
+    vec3 rd=rd0;
+    vec3 fp=ro+rd*(2.-1.5*haha);
+    ro+=.04*cb*(lamb(vec3(0,0,1))*vec3(1,1,0));
+    rd=normalize(fp-ro);
+    colRem=vec3(1);
+    
+    for(int i=0;i<100;i++){
+      QTR qtr=qt(ro,rd);
+
+      vec4 isect=vec4(1E2);
+      vec3 off=vec3(0);
+      if(!qtr.hole){
+        vec3 size=qtr.size/2.-.01;
+        float di=fs(dot(qtr.cell,vec3(2,6,6)));
+        float ph=time+dot(qtr.cell,vec3(1))+3.*di;
+        off.y-=0.5+0.5*sin(ph);
+        isect=ibox(ro-qtr.cell-off,rd,size);
+      }
+      
+      if(isect.w<1E2){
+        vec3 n=isect.xyz;
+        ro+=rd*isect.w;
+        
+        float di=fs(dot(qtr.cell,vec3(3,4,-1)));
+        // if((ro-off).y>-.1&&di<.3){
+        //   if(di<.1){
+        //     col+=colRem*5.;
+        //   }else{
+        //     col+=colRem*5.*vec3(1,.1,.1);
+        //   }
+        //   colRem*=0.;
+        // }else{
+        //   colRem*=.5;
+        // }
+
+      if((ro - off).y > -0.1 && di < 0.3){
+        int paletteIndex = int(mod(floor(5.0 * fs(dot(qtr.cell, vec3(7.0, 11.0, -3.0)))), 5.0));
+        vec3 cubeColor = neonPalette[paletteIndex];
+        col += colRem * 5.0 * cubeColor;
+        colRem *= 0.0;
+      } else {
+        colRem *= 0.5;
+      }
+        
+        rd=mix(lamb(n),reflect(rd,n),0.5);
+      }else{
+        ro+=rd*qtr.len;
+      }
+      
+      if(colRem.x<.1){break;}
+      if(rd.y>.0&&ro.y>.0){break;}
+      if(length(ro)>10.){break;}
+    }
+    
+    col+=colRem*.1;
+  }
+  
+  col/=10.;
+  col/=1.0+col;
+  col=pow(col,vec3(.4545));
+  col*=1.0-length(p)*.2;
+  col=vec3(
+    smoothstep(.1,.9,col.x),
+    smoothstep(.0,1.,col.y),
+    smoothstep(-.1,1.1,col.z)
+  );
+
+  outColor = vec4(col,1);
+}
+]]>
+</program>
+</language>
+</jittershader>

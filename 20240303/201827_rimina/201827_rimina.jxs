@@ -1,0 +1,413 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iTimeDelta" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iTimeDelta" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			
+			out jit_PerVertex {
+				vec2 uv;
+				
+			} jit_out;
+			uniform mat4 MVP;
+	
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+	
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform float iTimeDelta;
+
+//Simple path tracer. I used Iq's great article as a tutorial for this.
+//https://iquilezles.org/articles/simplepathtracing
+
+#define STEPS 28
+#define FAR 40.0
+#define EPSILON 0.5/viewPort.x
+#define PI 3.14159265359
+
+#define BOUNCES 3
+#define SAMPLES 5.0
+
+float CTIME = 0.0;
+
+// Sign function that doesn't return 0
+float sgn(float x) {
+	return (x < 0.0)?-1.0:1.0;
+}
+
+//Hash method from https://www.shadertoy.com/view/4djSRW
+//#define HASHSCALE3 vec3(.1031, .1030, .0973)
+#define HASHSCALE3 vec3(443.897, 441.423, 437.195)
+#define HASHSCALE1 443.8975
+float hash11(float p){
+	vec3 p3  = fract(vec3(p) * HASHSCALE1);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float hash13(vec3 p3){
+	p3  = fract(p3 * HASHSCALE1);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
+}
+vec2 hash23(vec3 p3){
+	p3 = fract(p3 * HASHSCALE3);
+    p3 += dot(p3, p3.yzx+19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+vec2 hash21(float p){
+	vec3 p3 = fract(vec3(p) * HASHSCALE3);
+	p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+vec3 hash31(float p){
+   vec3 p3 = fract(vec3(p) * HASHSCALE3);
+   p3 += dot(p3, p3.yzx+19.19);
+   return fract((p3.xxy+p3.yzz)*p3.zyx); 
+}
+vec3 hash33(vec3 p3){
+	p3 = fract(p3 * HASHSCALE3);
+    p3 += dot(p3, p3.yxz+19.19);
+    return fract((p3.xxy + p3.yxx)*p3.zyx);
+
+}
+
+
+//Direction functions from Ambient occlusion method
+//introduced in https://www.shadertoy.com/view/4sdGWN
+vec3 randomSphereDir(vec2 rnd){
+	float s = rnd.x*PI*2.;
+	float t = rnd.y*2.-1.;
+	return vec3(sin(s), cos(s), t) / sqrt(1.0 + t * t);
+}
+vec3 randomHemisphereDir(vec3 dir, float i){
+	vec3 v = randomSphereDir( vec2(hash11(i+1.), hash11(i+2.)) );
+	return v * sign(dot(v, dir));
+}
+
+//from http://amietia.com/lambertnotangent.html
+vec3 lambertNoTangent(vec3 normal, vec2 uv){
+   float theta = 6.283185 * uv.x;
+   uv.y = 2.0 * uv.y - 1.0;
+   vec3 spherePoint = vec3(sqrt(1.0 - uv.y * uv.y) * vec2(cos(theta), sin(theta)), uv.y);
+   return normalize(normal + spherePoint);
+}
+
+//Distance functions from Mercury's SDF library
+//http://mercury.sexy/hg_sdf/
+
+// Maximum/minumum elements of a vector
+float vmax3(vec3 v) {
+	return max(max(v.x, v.y), v.z);
+}
+
+float fSphere(vec3 p, float r) {
+	return length(p) - r;
+}
+
+// Plane with normal n (n is normalized) at some distance from the origin
+float fPlane(vec3 p, vec3 n, float distanceFromOrigin) {
+	return dot(p, n) + distanceFromOrigin;
+}
+
+// Cheap Box: distance to corners is overestimated
+float fBoxCheap(vec3 p, vec3 b) { //cheap box
+	return vmax3(abs(p) - b);
+}
+
+// Box: correct distance to corners
+float fBox(vec3 p, vec3 b) {
+	vec3 d = abs(p) - b;
+	return length(max(d, vec3(0))) + vmax3(min(d, vec3(0)));
+}
+
+// Repeat space along one axis. Use like this to repeat along the x axis:
+// <float cell = pMod1(p.x,5);> - using the return value is optional.
+float pMod1(inout float p, float size) {
+	float halfsize = size*0.5;
+	float c = floor((p + halfsize)/size);
+	p = mod(p + halfsize, size) - halfsize;
+	return c;
+}
+
+// Repeat in two dimensions
+vec2 pMod2(inout vec2 p, vec2 size) {
+	vec2 c = floor((p + size*0.5)/size);
+	p = mod(p + size*0.5,size) - size*0.5;
+	return c;
+}
+
+// Same, but mirror every second cell at the diagonal as well
+vec2 pModGrid2(inout vec2 p, vec2 size) {
+	vec2 c = floor((p + size*0.5)/size);
+	p = mod(p + size*0.5, size) - size*0.5;
+	p *= mod(c,vec2(2.0))*2.0 - vec2(1.0);
+	p -= size/2.0;
+	if (p.x > p.y) p.xy = p.yx;
+	return floor(c/2.0);
+}
+
+// Repeat around the origin by a fixed angle.
+// For easier use, num of repetitions is use to specify the angle.
+float pModPolar(inout vec2 p, float repetitions) {
+	float angle = 2.0*PI/repetitions;
+	float a = atan(p.y, p.x) + angle/2.0;
+	float r = length(p);
+	float c = floor(a/angle);
+	a = mod(a,angle) - angle/2.0;
+	p = vec2(cos(a), sin(a))*r;
+	// For an odd number of repetitions, fix cell index of the cell in -x direction
+	// (cell index would be e.g. -5 and 5 in the two halves of the cell):
+	if (abs(c) >= (repetitions/2.0)) c = abs(c);
+	return c;
+}
+
+// Mirror at an axis-aligned plane which is at a specified distance <dist> from the origin.
+float pMirror(inout float p, float dist) {
+	float s = sgn(p);
+	p = abs(p)-dist;
+	return s;
+}
+
+
+// Rotate around a coordinate axis (i.e. in a plane perpendicular to that axis) by angle <a>.
+// Read like this: R(p.xz, a) rotates "x towards z".
+// This is fast if <a> is a compile-time constant and slower (but still practical) if not.
+void pR(inout vec2 p, float a){
+	p = cos(a)*p + sin(a)*vec2(p.y, -p.x);
+}
+
+// Shortcut for 45-degrees rotation
+void pR45(inout vec2 p) {
+	p = (p + vec2(p.y, -p.x))*sqrt(0.5);
+}
+
+vec2 dist(vec3 p){
+    float flr = -fBox(p, vec3(14.0, 20.0, 14.0));
+    
+    vec3 disp = vec3(20.0, 0.0, 8.0);
+    vec3 pp = p;
+    
+    pR(pp.xy, CTIME*0.25);
+
+    
+    float ii = pModPolar(pp.xy, disp.x);
+    pp -= disp;
+    
+    vec2 i = pModGrid2(pp.xz, disp.xz);
+    
+    float lamp = fBox(pp-vec3(0.0, 3.1, 0.0), vec3(3.0, 0.1, 2.5));
+    float field = fBox(pp, vec3(3.0, 3.0, 2.5));
+    
+    pMirror(pp.x, 1.0);
+    field = min(field, fBox(pp-vec3(4.0, 0.0, 0.0), vec3(2.0, 1.0, 1.0)));
+    lamp = min(lamp, fBox(pp-vec3(4.0, 1.1, 0.0), vec3(2.0, 0.1, 1.0)));
+    
+    float scene = min(field, lamp);
+    
+    
+    float id = 0.0;
+    if(lamp < field){
+        id = 1.0+abs(ii);
+    }
+    
+    
+    return vec2(scene, id);
+}
+
+vec3 normals(vec3 p){
+    vec3 eps = vec3(EPSILON, 0.0, 0.0);
+    return normalize(vec3(
+        dist(p+eps.xyy).x-dist(p-eps.xyy).x,
+        dist(p+eps.yxy).x-dist(p-eps.yxy).x,
+        dist(p+eps.yyx).x-dist(p-eps.yyx).x
+    ));
+}
+
+//Enhanced sphere tracing algorithm introduced by Mercury
+vec2 march(vec3 ro, vec3 rd){
+    float t = 0.001;//EPSILON;
+    float step = 0.0;
+
+    float omega = 1.0;//muista testata eri arvoilla! [1,2]
+    float prev_radius = 0.0;
+
+    float candidate_t = t;
+    float candidate_error = 1000.0;
+    float sg = sgn(dist(ro).x);
+
+    vec3 p = vec3(0.0);
+
+	for(int i = 0; i < STEPS; ++i){
+		p = rd*t+ro;
+		float sg_radius = sg*dist(p).x;
+		float radius = abs(sg_radius);
+		step = sg_radius;
+		bool fail = omega > 1. && (radius+prev_radius) < step;
+		if(fail){
+			step -= omega * step;
+			omega = 1.;
+		}
+		else{
+			step = sg_radius*omega;
+		}
+		prev_radius = radius;
+		float error = radius/t;
+
+		if(!fail && error < candidate_error){
+			candidate_t = t;
+			candidate_error = error;
+		}
+
+		if(!fail && error < EPSILON || t > FAR){
+			break;
+		}
+		t += step;
+	}
+    //discontinuity reduction
+    float er = candidate_error;
+    for(int j = 0; j < 6; ++j){
+        float radius = abs(sg*dist(p).x);
+        p += rd*(radius-er);
+        t = length(p-ro);
+        er = radius/t;
+
+        if(er < candidate_error){
+            candidate_t = t;
+            candidate_error = er;
+        }
+    }
+	if(t <= FAR || candidate_error <= EPSILON){
+		t = candidate_t;
+	}
+    
+    p = ro+rd*t;
+    float id = dist(p).y;
+    
+	return vec2(t, id);
+}
+
+vec4 getMaterial(float obj, vec3 p){
+    vec3 base = vec3(0.56);
+    float reflectance = 0.0;
+    
+    if(obj > 0.0){
+        base = vec3(0.7, 0.6, 0.8)*hash31(obj)+vec3(0.5);
+        reflectance = 0.9; 
+    }
+
+    return vec4(base, reflectance);
+}
+
+
+vec3 render(vec3 o, vec3 d, vec2 uv){
+    
+    vec3 ro = o;
+    vec3 rd = d;
+    
+    
+    vec3 pixel_color = vec3(0.0);
+    vec3 absorption_factor = vec3(1.0);
+    
+    for(int i = 0; i < BOUNCES; ++i){
+        vec2 t = march(ro, rd);
+        vec3 p = ro+rd*t.x;
+        
+        if(t.y < 0.0 || t.x > FAR){
+            break;
+        }
+        
+        vec3 n = normals(p);
+        ro = p+(n*0.02);
+        
+        //material.xyz == emissive
+        //material.w == reflectance
+        vec4 material = getMaterial(t.y, p);
+
+        if(t.y > 0.0){
+            pixel_color += material.xyz * absorption_factor;
+        	absorption_factor *= material.w;
+            rd = lambertNoTangent(n, hash23(vec3(uv, float(i)+iTime*0.1)));
+            
+        }
+        else{
+            absorption_factor *= material.xyz;
+            rd = randomHemisphereDir(n, hash13(vec3(uv, float(i)+iTime*0.01)));
+        }
+    }
+    
+    return pixel_color;
+}
+
+void main()
+{
+   	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = fragCoord.xy / viewPort.xy;
+    vec2 q = -1.0+2.0*uv;
+    q.x *= viewPort.x/viewPort.y;
+    
+    vec3 color = vec3(0.0);
+    
+    
+    for(float i = 0.0; i < SAMPLES; ++i){
+        CTIME = (iTime-iTimeDelta) + 0.6*(1.0/24.0)*hash13(vec3(uv, iTime*0.1));
+        
+        vec3 ro = vec3(20.0, 6.5, 10.0+CTIME);
+        vec3 rt = vec3(0.0, 2.5, ro.z-12.0);
+
+
+        vec3 z = normalize(rt-ro);
+        vec3 x = normalize(cross(z, vec3(0.0, 1.0, 0.0)));
+        vec3 y = normalize(cross(x, z));
+        
+    	vec3 rd = normalize(mat3(x, y, z)*vec3(q, radians(90.0)));
+    	color += render(ro, rd, uv);
+    }
+    color /= SAMPLES;
+    
+	outColor = vec4(color, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

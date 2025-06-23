@@ -1,0 +1,254 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0, iChannel1;
+
+// Similarly to https://www.shadertoy.com/view/XdSyzK, this ray traversal works
+// by finding the nearest octahedron in a certain irregular octahedron tessellation
+// and testing the ray against the inner sides of that octahedron.
+
+// The method of finding the nearest octahedron in this type of arrangement is
+// re-used from my own article here: http://amietia.com/slashmaze.html
+
+#define AA 2 // Anti-aliasing factor
+
+float time;
+
+// Camera path
+vec2 path(float z)
+{
+    vec2 p = vec2(0);
+    p.x += cos(z / 4.) * 2. * sin(z / 6.) * .7 + cos(z / 2. + sin(z * .5) / 2.) * 3. * sin(z / 5.);
+    p.y += sin(z / 3.) * 2. + cos(z / 5.) / 3. + sin(z / 5. + cos(z * 1.) / 3.) * 3.;
+    return p;
+}
+
+// Voxel solid/empty function
+float f(vec3 p)
+{
+    vec3 op = p;
+    p.xy += path(p.z);
+    float d = -(length(p.xy) - 4.);
+    op.z = mod(op.z, 21.) - 10.5;
+    return d + cos(p.x * 80.) + cos(p.y * 180.);
+}
+
+// Traces a ray
+float trace(vec3 ro, vec3 rd, float maxt)
+{
+    vec3 p = ro, c, ofs;
+    vec3 n;
+
+    for(int i = 0; i < 64; ++i)
+    {
+        // Snap to nearest octahedron
+        vec3 cp = fract(p) - .5; 
+        vec3 acp = abs(cp); 
+        ofs = step(acp.yzx, acp) * step(acp.zxy, acp) * sign(cp); 
+        c = floor(p) + .5 + ofs * .5;
+
+        // If this octahedron is solid then break out
+        if(f(c) < 0.)
+            break;
+
+        // Get the 4 side plane normals that the ray is facing
+        vec3 n0 = ofs + ofs.yzx;
+        vec3 n1 = ofs - ofs.yzx;
+        vec3 n2 = ofs + ofs.zxy;
+        vec3 n3 = ofs - ofs.zxy;
+
+        // Dot product of ray direction with side normals
+        float d0 = dot(rd, n0);
+        float d1 = dot(rd, n1);
+        float d2 = dot(rd, n2);
+        float d3 = dot(rd, n3);
+
+        // Get intersection distances
+        float t0 = (sign(d0) * .5 - dot(ro - c, n0)) / d0;
+        float t1 = (sign(d1) * .5 - dot(ro - c, n1)) / d1;
+        float t2 = (sign(d2) * .5 - dot(ro - c, n2)) / d2;
+        float t3 = (sign(d3) * .5 - dot(ro - c, n3)) / d3;
+
+        float mint = min(t0, min(t1, min(t2, t3)));
+        
+        // Update current point along ray
+        p = ro + rd * (mint + 1e-3);
+        
+        if(mint > maxt)
+            break;
+    }
+
+    return distance(p, ro);
+}
+
+vec3 image(vec2 fragCoord)
+{
+    vec4 outColor;
+    
+    // Set up primary ray direction
+    vec2 uv = fragCoord / viewPort.xy * 2. - 1.;
+    vec2 t = uv.xy;
+    t.x *= viewPort.x / viewPort.y;
+      
+    vec3 ro = vec3(0., 0., -time) + 1e-3, rd = normalize(vec3(t, 1.1));
+    vec3 targ = ro;
+
+    targ.z -= 4.;
+
+    // Offset ray origin and camera target by path displacement
+    ro.xy -= path(ro.z);
+    targ.xy -= path(targ.z);
+
+    // Camera coordinate system
+    vec3 dir = normalize(targ - ro);
+    vec3 left = normalize(cross(dir, vec3(0, 1, 0)));
+    vec3 up = normalize(cross(left, dir));
+
+    rd = rd.z * dir + rd.x * left + rd.y * up;
+
+    // Trace primary ray
+    float dist = trace(ro, rd, 100.);
+    vec3 p = ro + rd * dist, n;
+
+    // Snap to nearest octahedron
+    vec3 cp = fract(p) - .5; 
+    vec3 acp = abs(cp); 
+    vec3 ofs = step(acp.yzx, acp) * step(acp.zxy, acp) * sign(cp); 
+    vec3 c = floor(p) + .5 + ofs * .5;
+
+    // Get surface normal
+    vec2 u = vec2(dot(p - c, ofs.yzx), dot(p - c, ofs.zxy));
+    u = step(abs(u).yx, abs(u)) * sign(u);
+    n = normalize(u.x * ofs.yzx + u.y * ofs.zxy + sign(dot(p - c, ofs)) * ofs);
+
+    // Directional shadow ray direction
+    vec3 ld = normalize(vec3(1, 2, 3)) * 1.5;
+
+    outColor.a = 1.;
+    
+    // Distance darkening and directional light cosine term
+    outColor.rgb = vec3(exp(-dist / 5.) * pow(.5 + .5 * dot(n, normalize(ld)), 2.));
+
+    // Colour selection
+    float cs = (.5 + cos(c.z * 4. + 5. + c.x + c.y * 7.) * .5);
+    
+    // Apply colour
+    outColor.rgb *= mix(vec3(1),
+                         mix(vec3(.1), vec3(1, .4, .15), step(.66, cs)), step(.33,cs));
+    
+    // Darkening at octahedron edges
+    float edges = 	smoothstep(0.01, .02, abs(dot(p - c, ofs))) *
+        			smoothstep(0.01, .02, abs(dot(p - c, ofs.yzx + ofs.zxy))) *
+        			smoothstep(0.01, .02, abs(dot(p - c, ofs.yzx - ofs.zxy)));
+        
+    outColor.rgb *= mix(.5, 1., edges);
+
+    // Trace directional shadow ray
+    float st = trace(p + n * 2e-3, ld, length(ld) * 2.);
+
+    // Apply (attenuated) directional shadow
+    outColor.rgb *= mix(.2, 1., clamp(st / length(ld), 0., 1.));
+    
+    // Fake AO
+    outColor.rgb *= 1. - smoothstep(2., 5.8, distance(p.xy, -path(p.z)));
+
+    // Specular highlight
+    outColor.rgb *= 1. + pow(clamp(dot(normalize(ld), reflect(rd,n)), 0., 1.), 8.) * 4.;
+
+    // Texture map
+    vec2 tu;
+    tu.x = dot(p, ofs.yzx) / 2.;
+    tu.y = dot(p, ofs.zxy) / 2.;
+    outColor.rgb *= pow(texture(iChannel0,tu).r, 1.5) * 1.1;
+    
+    // Fog
+    outColor.rgb = mix(vec3(.5), outColor.rgb, exp(-dist / 1000.));
+
+	return outColor.rgb;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = fragCoord / viewPort.xy * 2. - 1.;
+
+    outColor.rgb = vec3(0);
+    
+    // Multisampling loop
+    for(int y = 0; y < AA; ++y)
+	    for(int x = 0; x < AA; ++x)
+        {
+            // Jittered time for motionblur
+    		time = iTime - texelFetch(iChannel1, ivec2(mod(fragCoord * float(AA) + vec2(x, y), 1024.)), 0).r * .02;
+    		outColor.rgb += image(fragCoord + vec2(x, y) / float(AA));
+        }
+    
+    outColor.rgb /= float(AA * AA);
+    
+    // Vignette
+    outColor.rgb *= 1. - (pow(abs(uv.x), 5.) + pow(abs(uv.y), 5.)) * .3;
+    
+    // Tonemapping
+    outColor.rgb /= (outColor.rgb + vec3(.4)) * .5;
+    
+    // Gamma
+    outColor.rgb = pow(outColor.rgb, vec3(1. / 2.2));
+}
+]]>
+</program>
+</language>
+</jittershader>

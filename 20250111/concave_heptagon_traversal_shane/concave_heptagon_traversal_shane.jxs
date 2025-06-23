@@ -1,0 +1,848 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 c;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform samplerCube iChannel2;
+
+/*
+
+    Concave Heptagon Traversal
+    --------------------------
+    
+    I haven't seen a concave polygon traversal on Shadertoy, so I thought I'd
+    put one together. In fact, I don't recall seeing one anywhere. I'm sure
+    they exist, but they're definitely not commonplace. Technically, this is a 
+    raymarched traversal, but still a traversal. The cross pattern it's based 
+    off of is concave and not aligned to the grid axis, so this might be the 
+    only non axis-aligned traversal as well.
+    
+    Anyway, traversing concave polygons requires a bit more work, but isn't
+    much different to traversing convex ones, with the exception that you need 
+    to use a ray line intersection that caters to convexity -- As an aside, the 
+    line algorithm works, but there'd have to be better ones around, so if 
+    anyone is aware of one, feel free to let me know.
+    
+    This is more of a proof of concept than anything else, so I didn't put a 
+    great deal of effort into fine tuning. However, everything works and the
+    frame rate is pretty good on my machine... provided you're in windowed
+    mode. It's not a fullscreen demonstration, that's for sure. :)
+    
+    The scene and lighting is pretty basic, but interesting in the sense that
+    it's not something you commonly see. Anyway, I'll put up something fancier
+    at a later date.
+    
+    
+
+    References:
+
+    // Covering a plane with crosses, then subdividing them through 
+    // opposite inner vertices to create a single non-convex heptagon 
+    // tiling of the Euclidean plane.
+	Half Cross Heptagon Pattern - Shane
+    https://www.shadertoy.com/view/MX2yWV
+
+
+
+*/
+
+
+// Maximum ray distance.
+#define FAR 20.
+
+// The cross objects sans subdivision.
+//#define CROSS_ONLY
+
+
+// Object ID: Either the back plane, extruded object or beacons.
+int objID;
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// IQ's vec2 to float hash.
+float hash21(vec2 p){  return fract(sin(dot(p, vec2(27.619, 57.583)))*43758.5453); }
+
+// Commutative smooth maximum function. Provided by Tomkh, and taken 
+// from Alex Evans's (aka Statix) talk: 
+// http://media.lolrus.mediamolecule.com/AlexEvans_SIGGRAPH-2015.pdf
+// Credited to Dave Smith @media molecule.
+float smax(float a, float b, float k){
+
+   float f = max(0., 1. - abs(b - a)/k);
+   return max(a, b) + k*.25*f*f;
+}
+
+
+// IQ's extrusion formula.
+float opExtrusion(in float sdf, in float pz, in float h, in float sf){
+
+    // Slight rounding. A little nicer, but slower.
+    vec2 w = vec2( sdf, abs(pz) - h) + sf;
+  	return min(max(w.x, w.y), 0.) + length(max(w, 0.)) - sf;
+}
+
+
+const vec2 scale = vec2(1)/2.;
+
+
+// Tri-Planar blending function: Based on an old Nvidia writeup:
+// GPU Gems 3 - Ryan Geiss: http://http.developer.nvidia.com/GPUGems3/gpugems3_ch01.html
+vec3 tex3D(sampler2D tex, in vec3 p, in vec3 n){    
+    
+    // Ryan Geiss effectively multiplies the first line by 7. It took me a while to realize that 
+    // it's largely redundant, due to the division process that follows. I'd never noticed on 
+    // account of the fact that I'm not in the habit of questioning stuff written by Ryan Geiss. :)
+    n = max(n*n - .2, .001); // max(abs(n), 0.001), etc.
+    n /= dot(n, vec3(1)); 
+    //n /= length(n); 
+    
+    // Texure samples. One for each plane.
+    vec3 tx = texture(tex, p.yz).xyz;
+    vec3 ty = texture(tex, p.zx).xyz;
+    vec3 tz = texture(tex, p.xy).xyz;
+    
+    // Multiply each texture plane by its normal dominance factor.... or however you wish
+    // to describe it. For instance, if the normal faces up or down, the "ty" texture sample,
+    // represnting the XZ plane, will be used, which makes sense.
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear space 
+    // (squaring is a rough approximation) prior to working with them... or something like that. :)
+    // Once the final color value is gamma corrected, you should see correct looking colors.
+    return mat3(tx*tx, ty*ty, tz*tz)*n; // Equivalent to: tx*tx*n.x + ty*ty*n.y + tz*tz*n.z;
+
+}
+
+
+// Texture sample.
+//
+vec3 getTex(sampler2D iCh, vec2 p){
+    
+    // Strething things out so that the image fills up the window. You don't need to,
+    // but this looks better. I think the original video is in the oldschool 4 to 3
+    // format, whereas the canvas is along the order of 16 to 9, which we're used to.
+    // If using repeat textures, you'd comment the first line out.
+    //p *= vec2(viewPort.y/viewPort.x, 1);
+    vec3 tx = texture(iCh, p).xyz;
+    return tx*tx; // Rough sRGB to linear conversion.
+}
+
+// Height map value, which is just the pixel's greyscale value.
+float hm(in vec2 p){ return dot(getTex(iChannel0, p), vec3(.299, .587, .114)); }
+
+// A more haphazard resource-free height function.
+//float hm(vec2 p){ return hash21(p + .121)*.7; }
+
+/*
+// Ray origin, ray direction, point on the line, normal. 
+float rayLine(vec2 ro, vec2 rd, vec2 p, vec2 n){
+   
+   // This it trimmed down, and can be trimmed down more. Note that 
+   // "1./dot(rd, n)" can be precalculated outside the loop. However,
+   // this isn't a GPU intensive example, so it doesn't matter here.
+   //return dot(p - ro, n)/dot(rd, n);
+   float dn = dot(rd, n);
+   return dn>0.? dot(p - ro, n)/dn : 1e8;   
+
+} 
+*/
+
+// Consider this more of an "anti-dot-product" which only works in 2D 
+// and just returns the length of the imagined vector, not the actual cross product.
+float cross2D(vec2 a, vec2 b)
+{
+	return a.x*b.y - a.y*b.x;   
+}
+
+// Return the distance of ray origin to the line intersection point
+// in the direction of the unit direction ray. If the ray falls outside
+// the line between points "a" and "b", it won't detect a hit... Not
+// all line algorithms work this way. By the way, if anyone know of a
+// faster, more efficient version of this, feel free to let me know.
+float rayLineSeg(vec2 ro, vec2 rd, vec2 a, vec2 b){
+
+    vec2 v1 = ro - a;
+    vec2 v2 = b - a;
+    vec2 v3 = vec2(-rd.y, rd.x);
+
+    float dotP = dot(v2, v3);
+    if (abs(dotP)<1e-6) return 1e8; //1e-6
+
+    float t1 = cross2D(v2, v1)/dotP;
+    float t2 = dot(v1, v3)/dotP;
+
+    if (t1 >= 0. && t2 >= 0. && t2 <= 1.) return t1;
+
+    return 1e8;
+}
+
+// IQ's cross distance field.
+float sdCross(in vec2 p, in vec2 b, float r){ 
+
+    p = abs(p); p = (p.y>p.x) ? p.yx : p.xy;
+    
+	vec2  q = p - b;
+    float k = max(q.y, q.x);
+    vec2  w = (k>0.) ? q : vec2(b.y - p.x, -k);
+    float d = length(max(w, 0.));
+    return ((k>0.)? d: -d) + r;
+}
+
+
+///////////////////////////
+// Cross bound: We don't need a proper distance field to check
+// boundary lines, so we should save ourselves some extra calculations.
+// It was nice to have IQ's proper distance field cross function to 
+// refer to when checking the workings. You can find it, here: 
+// iquilezles.org/articles/distfunctions2d
+// 
+// "b.x" represents the height and width of the entire cross, and
+// "b.y" the cross thickness.
+float bndCross(in vec2 p, in vec2 b){
+     
+    // There's probably a more succinct and faster way to write
+    // this, but it will do.
+    p = abs(p);
+    p = p.x<p.y ? p - b.yx : p - b;
+    return max(p.x, p.y);
+}
+
+vec2 gSc = scale;
+
+vec2 gP;
+vec2[12] gCList;
+//vec2[5] gPList;
+
+vec2 gID;
+float gD;
+int gCID;
+
+vec4 pattern(vec2 p){
+    
+    
+    // Overall coordinates and scale.
+    vec2 oP = p;
+    vec2 sc = gSc;
+    
+    // Box vetex and mid-edge IDs. Each are handy to have when working with squares.
+    //const mat4x2 vID = mat4x2(vec2(-.5), vec2(-.5, .5), vec2(.5), vec2(.5, -.5));
+    //const mat4x2 eID = mat4x2(vec2(-.5, 0), vec2(0, .5), vec2(.5, 0), vec2(0, -.5));
+    
+    
+    // The cross has thickness, one third of the height, which is evident from
+    // the imagery. If you turn on the grid settings, you'll see that a one to
+    // three ratio triangle is involved, etc.
+    // Cross rotation angle.
+    float a = atan(1., 3.);
+    // Cross height: This follows from the above. Feel free to get out a pen and
+    // paper, or you could take a lazy coder's word for it. :D
+     float ht = sqrt(9./10.);//cos(a);//
+    //a = acos(ht);
+    // The width needs to be one third of the height in order for two equal size
+    // crosses to tile the plane.
+    vec2 si = sc*vec2(ht, ht/3.)/2.;
+    
+    // Cross ID. Only two crosses are needed to tile the plane.
+    int crossID = 0;
+    // Each cross can be subdivided into four pentagons.
+    int pentID = 0;
+    
+    
+    // Square grid setup. Cell ID and local coordinates.
+    vec2 q = p;
+    vec2 iq = floor(q/sc) + .5;
+    q -= (iq)*sc;
+    
+    // More debugging.
+    //float sq = sBox(q, sc/2.);
+    
+    // Copying and rotating local coordinates.
+    mat2 m = rot2(a);
+    //q = m*q; 
+    
+    // The cross is rotated, but the local space is not.
+    vec2 lP = q;
+    
+    
+    // The first cross, distance field value and ID.
+    float d2 = bndCross(m*q, si);
+    float d = d2;
+    vec2 id = iq;
+    
+    // Saving the original box ID... Not sure what this is for. Probably debugging.
+    gID = iq;
+    vec2 oID = id;
+    
+    // Next cross.
+    q = oP - sc/2.; //vID[2]*sc
+    iq = floor(q/sc) + .5;
+    q -= (iq)*sc;
+ 
+    //q = m*q;
+    d2 = bndCross(m*q, si);
+        
+    if(d2<d){
+       d = d2;
+       id = iq + .5;
+       lP = q;
+       crossID = 1;
+      
+    }
+    
+     // Debugging.
+    //d += .01*sc.x;
+    //d = abs(d + .045*sc.x) - sc.x*.045;
+    //d = max(d, sq);
+    
+    gCID = crossID;
+    
+    gP = m*lP;
+    //gD = d; 
+    //gD = bndCross(gP, si);
+    gD = sdCross(gP, si - .05, 0.) - .05;
+    
+    
+    // Distance, cross and pentagon ID, and cell ID.
+    return vec4(lP, id);
+}
+
+void crossVertices(){
+
+
+    // Rotating the local coordinates to match the rotated crosses.
+    float a = atan(1., 3.);
+    mat2 m = rot2(-a);
+    float ht = sqrt(9./10.);//cos(a);//
+    vec2 sc = gSc;
+    
+    // Box vertex and mid-edge IDs. Each are handy to have when working with squares.
+    const mat4x2 vID = mat4x2(vec2(-.5), vec2(-.5, .5), vec2(.5), vec2(.5, -.5));
+    const mat4x2 eID = mat4x2(vec2(-.5, 0), vec2(0, .5), vec2(.5, 0), vec2(0, -.5));
+
+
+    // Four inner vertices.
+    mat4x2 vIn, eIn, vOutA, vOutB;
+    
+    // Precalculating the inner vertices and edges. All are rotated
+    // to match the cross rotation.
+    for(int i = 0; i<4; i++){
+        // Inner vertices.
+        vIn[i] = m*vID[i]*ht/3.*sc.x; // "ht/3" is the cross width.
+        eIn[i] = m*eID[i]*2.*ht/3.*sc.x;
+    }
+    
+    for(int i = 0; i<4; i++){
+        // Outer vertices clockwise (two each).
+        vOutA[i] = vIn[i] + eIn[i]; // Inner plus cross-width.
+        vOutB[i] = vIn[(i + 1)%4] + eIn[i]; // Next inner plus cross-width.
+        
+        // Cross list in clockwise order.        
+        gCList[3*i] = vIn[i];
+        gCList[3*i + 1] = vOutA[i];
+        gCList[3*i + 2] = vOutB[i];
+         
+    }
+
+}
+
+
+// Grid cell function.
+vec4 getGrid(vec2 p){
+
+    // Returns the local coordinates and cell center position-based
+    // IDs for the cross pattern.
+    vec4 p4 = pattern(p);
+    return vec4(p4.xy, p4.zw);
+}
+
+
+
+// Signed distance to a line passing through A and B.
+float distLineS(vec2 p, vec2 a, vec2 b){
+
+   b -= a; 
+   return dot(p - a, vec2(-b.y, b.x)/length(b));
+}
+
+/*
+// This function is better than the one above, but a bit longer. It's a 
+// mixture of various people's workings, but I got this one from one of 
+// JT's examples. I'll track it down and put the link in later.
+//
+float distLineS(vec2 p, vec2 a, vec2 b) {
+
+    p -= a; b -= a;
+    float h = clamp(dot(p, b)/dot(b, b), 0., 1.);
+    
+    // Just a simple reworking of IQ's line function, from here:
+    // https://iquilezles.org/articles/distfunctions2d/
+    return length(p - b*h)*sign(b.x*p.y - b.y*p.x); // DjinnKahn's workings.
+    //return length(p - b*h)*sign(determinant(mat2(b, p))); // JT's workings.
+}
+*/
+
+///////////////////////////
+vec3 gRd; // Global ray variable.
+float gCD; // Global cell boundary distance.
+
+// Used to store some useful distance function values for later use.
+vec4 gVal;
+
+ 
+// The scene's distance function.
+float m(vec3 p){
+    
+
+    // 2D cross local coordinates and ID. The global 2D distance 
+    // is recorded too.
+    vec4 h4 = getGrid(p.xy);
+    
+    vec2 q = h4.xy;
+    vec2 cellID = h4.zw;
+  
+    float d;
+    float h;
+    float rCDiv;
+    
+    
+    // Subdividing the cross into heptagons, and returning
+    // the vertices.
+    
+    #define vNum 12
+    vec2[vNum] v = gCList;
+    int start;
+
+    
+    float d2 = gD; //bndCross(q, scale) + .005;
+    
+    
+    #ifndef CROSS_ONLY
+    int sInd = 0;
+    if(hash21(cellID)<.5){ sInd = 3; }
+    float divLn = distLineS(q, v[sInd], v[sInd + 6]);
+    
+    int n;
+    if(divLn<0.){
+        // Heptagon 1.
+        d2 = smax(d2, divLn, .02); // Smooth maximum, for a bit of rounding.
+        
+        //polyID = 0;
+       
+        vec2 offs = v[sInd].yx*vec2(-1, 1);
+        //d2 = max(d2, -(length(q - offs*scale) - .01));
+        
+        // Moving the position based ID to somewhere resembling the 
+        // center of mass, in order to distribute the height better.
+        cellID += offs*2.;
+
+        // Raytracing out to the new boundary.
+        rCDiv = rayLineSeg(q, gRd.xy, v[sInd + 6], v[sInd]);
+        start = sInd + 6;
+    }
+    else{
+        // Heptagon 2.
+        d2 = smax(d2, -divLn, .02);
+        
+        //polyID = 1;
+        
+        vec2 offs = v[sInd + 6].yx*vec2(-1, 1);
+        //d2 = max(d2, -(length(q - offs*scale) - .01));
+        
+        // Moving the position based ID to roughly the center of mass
+        // of the heptagon object.
+        cellID += offs*2.;
+        
+        // Raytracing out to the new boundary.
+        rCDiv = rayLineSeg(q, gRd.xy, v[sInd], v[sInd + 6]);
+        start = sInd;
+
+    }
+    
+    #endif
+    
+    // Putting in some tiny gaps.
+    d2 += .001;
+    
+    // Adding the slits onto the faces.
+    //if(hash21(cellID + .3)<.5) 
+    d2 = max(d2, -(d2 + scale.x*.185));
+ 
+    
+    // Height value for this cell.
+    h = hm(cellID*scale/32.);
+    h = h*2. + .05;
+    // Extrusion.
+    d = opExtrusion(d2, p.z, h, .01);// - smoothstep(.03, .25, -d2)*.1; 
+
+    //mat2 m = rot2(atan(1., 3.));
+    //vec2 si = vec2(1, 1./3.)*sqrt(9./10.)*scale/2.;
+    //float d2 = (sdCross(gP, si - .05, 0.)) - .05 + .005;
+    //d2 = max(d2, length(q) - sqrt(9./10.)*scale.x/2. + .005);
+    //float d2 = length(q) - sqrt(9./10.)*scale.x/6.;//
+    
+    // Back plane with a slight triangle cell bevel.
+    float fl = -p.z;// - min(-tr3.z*4., .2)*.05;
+   
+    d += smoothstep(0., .1, abs(fract((p.z + h)*8. + .15) - .5) - .35)*.005;
+    d += max(d2, -.03)*.25;// + d2*.05;
+    
+    //fl += max(d2, -.03)*.25;
+    ///////////
+    
+    // Tracing out a ray from the current cell position in the direction of
+    // the unit direction ray to the cell wall. This will be used as a 
+    // ray jump delimiter.
+    gCD = 1e5;
+    
+    // Relative starting position. Adding "cellID*scale" to the vertices
+    // would work too.
+    ///vec2 pos = gP.xy - cellID*scale;
+    vec2 pos = q; // If returning relative coordinates.
+    #ifdef CROSS_ONLY
+    // Checking all 12 sides is wasteful, since there's a way to check
+    // six, but this is only here as an option, so I'll leave it as is.
+    for(int i = 0; i<12; i++){
+    #else
+    // Iterate through all six sides of the heptagon cell.
+    for(int i = start; i<start + 6; i++){
+    #endif
+       
+       //float rC = rayLine(gP.xy, gRd.xy, v[i], 
+       //                   normalize(v[i] - v[(i + 1)%vNum]).yx*vec2(1, -1));
+  
+       // rayLineSeg(vec2 ro, vec2 rd, vec2 a, vec2 b);
+       float rC = rayLineSeg(pos, gRd.xy, v[i%vNum], v[(i + 1)%vNum]);
+
+       
+       // Minimum of all distances, plus not allowing negative distances, which
+       // stops the ray from tracing backwards... or something like that.
+       gCD = min(gCD, rC);
+         
+    }
+    
+    #ifdef CROSS_ONLY
+    gCD = max(gCD, 0.) + .0015;
+    #else
+    // Overall minimum distance.
+    gCD = max(min(gCD, rCDiv), 0.) + .0015;
+    #endif
+    
+    // Recording some values to be used later.
+    gVal = vec4(d, d2, cellID);
+    ///////////
+    
+   
+    // Object ID.
+    objID = fl<d? 0 : 1 ;
+    
+    // Minimum distance for the scene.
+    return min(fl, d);
+    
+}
+
+// Basic raymarcher.
+float trace(in vec3 ro, in vec3 rd){
+
+    // Overall ray distance and scene distance.
+    float d, t = 0.; //hash21(r.xy*57. + fract(iTime + r.z))*.5;
+    
+    gRd = rd; // Set the global ray  direction varible.
+    
+    for(int i = min(iFrame, 0); i<96; i++){
+    
+        d = m(ro + rd*t);
+        // Note the "t*b + a" addition. Basically, we're putting less emphasis on accuracy, as
+        // "t" increases. It's a cheap trick that works in most situations... Not all, though.
+        if(abs(d)<.001 || t>FAR) break; // Alternative: 0.001*max(t*.25, 1.), etc.
+
+        t += min(d*.9, gCD); 
+    }
+
+    return min(t, FAR);
+}
+
+// Cheap shadows are hard. In fact, I'd almost say, shadowing particular scenes with limited 
+// iterations is impossible... However, I'd be very grateful if someone could prove me wrong. :)
+float softShadow(vec3 ro, vec3 lp, vec3 n, float k){
+
+    // More would be nicer. More is always nicer, but not affordable for slower machines.
+    const int iter = 32; 
+    
+    ro += n*.0015; // Bumping the shadow off the hit point.
+    
+    vec3 rd = lp - ro; // Unnormalized direction ray.
+
+    float shade = 1.;
+    float t = 0.; 
+    float end = max(length(rd), 0.0001);
+    rd /= end;
+    
+    //rd = normalize(rd + (hash33R(ro + n) - .5)*.03);
+    
+    gRd = rd;
+
+    // Max shadow iterations - More iterations make nicer shadows, but slow things down. Obviously, the lowest 
+    // number to give a decent shadow is the best one to choose. 
+    for (int i = min(iFrame, 0); i<iter; i++){
+
+        float d = m(ro + rd*t);
+        shade = min(shade, k*d/t);
+        //shade = min(shade, smoothstep(0., 1., k*h/dist)); // IQ's subtle refinement.
+        t += clamp(min(d, gCD), .01, .2); 
+        
+        
+        // Early exits from accumulative distance function calls tend to be a good thing.
+        if (d<0. || t>end) break; 
+    }
+
+    // Sometimes, I'll add a constant to the final shade value, which lightens the shadow a bit --
+    // It's a preference thing. Really dark shadows look too brutal to me. Sometimes, I'll add 
+    // AO also just for kicks. :)
+    return max(shade, 0.); 
+}
+
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original.
+float calcAO(in vec3 p, in vec3 n){
+
+	float sca = 2., occ = 0.;
+    for( int i = min(iFrame, 0); i<5; i++ ){
+    
+        float hr = float(i + 1)*.15/5.;        
+        float d = m(p + n*hr);
+        occ += (hr - d)*sca;
+        sca *= .7;
+        
+        // Deliberately redundant line that may or may not stop the 
+        // compiler from unrolling.
+        if(sca>1e5) break;
+    }
+    
+    return clamp(1. - occ, 0., 1.);
+}
+  
+// Normal function. It's not as fast as the tetrahedral calculation, but more symmetrical.
+vec3 nr(in vec3 p) {
+	
+    //return normalize(vec3(m(p + e.xyy) - m(p - e.xyy), m(p + e.yxy) - m(p - e.yxy),	
+    //                      m(p + e.yyx) - m(p - e.yyx)));
+    
+    // This mess is an attempt to speed up compiler time by contriving a break... It's 
+    // based on a suggestion by IQ. I think it works, but I really couldn't say for sure.
+    float sgn = 1.;
+    vec3 e = vec3(.001, 0, 0), mp = e.zzz; // Spalmer's clever zeroing.
+    for(int i = min(iFrame, 0); i<6; i++){
+		mp.x += m(p + sgn*e)*sgn;
+        sgn = -sgn;
+        if((i&1)==1){ mp = mp.yzx; e = e.zxy; }
+    }
+    
+    return normalize(mp);
+}
+
+
+void main(){
+
+    
+    vec2 u = jit_in.uv * viewPort.xy;
+    // Aspect correct coordinates. Only one line necessary.
+    u = (u - viewPort.xy*.5)/viewPort.y;    
+    
+    // Unit direction vector, camera origin and light position.
+    vec3 r = normalize(vec3(u, 1)), o = vec3(0, iTime/2., -2.5), l = o + vec3(-1.5, -1, 0);
+    
+    // Rotating the camera about the XY plane.
+    r.yz = rot2(.6)*r.yz;
+    r.xz = rot2(-cos(iTime*3.14159/32.)/8.)*r.xz;
+    r.xy = rot2(sin(iTime*3.14159/32.)/8.)*r.xy; 
+ 
+    // Precalculate the cross cell vertices.
+    crossVertices();
+  
+    
+    // Raymarch to the scene.
+    float t = trace(o, r);
+ 
+    
+    // Object ID: Back plane (0), or the metaballs (1).
+    int gObjID = objID;
+    
+    int svCID = gCID;
+    
+    vec4 svVal = gVal;
+    
+    c = vec4(0);
+    
+    if(t<FAR){
+    
+    
+        // Very basic lighting.
+        // Hit point and normal.
+        vec3 p = o + r*t, n = nr(p); 
+
+
+        // UV texture coordinate holder.
+        vec2 uv = p.xy;
+   
+
+
+        vec4 col1 = vec4(1, .15, .4, 0);
+        vec4 col2 = vec4(.4, .7, 1, 0);
+
+        /*
+        // Extra color. Interesting, but it makes things look creepily anatomical. :)
+        vec2 fID = floor(triID + .5);
+        if(mod(fID.x, 2.)<.5) col1 *= vec4(1, 2.35, 1.5, 0);
+        if(mod(fID.y, 2.)<.5) col1 *= vec4(2, 1.5, 1, 0);
+        if(mod(fID.x, 2.)<.5) col2 *= vec4(1, 1.15, .9, 0).zxyw;
+        if(mod(fID.y, 2.)<.5) col2 *= vec4(1.15, 1, .9, 0).zxyw; 
+        */
+
+        // Object color.
+        vec4 oCol;
+
+
+        // Use whatever logic to color the individual scene components. I made it
+        // all up as I went along, but things like edges, textured line patterns,
+        // etc, seem to look OK.
+        //
+        if(gObjID == 0){
+
+           // The floor. It's not really visible here, but included
+           // for completeness.
+           oCol = vec4(.05);
+
+
+        }
+        else {
+
+            // Extruded heptagon pattern.
+          
+            // Random colors.
+            float rnd = hash21(svVal.zw + .1);
+            vec3 sCol = .5 + .45*cos(6.2831853*rnd/4. + vec3(0, 1, 2));
+            
+            
+          
+            // Two crosses per cell, so multiply by two for a checkered pattern.
+            //float check = mod(floor(svVal.z*2.) + floor(svVal.w*2.)*2., 2.);
+            float check = svCID == 0? 0. : 1.;
+            
+            //oCol.xyz = vec3(1);
+            float rnd2 = hash21(svVal.zw + .2);
+            if(rnd2<.35) oCol.xyz = mix(sCol, sCol.xzy, .0);
+            //else if(rnd2<.5) oCol.xyz = mix(sCol, sCol.xzy, .333);
+            else oCol.xyz = vec3(1)*dot(sCol.xyz, vec3(.299, .114, .587));
+            
+            // Debug: Show crosses.
+            //if(check<.5) oCol.xyz = vec3(.2);
+            //else oCol.xyz = vec3(.9);
+            
+            //oCol.xyz = getTex(iChannel1, svVal.zw*scale/32.); //32.
+            //oCol.xyz = smoothstep(0., .5, oCol.xyz);
+            //oCol.xyz *= 2.;
+            
+            // Metallic texture coloring.
+            oCol.xyz *= tex3D(iChannel1, p/2., n) + .05;
+
+        }
+
+
+        // Basic point lighting.   
+        vec3 ld = l - p;
+        float lDist = length(ld);
+        ld /= lDist; // Light direction vector.
+        float at = 3./(1. + lDist*lDist*.125); // Attenuation.
+
+        float sh = softShadow(p, l, n, 8.); // Shadows.
+        float ao = calcAO(p, n); // Ambient occlusion.
+
+        float df = pow(max(dot(n, ld), 0.), 4.)*2.; // Diffuse.
+        float sp = pow(max(dot(reflect(r, n), ld), 0.), 16.); // Specular.//reflect(r, n)
+ 
+
+        // Specular reflection.
+        vec3 hv = normalize(ld - r); // Half vector.
+        vec3 ref = reflect(r, n); // Surface reflection.
+        vec4 refTx = texture(iChannel2, ref.yzx*vec3(1, -1, 1)); refTx *= refTx; // Cube map.
+        float spRef = pow(max(dot(hv, n), 0.), 5.); // Specular reflection.
+        float rf = (gObjID == 0)? .1 : 1.;
+        oCol = oCol*.5 + oCol*spRef*refTx*rf*8.;
+
+
+        // Apply the lighting and shading. 
+        c = oCol*(df*sh + vec4(1, .7, .4, 1)*sp*sh*8. + .35)*at*ao;
+    
+    }
+    
+     
+ 
+    // Rough gamma correction.
+    c = sqrt(max(c, 0.));  
+
+}
+]]>
+</program>
+</language>
+</jittershader>
+

@@ -1,0 +1,138 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform vec3 iMouse;
+			
+float s, b, R, is, e, f, E = 0.;
+float r() { return fract(sin(s++) * 43758.545); }
+
+void main()
+{
+    
+	vec2 C = jit_in.uv * viewPort.xy;
+    // RNG seed
+    s = mod(C.x * C.y + float(iFrame) * 91., 9121.);
+
+    // Camera set-up
+    vec3 a = vec3(r(), r(), .5) - .5,
+        d = vec3(10.5, 5.3 ,-60),
+        D = normalize(vec3(C / viewPort.y * 2. - 1.6, 2) * 9. - a), O = d + a + D * 15.,
+        c;
+
+    // Ray contribution factor (includes a vignet-like effect)
+    f = dot(a, a) < .25 ? D.z * D.z * 1.5 - .5 : 0.;
+
+    // Uniform grid ray traversal loop
+    for (int i = 0; i < 90; ++i)
+    {
+        c = floor(O);
+        a = c + .5;
+
+        // Ray-sphere intersection set-up
+        b = dot(D, a - O);
+        e = b * b - dot(a - O, a - O) + .25;
+
+        if (e > 0.)
+        {			
+            d = vec3(1e-6);
+            // Ray-sphere intersection
+            is = b - sqrt(e) + 1e-4;
+
+            
+            // Mandelbulb iteration for sphere placement
+            for (int j = 0; j < 11; ++j)
+                b = length(d),
+                e = 4. * atan(d.y, d.x),
+                R = 4. * acos(d.z / b),
+                d = b * b * b * b * vec3(sin(R) * cos(e), sin(R) * sin(e), cos(R)) + c.yzx / 50.;
+
+            
+            if (b < 200. && is > 0.)
+            {
+                if (b > 100.)
+                    E += f;
+                // Ray offset to sphere intersection point
+                O += D * is;
+                D = normalize(O - a);
+                // Mostly-importance-sampled Lambert reflection
+                d = vec3(r(), r(), r()) * 2. - 1.;
+                b = length(d);
+                R = pow(b / log(length(exp(abs(d) * 32.))) * 32., 3.);
+                d /= b;
+                D = (D + d) / sqrt(dot(D, d) * 2. + 2.001); // 0.001 is added here to avoid numerical problems.
+                // Reflection albedo
+                f *= .9 / R;
+                continue;
+            }
+        }
+
+        // Step to the next cell in the uniform grid
+        d = (c + max(sign(D), 0.) - O) / D;
+        O += (dot(d, step(d, d.yzx) * step(d, d.zxy)) + 1e-4) * D;
+    }
+
+    // Accumulate energy
+    outColor = texture(iChannel0, C / viewPort.xy) * step(iMouse.z, 0.) + vec4(E * vec3(1, 3, 2) + (.5 + .5 * D.y) * f, 1);
+}
+]]>
+		</program>
+	</language>
+</jittershader>

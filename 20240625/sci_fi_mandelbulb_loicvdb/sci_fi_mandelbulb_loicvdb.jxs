@@ -1,0 +1,319 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec4 iMouse;
+uniform samplerCube iChannel0;
+
+
+#define Pi 3.14159265359
+
+#define VolumePrecision .35
+#define SceneRadius 1.5
+#define StepsSkipShadow 4
+#define MaxSteps 500
+#define MaxAbso .7
+#define MaxShadowAbso .7
+
+#define HASH( seed ) fract(cos(seed)*43758.5453)
+#define RANDOM HASH(seed++)
+#define RANDOM2D vec2(RANDOM, RANDOM)
+
+vec3 CamPos = vec3(.0, 0, -15.0);
+vec3 CamRot = vec3(.5, -.5, 0.);
+float CamFocalLength = 7.;
+float CamFocalDistance = 14.2;
+float CamAperture = .3;
+
+vec3 LightColor = vec3(3.);
+vec3 LightDir = normalize(vec3(-1, -.2, 0));
+
+float Power = 8.0;
+
+float Density = 500.0;
+
+float StepSize;
+
+float seed;
+
+mat3 rotationMatrix(vec3 rotEuler){
+    float c = cos(rotEuler.x), s = sin(rotEuler.x);
+    mat3 rx = mat3(1, 0, 0, 0, c, -s, 0, s, c);
+    c = cos(rotEuler.y), s = sin(rotEuler.y);
+    mat3 ry = mat3(c, 0, -s, 0, 1, 0, s, 0, c);
+    c = cos(rotEuler.z), s = sin(rotEuler.z);
+    mat3 rz = mat3(c, -s, 0, s, c, 0, 0, 0, 1);
+    
+    return rz * rx * ry;
+}
+
+float maxV(vec3 v){
+    return v.x > v.y ? v.x > v.z ? v.x : v.z : v.y > v.z ? v.y : v.z;
+}
+
+vec3 randomDir(){
+    return vec3(1, 0, 0) * rotationMatrix(vec3(RANDOM2D*2.0*Pi, 0).xzy);
+}
+
+vec3 backgroundColor(vec3 dir){
+    return vec3(0.);
+}
+
+float distanceEstimation(vec3 pos, out vec3 volumeColor, out vec3 emissionColor) {
+    
+    vec3 basePos = vec3(0., .0, .0);
+    float scale = 1.;
+    
+    pos /= scale;
+    pos += basePos;
+    
+    volumeColor = vec3(.0);
+    emissionColor = vec3(0.);
+    
+    pos.yz = vec2(pos.z, pos.y);
+    
+    
+    float r = length(pos);
+    vec3 z = pos;
+    vec3 c = pos;
+	float dr = 1.0, theta, phi;
+    vec3 orbitTrap = vec3(1.);
+	for (int i = 0; i < 8; i++) {
+		r = length(z);
+		if (r>SceneRadius) break;
+        orbitTrap = min(abs(z)*1.2, orbitTrap);
+		theta = acos(z.y/r);
+		phi = atan(z.z,z.x);
+		dr =  pow( r, Power-1.0)*Power*dr + 1.0;
+		theta *= Power;
+		phi *= Power;
+		z = pow(r,Power)*vec3(sin(theta)*cos(phi), cos(theta), sin(phi)*sin(theta)) + c;
+	}
+    
+    float dist = 0.5*log(r)*r/dr*scale;
+    
+    volumeColor = (1.-orbitTrap)*.98;
+    emissionColor = vec3(orbitTrap.z < .0001 ? 20. : 0.);
+    
+	return dist;
+}
+
+vec3 directLight(vec3 pos){
+    
+    vec3 absorption = vec3(1.0);
+    vec3 volumeColor, emissionColor;
+    
+    for(int i = 0; i < MaxSteps; i++){
+        float dist = distanceEstimation(pos, volumeColor, emissionColor);
+        pos -= LightDir * max(dist, StepSize);
+        if(dist < StepSize) {
+            float abStep = StepSize * RANDOM;
+            pos -= LightDir * (abStep-StepSize);
+            if(dist < 0.0){
+                float absorbance = exp(-Density*abStep);
+                absorption *= absorbance;
+                if(maxV(absorption) < 1.0-MaxShadowAbso) break;
+            }
+        }
+        
+        if(length(pos) > SceneRadius) break;
+    }
+    return LightColor * max((absorption+MaxShadowAbso-1.0) / MaxShadowAbso, vec3(0));
+}
+
+vec3 pathTrace(vec3 rayPos, vec3 rayDir){
+    
+   	rayPos += rayDir * max(length(rayPos)-SceneRadius, 0.0);
+    
+    vec3 outColor = vec3(0.0);
+    vec3 absorption = vec3(1.0);
+    
+    vec3 volumeColor, emissionColor;
+    
+    for(int i = 0; i < MaxSteps; i++){
+        float dist = distanceEstimation(rayPos, volumeColor, emissionColor);
+        rayPos += rayDir * max(dist, StepSize);
+        if(dist < StepSize && length(rayPos) < SceneRadius) {
+            float abStep = StepSize * RANDOM;
+            rayPos += rayDir * (abStep-StepSize);
+            if(dist < 0.0){
+                
+                float absorbance = exp(-Density*abStep);
+                float transmittance = 1.0-absorbance;
+                
+                if(mod(float(i), float(StepsSkipShadow)) == 0.) emissionColor += float(StepsSkipShadow) * volumeColor * directLight(rayPos);
+                
+                outColor += absorption * transmittance * emissionColor;
+                
+                if(maxV(absorption) < 1.0-MaxAbso) break;
+                if(RANDOM > absorbance) {
+                    rayDir = randomDir();
+                    absorption *= volumeColor;
+                }
+            }
+        }
+        
+        if(length(rayPos) > SceneRadius && dot(rayDir, rayPos) > 0.0)
+            return outColor + backgroundColor(rayDir) * absorption;
+    }
+    
+    return outColor;
+}
+
+// n-blade aperture
+vec2 sampleAperture(int nbBlades, float rotation) {
+    
+    float side = sin(Pi / float(nbBlades));
+    vec2 tri = RANDOM2D;
+    if(tri.x-tri.y > 0.0) tri = vec2(tri.x-1.0, 1.0-tri.y);
+    tri *= vec2(side, -sqrt(1.0-side*side));
+    float angle = rotation + 2.*Pi*floor(RANDOM * float(nbBlades))/float(nbBlades);
+    return vec2(tri.x * cos(angle) + tri.y * sin(angle),
+                tri.y * cos(angle) - tri.x * sin(angle));
+}
+
+//used to store values in the unused alpha channel of the buffer
+void setVector(int index, vec4 v, vec2 fragCoord, inout vec4 outColor){
+    fragCoord -= vec2(.5);
+    if(fragCoord.y == float(index)){
+        if(fragCoord.x == 0.0) outColor.a = v.x;
+        if(fragCoord.x == 1.0) outColor.a = v.y;
+        if(fragCoord.x == 2.0) outColor.a = v.z;
+        if(fragCoord.x == 3.0) outColor.a = v.a;
+    }
+}
+
+// vec4 getVector(int index){
+//     return vec4(texelFetch(iChannel0, ivec2(0, index), 0).a,
+//                 texelFetch(iChannel0, ivec2(1, index), 0).a,
+//                 texelFetch(iChannel0, ivec2(2, index), 0).a,
+//                 texelFetch(iChannel0, ivec2(3, index), 0).a
+//                );
+// }
+
+vec3 getDirectionForIndex(int x, int index) {
+    // Define a method to get direction for the cube map lookup
+    // This is a placeholder. You need to define how to get direction based on x and index.
+    // For example, if you want to sample along x, y, and z axes, you might define:
+    return vec3(x - 1.5, index - 1.5, 0.0); // This is a simplified example
+}
+
+vec4 getVector(int index) {
+    vec3 direction0 = getDirectionForIndex(0, index);
+    vec3 direction1 = getDirectionForIndex(1, index);
+    vec3 direction2 = getDirectionForIndex(2, index);
+    vec3 direction3 = getDirectionForIndex(3, index);
+    
+    return vec4(texture(iChannel0, direction0).a,
+                texture(iChannel0, direction1).a,
+                texture(iChannel0, direction2).a,
+                texture(iChannel0, direction3).a
+               );
+}
+
+void main() {
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    StepSize = min(1.0/(VolumePrecision*Density), SceneRadius/2.0);
+    
+    seed = sin(iTime) + cos(fragCoord.x) + sin(fragCoord.y);
+    
+    vec2 uv = (fragCoord+RANDOM2D-viewPort.xy/2.0) / viewPort.y;
+    
+    // float samples = texelFetch(iChannel0, ivec2(0, 0), 0).a;
+
+    vec3 direction = normalize(vec3(1.0, 0.0, 0.0)); // Example direction vector
+	float samples = texture(iChannel0, direction).a;
+
+    if(iFrame > 0) CamRot = getVector(1).xyz;
+    vec4 prevMouse = getVector(2);
+    
+    // outColor = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    outColor = texture(iChannel0, vec3(fragCoord, 0.0));
+    
+    bool mouseDragged = iMouse.z >= 0.0 && prevMouse.z >= 0.0 && iMouse != prevMouse;
+    
+    if(mouseDragged) CamRot.yx += (prevMouse.xy-iMouse.xy)/viewPort.y * 2.0;
+    
+    if(iFrame == 0 || mouseDragged){
+        outColor = vec4(0.0);
+        samples = 0.0;
+    }
+    
+    setVector(1, vec4(CamRot, 0), fragCoord, outColor);
+    setVector(2, iMouse, fragCoord, outColor);
+    if(fragCoord-vec2(.5) == vec2(0)) outColor.a = samples+1.0;
+    
+    vec3 focalPoint = vec3(uv * CamFocalDistance / CamFocalLength, CamFocalDistance);
+    vec3 aperture = CamAperture * vec3(sampleAperture(5, 0.0), 0.0);
+    vec3 rayDir = normalize(focalPoint-aperture);
+    
+    mat3 CamMatrix = rotationMatrix(CamRot);
+    CamPos *= CamMatrix;
+    rayDir *= CamMatrix;
+    aperture *= CamMatrix;
+    
+    outColor.rgb = mix(outColor.rgb,pathTrace(vec3(.0, .0, .0) + CamPos+aperture,rayDir),1.0/(samples+1.0));
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,434 @@
+<jittershader name="default">
+    <description>Default Slab </description>
+
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="pos" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+    <param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+
+    <param name="sample" type="float" default="0.0"/>
+    <param name="envTex" type="int" default="0" />
+    <param name="tex02" type="int" default="1" />
+    <param name="tex03" type="int" default="2" />
+    <param name="iMouse" type="vec3"  default="0.0 0.0 0.0"  />
+    <language name="glsl" version="1.5">
+
+        <bind param="MVP" program="vp" />
+        <bind param="pos" program="vp" />
+        <bind param="uv" program="vp" />
+        <bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+
+        <bind param="sample" program="fp" />
+        <bind param="envTex" program="fp" />
+        <bind param="tex02" program="fp" />
+        <bind param="tex03" program="fp" />
+        <bind param="iMouse" program="fp" />
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 pos;
+            in vec2 uv;
+            out jit_PerVertex {
+                vec2 uv;
+            } jit_out;
+            uniform mat4 MVP;
+            
+            void main(void) {
+                gl_Position = vec4(pos, 1.);
+                jit_out.uv = uv;
+
+            }
+        ]]>
+        </program>
+        
+        <program name="fp" type="fragment"  >
+        <![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+    vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform float sample;
+uniform samplerCube envTex;
+uniform sampler2D tex02;
+uniform sampler2D tex03;
+uniform vec3 iMouse;
+
+#define SKY_BOX 0
+
+// vec2 to float hash
+float hash(vec2 x) {
+    float n = dot(x,vec2(127.1,311.7));
+    return fract(sin(n)*4568.7564);
+}
+
+float seed; // randoms seed
+
+// float hash
+float hash(void) {return fract(sin(seed+=.1)*4568.7564);}
+
+// normalized 3d vector
+vec3 uniformVector() {
+    float a = hash()*6.2831853;
+    float x = hash()*2.-1.;
+    float z = hash();
+    
+    return pow(z,1./3.)*vec3(sqrt(1.-x*x)*vec2(sin(a),cos(a)),x);
+}
+
+// random 3d vector
+vec3 randomVector() {
+    float a = hash()*6.2831853;
+    float x = hash()*2.-1.;
+    float z = hash();
+    float w = sqrt(hash());
+    
+    return w*pow(z,1./3.) * vec3(sqrt(1.-x*x)*vec2(sin(a),cos(a)),x);
+}
+
+// cosine distribued diffuse brdf
+// thanks to fizzer: http://www.amietia.com/lambertnotangent.html
+vec3 cosineDirection(vec3 n) {
+    float u = hash();
+    float v = hash();
+
+    float a = 6.283185*v;
+    float b = u*2.-1.;
+    vec3 rr = vec3(sqrt(1.-b*b)*vec2(cos(a),sin(a)),b);
+
+    return normalize(n + rr);
+}
+
+// ray ellipsoid intersection function
+// thanks to iq: https://iquilezles.org/articles/intersectors/
+// sph[0] is the center of the ellipsoid and sph[1] is the size
+vec4 elliIntersect(vec3 ro, vec3 rd, mat2x3 sph) {
+    vec3 oc = ro - sph[0];
+    vec3 r2 = sph[1]*sph[1];
+    
+    float a = dot(rd, rd/r2);
+    float b = dot(oc, rd/r2);
+    float c = dot(oc, oc/r2);
+    float h = b*b - a*(c-1.); // discriminant
+    
+    if (h<0.) return vec4(-1);
+    h = sqrt(h);
+    float t = (-b-h) / a;
+    vec3 n = normalize((oc + rd*t) / r2); // normal
+    
+    return vec4(t, n);
+}
+
+// ellipsoids
+#define NUM_SPHERES 11
+mat2x3 spheres[NUM_SPHERES];
+
+// intersection function
+float intersect(vec3 ro, vec3 rd, float tmax, out vec3 on, out float oid) {
+    float t = tmax; // final distance
+    
+    for (int i=0; i<NUM_SPHERES; i++) {
+        mat2x3 sph = spheres[i]; // current ellipsoid        
+        vec4 tn = elliIntersect(ro, rd, sph); // distance and normal
+        
+        if (tn.x>0. && tn.x<t) {
+            on = tn.yzw;
+            oid = float(1 + i); // ellipsoid id
+            t = tn.x;
+        }
+    }
+    
+    // plane
+    float h = (-.5-ro.y)/rd.y;
+    if (h>0. && h<t) {
+        on = vec3(0,1,0);
+        oid = 0.;
+        t = h;
+    }
+            
+    // output
+    return t<tmax ? t : -1.;
+}
+
+// 2d texture function
+// thanks to this great tutorial of the art of code:
+// https://www.youtube.com/watch?v=VaYyPTw0V84
+vec3 tex3D(sampler2D tex, vec3 p, vec3 n) {
+    vec3 xy = texture(tex, p.xy).rgb;
+    vec3 xz = texture(tex, p.xz).rgb;
+    vec3 yz = texture(tex, p.yz).rgb;
+    
+    vec3 m = abs(n);
+    return yz*m.x + xz*m.y + xy*m.z;
+}
+
+// texture bump mapping, thanks to Shane
+// bf is the bump factor
+vec3 texBump(sampler2D tex, vec3 p, vec3 n, float bf) {
+    const vec2 e = vec2(.0001, 0); // epsilon
+    
+    // normal of the texture
+    mat3 m = mat3(tex3D(tex, p - e.xyy, n),
+                  tex3D(tex, p - e.yxy, n),
+                  tex3D(tex, p - e.yyx, n));
+    
+    vec3 g = vec3(.299, .587, .114)*m; // luma
+    g = (g - dot(tex3D(tex,  p , n), vec3(.299, .587, .114)))/e.x; 
+    g -= n*dot(n, g);
+                      
+    return g*bf;
+}
+
+vec3 skybox(vec3 rd) {
+    #if SKY_BOX==0
+    return pow(textureLod(envTex, rd, 0.).rgb, vec3(2.2));
+    #else
+    vec3 col = .3*mix(vec3(.4,.7,1), .5*vec3(.1,.3,.6), .5+.5*rd.y);
+    col += 6.*step(.98,dot(rd, vec3(.57735)));
+    return col;
+    #endif
+}
+
+// rendering
+vec3 render(vec3 ro, vec3 rd) {
+    vec3 col = vec3(1); // final color
+    
+    for (int i=0; i<8; i++) { // 8 bounces of GI
+        vec3 n; float id; // normal and id
+        float t = intersect(ro, rd, 1e10, n, id); // distance
+
+        // background
+        if (t<0.) return col*skybox(rd);
+        vec3 p = ro + rd*t;
+        float fre = 1.+dot(rd, n); // fresnel
+
+        if (id<.5) { // wood material
+            vec3 bmp = texBump(tex03, p*.5, n, .0025);
+            n = normalize(n + bmp);
+            
+            ro = p + n*.0001;
+            
+            float rou = .1; // roughness
+            float ks = .1+.9*pow(fre, 5.)*(1.-rou); // reflectivity
+            
+            if (ks>hash()) { // rough reflection
+                rd = normalize(reflect(rd, n) + rou*randomVector());
+            } else { // diffuse
+                col *= pow(tex3D(tex03, p*.5, n), vec3(1.5));
+                rd = cosineDirection(n);
+            }
+        } else if (id<1.5) { // light
+            return col*5.;
+        } else if (id<2.5) { // orange plastic
+            ro = p + n*.0001;
+                        
+            float ks = .05+.95*pow(fre, 5.); // reflectivity
+            if (ks>hash()) { // reflection
+                rd = reflect(rd, n);
+            } else { // diffuse
+                col *= vec3(.9,.3,.1);
+                rd = cosineDirection(n);
+            }
+        } else if (id<3.5) { // green plastic
+            vec3 bmp = texBump(tex02, p*2., n, .04);
+            n = normalize(n + bmp);
+            
+            ro = p + n*.0001;
+            
+            float rou = .6; // roughness
+            float ks = .1+.9*pow(fre, 5.)*(1.-rou); // reflectivity
+            
+            if (ks>hash()) { // rough reflection
+                rd = normalize(reflect(rd, n) + rou*randomVector());
+            } else { // diffuse
+                col *= vec3(.2,.6,.1);
+                rd = cosineDirection(n);
+            }
+        } else if (id<4.5) { // rough metal
+            vec3 bmp = texBump(tex03, p*.5, n, .003);
+            n = normalize(n + bmp);
+            
+            col *= .9;
+            ro = p + n*.0001;
+            rd = reflect(rd, n);
+        } else if (id<5.5) { // gold
+            vec3 bmp = texBump(tex02, p*2., n, -.04);
+            n = normalize(n + bmp);
+            
+            col *= vec3(.9,.7,.3);
+            ro = p + n*.0001;
+            rd = reflect(rd, n);
+        } else if (id<6.5) { // light
+            return col*5.;
+        } else if (id<7.5) { // abstract (purple and gold)
+            vec3 bmp = texBump(tex02, p*2., n, .1);
+            n = normalize(n + bmp);
+            
+            ro = p + n*.0001;
+            
+            float h = tex3D(tex02, p*2., n).r;
+            if (h<.6) { // diffuse
+                col *= vec3(.3,.1,.9);
+                rd = cosineDirection(n);
+            } else { // gold
+                col *= vec3(.9,.6,.3);
+                rd = reflect(rd, n);
+            }
+        } else if (id<8.5) { // anisotropic metal (sort of)
+            vec3 bmp = texBump(tex03, p, n, .0);
+            n = normalize(n + bmp);
+                        
+            vec3 rou = vec3(.4,1,.4); // roughness
+
+            col *= vec3(.1,.3,.9);
+            ro = p + n*.0001;
+            rd = normalize(reflect(rd, n) + rou*randomVector());
+        } else if (id<9.5) { // absorption
+            float ior = 1.5; // refraction index
+            
+            // fresnel bias
+            float f0 = (1.-ior)/(1.+ior);
+            f0 = f0*f0;
+            float ks = f0 + (1.-f0)*pow(fre, 5.); // reflectivity
+            
+            float s = -sign(fre-1.); // inside or outside
+            
+            if (ks>hash()) { // reflection
+                ro = p+n*.0001;
+                rd = reflect(rd, n);
+            } else { // transmission
+                if (s>0.) col *= exp(-.2*t*vec3(1,2,3)); // absorption
+                ro = p - n*.001;
+                rd = refract(rd, n, s<0. ? ior : 1./ior);
+            }
+        } else if (id<10.5) { // normal glass
+            float ior = 1.5; // refraction index
+            
+            // fresnel bias
+            float f0 = (1.-ior)/(1.+ior);
+            f0 = f0*f0;
+            float ks = f0 + (1.-f0)*pow(fre, 5.); // reflectivity
+            
+            float s = -sign(fre-1.); // inside or outside
+            
+            if (ks>hash()) { // reflection
+                ro = p+n*.0001;
+                rd = reflect(rd, n);
+            } else { // transmission
+                ro = p - n*.001;
+                rd = refract(rd, n, s<0. ? ior : 1./ior);
+            }
+        } else if (id<11.5) { // emerald with gold
+            vec3 bmp = texBump(tex02, p*2., n, .07);
+            n = normalize(n + bmp);
+            
+            float h = tex3D(tex02, p*2., n).r;
+            if (h<.65) { // emerald
+                float ior = 2.4; // refraction index
+
+                // fresnel bias
+                float f0 = (1.-ior)/(1.+ior);
+                f0 = f0*f0;
+                float ks = f0 + (1.-f0)*pow(fre, 5.); // reflectivity
+
+                float s = -sign(fre-1.); // inside or outside
+
+                if (ks>hash()) { // reflection
+                    ro = p+n*.0001;
+                    rd = reflect(rd, n);
+                } else { // transmission
+                    if (s>0.) col *= exp(-.5*t*vec3(3,.2,2.5)); // absorption
+                    ro = p - n*.001;
+                    rd = refract(rd, n, s<0. ? ior : 1./ior);
+                }
+            } else { // gold
+                col *= vec3(.9,.6,.3);
+                ro = p + n*.0001;
+                rd = reflect(rd, n);
+            }
+        }
+    }
+            
+    // return black
+    return vec3(0);
+}
+
+// camera function
+mat3 setCamera(vec3 ro, vec3 ta) {
+    vec3 w = normalize(ta - ro); // forward vector
+    vec3 u = normalize(cross(w, vec3(0,1,0))); // side vector
+    vec3 v = cross(u, w); // up vector
+    return mat3(u, v, w);
+}
+
+#define SPP 5 // samples per pixel
+
+void main()
+{
+    // setup scene
+    spheres[0] = mat2x3(-1.5,1.5,.5,.25,.25,.25);
+    spheres[1] = mat2x3(-1.5,0,0,.4,.5,.4);
+    spheres[2] = mat2x3(0,0,0,.4,.5,.4);
+    spheres[3] = mat2x3(1.5,0,0,.4,.5,.4);
+    spheres[4] = mat2x3(1.5,0,1.5,.4,.5,.4);
+    spheres[5] = mat2x3(1.5,1.5,-.5,.25,.25,.25);
+    spheres[6] = mat2x3(-1.5,0,1.5,.4,.5,.4);
+    spheres[7] = mat2x3(0,0,1.5,.4,.5,.4);
+    spheres[8] = mat2x3(0,0,-1.5,.4,.5,.4);
+    spheres[9] = mat2x3(1.5,0,-1.5,.4,.5,.4);
+    spheres[10] = mat2x3(-1.5,0,-1.5,.4,.5,.4);
+    
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // normalized mouse coordinates
+    vec2 mo = (iMouse.xy - .5*viewPort.xy) / viewPort.y;
+    
+    vec3 tot = vec3(0); // accumulated color
+    for (int i=0; i<SPP; i++) {
+        // init randoms seed
+        seed = float(i)+sample + hash(fragCoord/viewPort.xy);
+        
+        vec2 off = vec2(hash(), hash()) - .5; // AA offset
+        // pixel coordinates centered at the origin
+        vec2 p = (fragCoord+off - .5*viewPort.xy) / viewPort.y;
+        
+        float an = -mo.x*6.283185-1.5; // camera xz rotation
+        vec3 ro = 4.5*vec3(sin(an),.3+.7*mo.y,cos(an)); // ray origin
+        vec3 ta = vec3(0); // target
+        mat3 ca = setCamera(ro, ta); // camera matrix
+        vec3 rd = ca * normalize(vec3(p,1.5)); // ray direction
+        
+        // depth of field
+        
+        vec3 tn; float tid; // temporary variables
+        float t = intersect(ro, ca[2], 1e10, tn, tid); // focus distane
+        vec3 fp = ro + rd*t; // focus plane
+        
+        // distribution on a disk
+        float w = sqrt(hash()); // vector length
+        float a = hash()*6.283185; // angle
+        
+        ro += .03 * w*(ca[0]*sin(a) + ca[1]*cos(a)); // blur
+        rd = normalize(fp - ro);
+                
+        vec3 col = render(ro, rd); // render
+        tot += col;
+    }
+    tot /= float(SPP);    
+    
+    // // blend with the previous frame
+    // vec4 data = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    outColor = vec4(tot,1); //+ data*step(iMouse.z,0.);
+}
+]]>
+</program>
+</language>
+</jittershader>

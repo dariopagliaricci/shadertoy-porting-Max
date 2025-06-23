@@ -1,0 +1,612 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+  <param name="iTime" type="float" default="0.0" />
+  <param name="iFrame" type="int" default="0" />
+  <param name="iChannel0" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+    <bind param="iTime" program="fp" />
+    <bind param="iFrame" program="fp" />
+    <bind param="iChannel0" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+// Draw
+
+// Originally made with Blossom, the 4k exegfx framework
+// https://github.com/lunasorcery/Blossom
+
+const float TAU = acos( -1. ) * 2.0;
+const float FAR = 100.0;
+
+uvec3 pcg3d( uvec3 s ) {
+  s = s * 1145141919u + 1919810u;
+
+  s.x += s.y * s.z;
+  s.y += s.z * s.x;
+  s.z += s.x * s.y;
+
+  s ^= s >> 16;
+
+  s.x += s.y * s.z;
+  s.y += s.z * s.x;
+  s.z += s.x * s.y;
+
+  return s;
+}
+
+vec3 pcg3df( vec3 s ) {
+  uvec3 r = pcg3d( floatBitsToUint( s ) );
+  return vec3( r ) / float( -1u );
+}
+
+uvec3 seed;
+vec3 random3() {
+  seed = pcg3d( seed );
+  return vec3( seed ) / float( -1u );
+}
+
+float safeDot( vec3 a, vec3 b ) {
+  return clamp( dot( a, b ), 0.0001, 1.0 );
+}
+
+mat2 rotate2D( float t ) {
+  float c = cos( t ), s = sin( t );
+  return mat2( c, s, -s, c );
+}
+
+mat3 orthBas3( vec3 z, vec3 t ) {
+  z = normalize( z );
+  vec3 x = normalize( cross( normalize( t ), z ) );
+  return mat3( x, cross( z, x ), z );
+}
+
+mat3 orthBas( vec3 z ) {
+  z = normalize( z );
+  vec3 up = abs( z.y ) < 0.999 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 0.0, 0.0, 1.0 );
+  return orthBas3( z, up );
+}
+
+vec3 cyclicNoise( vec3 p ) {
+  vec4 sum = vec4( 0.0 );
+  mat3 basis = orthBas( vec3( -1.0, 2.0, -3.0 ) );
+
+  for ( int i = 0; i < 5; i ++ ) {
+    p *= basis;
+    p += 0.6 * sin( p.yzx );
+    sum += vec4(
+      cross( cos( p ), sin( p.zxy ) ),
+      1.0
+    );
+    sum *= 2.0;
+    p *= 2.0;
+  }
+
+  return sum.xyz / sum.w;
+}
+
+vec3 importanceSampleLambert( vec3 N ) {
+  vec3 dice = random3();
+  float phi = TAU * dice.x;
+  float cosTheta = clamp( sqrt( dice.y ), 0.0, 1.0 );
+  float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
+
+  return orthBas( N ) * vec3(
+    cos( phi ) * sinTheta,
+    sin( phi ) * sinTheta,
+    cosTheta
+  );
+}
+
+vec3 importanceSampleGGX( float roughness, vec3 N ) {
+  vec3 dice = random3();
+  float phi = TAU * dice.x;
+  float cosTheta = dice.y;
+  cosTheta = clamp(
+    sqrt( ( 1.0 - cosTheta ) / ( 1.0 + ( pow( roughness, 4.0 ) - 1.0 ) * cosTheta ) ),
+    0.0,
+    1.0
+  );
+  float sinTheta = sqrt( 1.0 - cosTheta * cosTheta );
+
+  return orthBas( N ) * vec3(
+    cos( phi ) * sinTheta,
+    sin( phi ) * sinTheta,
+    cosTheta
+  );
+}
+
+vec4 isectSphere( vec3 ro, vec3 rd, float r ) {
+  float b = dot( ro, rd );
+  float c = dot( ro, ro ) - r * r;
+  float h = b * b - c;
+
+  if ( h < 0.0 ) { return vec4( FAR ); }
+
+  float t = -b - sqrt( h );
+  if ( 0.0 < t ) {
+    return vec4( normalize( ro + rd * t ), t );
+  }
+
+  return vec4( FAR );
+}
+
+vec4 isectISphere( vec3 ro, vec3 rd, float r ) {
+  float b = dot( ro, rd );
+  float c = dot( ro, ro ) - r * r;
+  float h = b * b - c;
+
+  if ( h < 0.0 ) { return vec4( FAR ); }
+
+  float t = -b + sqrt( h );
+  if ( 0.0 < t ) {
+    return vec4( -normalize( ro + rd * t ), t );
+  }
+
+  return vec4( FAR );
+}
+
+vec4 isectPillar( vec3 ro, vec3 rd, float r, float len ) {
+  float sqLenXY = 1.0 - rd.z * rd.z;
+
+  float b = dot( ro, rd ) - ro.z * rd.z;
+  float c = dot( ro, ro ) - ro.z * ro.z - r * r;
+  float h = b * b - sqLenXY * c;
+
+  if ( h < 0.0 ) { return vec4( FAR ); }
+
+  h = sqrt( h );
+  float t = -( b + h ) / sqLenXY;
+  vec3 rp = ro + rd * t;
+  if ( abs( rp.z ) < len && 0.0 < t ) {
+    return vec4(
+      vec3( 1.0, 1.0, 0.0 ) * rp / r,
+      t
+    );
+  }
+
+  float capDir = sign( rp.z );
+  float dCap = ( capDir * len - ro.z ) / rd.z;
+  if ( abs( sqLenXY * dCap + b ) < h && 0.0 < dCap ) {
+    vec3 N = vec3( 0.0, 0.0, capDir );
+    return vec4( N, dCap );
+  }
+
+  return vec4( FAR );
+}
+
+vec4 isectIPillar( vec3 ro, vec3 rd, float r, float len ) {
+  float sqLenXY = 1.0 - rd.z * rd.z;
+
+  float b = dot( ro, rd ) - ro.z * rd.z;
+  float c = dot( ro, ro ) - ro.z * ro.z - r * r;
+  float h = b * b - sqLenXY * c;
+
+  if ( h < 0.0 ) { return vec4( FAR ); }
+
+  h = sqrt( h );
+  float t = -( b - h ) / sqLenXY;
+  vec3 rp = ro + rd * t;
+  if ( abs( rp.z ) < len && 0.0 < t ) {
+    return vec4(
+      -vec3( 1.0, 1.0, 0.0 ) * rp / r,
+      t
+    );
+  }
+
+  float capDir = sign( rp.z );
+  float dCap = ( capDir * len - ro.z ) / rd.z;
+  if ( abs( sqLenXY * dCap + b ) < h && 0.0 < dCap ) {
+    vec3 N = vec3( 0.0, 0.0, -capDir );
+    return vec4( N, dCap );
+  }
+
+  return vec4( FAR );
+}
+
+vec4 isectBox( vec3 ro, vec3 rd, vec3 s ) {
+  vec3 xo = -ro / rd;
+  vec3 xs = abs( s / rd );
+
+  vec3 dfv = xo - xs;
+  vec3 dbv = xo + xs;
+
+  float df = max( dfv.x, max( dfv.y, dfv.z ) );
+  float db = min( dbv.x, min( dbv.y, dbv.z ) );
+  if ( df < 0.0 || db < df ) { return vec4( FAR ); }
+
+  vec3 n = -sign( rd ) * step( vec3( df ), dfv );
+  return vec4( n, df );
+}
+
+vec4 isectIBox( vec3 ro, vec3 rd, vec3 s ) {
+  vec3 xo = -ro / rd;
+  vec3 xs = abs( s / rd );
+
+  vec3 dbv = xo + xs;
+
+  float db = min( dbv.x, min( dbv.y, dbv.z ) );
+  if ( db < 0.0 ) { return vec4( FAR ); }
+
+  vec3 n = -sign( rd ) * step( dbv, vec3( db ) );
+  return vec4( n, db );
+}
+
+vec4 isectPlane( vec3 ro, vec3 rd, vec3 n ) {
+  n = dot( n, rd ) < 0.0 ? n : -n;
+  float t = -dot( ro, n ) / dot( rd, n );
+  return mix( vec4( FAR ), vec4( n, t ), step( 0.0, t ) );
+}
+
+void main() 
+{
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+  mat3 ROT_DISC = orthBas( vec3( -0.3, 0.0, 1.0 ) );
+  mat3 ROT_BOARD = orthBas3( vec3( -0.1, -0.1, 1.0 ), vec3( 0.2, 1.0, 0.0 ) );
+
+  vec2 uv = fragCoord.xy / viewPort.xy;
+
+  seed = uvec3( fragCoord.xy, iFrame );
+
+  vec2 p = 2.0 * fragCoord.xy / viewPort.xy - 1.0;
+  p.x *= viewPort.x / viewPort.y;
+
+  // accumulate using backbuffer
+  outColor = texture(iChannel0, vec3(uv, 0.0));
+
+  // if ( iFrame > 1 && iMouse.w < 0.5 ) {
+  //   outColor += texture(iChannel1, vec3(fragCoord, 0.0));
+  // }
+
+  float inMedium = 0.0;
+
+  vec3 ro, rd, ro2, rd2;
+
+  float ampRem;
+  float amp;
+  float wave;
+  float ior;
+  vec4 col = vec4( 0.0 );
+
+  vec4 isect, isect2;
+
+  for ( int i = 0; i < 60; i ++ ) {
+    if ( ampRem < 0.001 ) {
+      // cringe
+      col += vec4(
+        amp * smoothstep( 0.1, 0.0, abs( wave - vec3( 0.7, 0.6, 0.5 ) ) ),
+        1.0
+      );
+
+      ro = vec3( 2.0 * ( p + 2.0 * random3().xy / viewPort.y ), 5.0 );
+      rd = normalize( vec3( 0.001, 0.001, -1.0 ) );
+      ampRem = 4.0;
+      amp = inMedium = 0.0;
+      wave = mix( 0.4, 0.8, random3().x );
+      ior = 1.4 + 0.04 / wave / wave; // cringe
+    }
+
+    const float REFRACT_ROUGH = 0.2;
+    const float DISC_RAD = 0.65;
+    const float DISC_THIC = 0.04;
+    const vec3 DISC_POS = vec3( 0.2, -0.25, 0.0 );
+
+    const float SPHERE_RAD = 0.3;
+    const vec3 SPHERE_POS = vec3( -2.55, 0.8, 0.0 );
+
+    const vec3 BOARD_SIZE = vec3( 0.5, 1.27, 0.04 );
+    const vec3 BOARD_POS = vec3( 2.0, -1.1, 0.0 );
+
+    if ( inMedium > 0.0 ) {
+      // inside
+      if ( inMedium == 1.0 ) {
+        isect = isectIPillar( ROT_DISC * ( ro - DISC_POS ), ROT_DISC * rd, DISC_RAD, DISC_THIC );
+        isect.xyz *= ROT_DISC;
+        // outColor=vec4(0.5+0.5*isect.xyz,1.0);
+        // return;
+      } else if ( inMedium == 2.0 ) {
+        isect = isectISphere( ro - SPHERE_POS, rd, SPHERE_RAD );
+      } else if ( inMedium == 3.0 ) {
+            isect = isectIBox( ROT_BOARD * ( ro - BOARD_POS ), ROT_BOARD * rd, BOARD_SIZE );
+        isect.xyz *= ROT_BOARD;
+      }
+      ro += isect.w * rd;
+
+      // refract
+      // cringe
+      vec3 H = importanceSampleGGX( REFRACT_ROUGH, isect.xyz );
+      vec3 wo = refract( rd, H, ior );
+      if ( wo == vec3( 0.0 ) ) {
+        rd = reflect( rd, H );
+      } else {
+        rd = wo;
+        inMedium = 0.0;
+        ampRem *= 0.7;
+      }
+
+      ro += 0.001 * rd;
+
+      continue;
+    }
+
+    // disk
+    ro2 = ROT_DISC * ro;
+    rd2 = ROT_DISC * rd;
+    isect = isectPillar( ROT_DISC * ( ro - DISC_POS ), ROT_DISC * rd, DISC_RAD, DISC_THIC );
+    isect.xyz *= ROT_DISC;
+
+    float roughness = 0.1;
+    float metallic = 0.0;
+    float baseColor = smoothstep( 0.2, 0.0, abs( 0.6 - wave ) );
+    float emissive = 0.0;
+
+    inMedium = 1.0;
+
+    // gay bar
+    ro2 = ( ro - vec3( 0.0, 0.45, 0.0 ) ).yzx;
+    rd2 = rd.yzx;
+    isect2 = isectPillar( ro2, rd2, 0.05, 3.0 );
+    if ( isect2.w < isect.w ) {
+      isect2.xyz = isect2.zxy;
+      isect = isect2;
+      vec3 rp = ro + rd * isect.w;
+      roughness = 0.2;
+      metallic = 0.0;
+      baseColor = smoothstep( 0.1, 0.0, abs( 0.62 + 0.06 * rp.x - wave ) );
+      inMedium = 0.0;
+    }
+
+    // pillar
+    ro2 = ( ro - vec3( 0.7, -1.75, 0.0 ) ).zxy;
+    rd2 = rd.zxy;
+    isect2 = isectPillar( ro2, rd2, 0.5, 0.85 );
+    if ( isect2.w < isect.w ) {
+      // cringe
+      isect2.z += 3.0 * ( random3().x - 0.5 );
+      isect2.xyz = normalize( isect2.xyz );
+
+      isect2.xyz = isect2.yzx;
+      isect = isect2;
+      vec3 rp = ro + rd * isect.w;
+      roughness = 0.2;
+      metallic = 1.0;
+      baseColor = smoothstep( 0.2, 0.0, abs( 0.4 - wave ) ) + 0.8 * smoothstep( 0.1, 0.0, abs( 0.8 - wave ) );
+      inMedium = 0.0;
+    }
+
+    // tilt board
+    isect2 = isectBox( ROT_BOARD * ( ro - BOARD_POS ), ROT_BOARD * rd, BOARD_SIZE );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w;
+      isect2.xyz *= ROT_BOARD;
+      isect = isect2;
+      roughness = 0.2;
+      metallic = 0.0;
+      baseColor = smoothstep( 0.5, 0.0, abs( 0.5 - wave ) );
+      inMedium = 3.0;
+    }
+
+    // sphere right
+    const vec3 SPHERE_RIGHT_POS = vec3( 1.2, 1.0, 0.0 );
+    isect2 = isectSphere( ro - SPHERE_RIGHT_POS, rd, 0.5 );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w;
+      isect = isect2;
+      roughness = 0.2;
+      metallic = 0.0;
+      baseColor = smoothstep( 0.1, 0.0, abs( 0.76 - wave ) ) + 0.01 * smoothstep( 0.4, 0.0, abs( 0.6 - wave ) );
+      inMedium = 0.0;
+    }
+
+    // sphere top-left (green metallic)
+    const vec3 SPHERE_GREEN_POS = vec3( -0.9, 1.2, 0.0 );
+    isect2 = isectSphere( ro - SPHERE_GREEN_POS, rd, 0.7 );
+    if ( isect2.w < isect.w ) {
+        vec3 rp = ro + rd * isect2.w;
+        isect = isect2;
+        roughness = 0.4;
+        metallic = 1.0;
+        baseColor = 0.6 * smoothstep(0.15, 0.0, abs(0.54 - wave));
+        inMedium = 0.0;
+    }
+
+    // sphere bottom-center (purple diffuse)
+    const vec3 SPHERE_PURPLE_POS = vec3( -1.1,-1.3, 0.0 );
+    isect2 = isectSphere( ro - SPHERE_PURPLE_POS, rd, 0.8 );
+    if ( isect2.w < isect.w ) {
+        vec3 rp = ro + rd * isect2.w;
+        isect = isect2;
+        roughness = 0.4;
+        metallic = 0.0;
+        baseColor = 0.6 * smoothstep( 0.3, 0.0, abs( 0.5 - wave ) );
+        inMedium = 0.0;
+    }
+
+    // sphere left
+    isect2 = isectSphere( ro - SPHERE_POS, rd, SPHERE_RAD );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w;
+      isect = isect2;
+      roughness = 0.2;
+      metallic = 0.0;
+      baseColor = smoothstep( 0.24, 0.0, abs( 0.5 - wave ) );
+      inMedium = 2.0;
+    }
+
+    // grid
+    isect2 = isectPlane( ro + vec3( 0.0, 0.0, 1.0 ), rd, vec3( 0.0, 0.0, 1.0 ) );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w;
+      if ( max( cos( 14.0 * rp.x ), cos( 14.0 * rp.y ) ) > 0.99 ) {
+        isect = isect2;
+        roughness = 0.2;
+        metallic = 1.0;
+        baseColor = 0.8;
+        inMedium = 0.0;
+      }
+    }
+
+    // half circle
+    isect2 = isectPlane( ro + vec3( 0.0, 0.0, 0.7 ), rd, vec3( 0.0, 0.0, 1.0 ) );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w + vec3( 1.15, 1.9, 0.0 );
+      if ( length( rp.xy ) < 1.8 && rp.y > 0.0 ) {
+        isect = isect2;
+        roughness = 0.2;
+        metallic = 0.0;
+        baseColor = smoothstep( 0.3, 0.0, abs( 0.7 - wave ) );
+        inMedium = 0.0;
+      }
+    }
+
+    // background
+    isect2 = isectPlane( ro + vec3( 0.0, 0.0, 1.1 ), rd, vec3( 0.0, 0.0, 1.0 ) );
+    if ( isect2.w < isect.w ) {
+      vec3 rp = ro + rd * isect2.w;
+      isect = isect2;
+      roughness = 0.2;
+      metallic = 0.0;
+      baseColor = mix(
+        clamp( 0.3 + 0.6 * cyclicNoise( 29.0 + vec3( 10.0 * wave ) + 0.3 * rp.y ).x, 0.0, 1.0 ),
+        smoothstep( 0.5, 0.0, abs( 0.76 - wave ) ),
+        pow( abs( cyclicNoise( vec3( rp.xy, 1.0 ) ).x ), 2.0 )
+        );
+      inMedium = 0.0;
+    }
+
+    // light
+    isect2 = isectSphere( ro - vec3( 3.0, 6.0, 5.0 ), rd, 2.0 );
+    if ( isect2.w < isect.w ) {
+      isect = isect2;
+      roughness = 1.0;
+      metallic = 0.0;
+      baseColor = 0.0;
+      emissive = 50.0;
+      inMedium = 0.0;
+    }
+
+    if ( isect.w < FAR ) {
+      ro += isect.w * rd;
+
+      amp += emissive * ampRem;
+
+      float NdotV = safeDot( isect.xyz, -rd );
+      float Fn = mix( 0.04, 1.0, pow( 1.0 - NdotV, 5.0 ) );
+
+      if ( metallic == 1.0 || random3().x < Fn ) {
+        // specular
+        vec3 H = importanceSampleGGX( roughness, isect.xyz );
+        vec3 wo = reflect( rd, H );
+        if ( dot( wo, isect.xyz ) < 0.0 ) {
+          ampRem *= 0.0;
+          continue;
+        }
+
+        float VdotH = safeDot( -rd, H );
+        float NdotL = safeDot( isect.xyz, wo );
+        float NdotH = safeDot( isect.xyz, H );
+
+        // g_smith
+        roughness *= roughness / 2.0;
+
+        float G1V = NdotV / ( NdotV * ( 1.0 - roughness ) + roughness );
+        float G1L = NdotL / ( NdotL * ( 1.0 - roughness ) + roughness );
+
+        float G =
+          NdotV / ( NdotV * ( 1.0 - roughness ) + roughness ) * // G1V
+          NdotL / ( NdotL * ( 1.0 - roughness ) + roughness ); // G1L
+
+        if ( metallic == 1.0 ) {
+          float Fh = mix( baseColor, 1.0, pow( 1.0 - VdotH, 5.0 ) );
+          ampRem *= Fh * G * VdotH / ( NdotH * NdotV );
+        } else {
+          float Fh = mix( 0.04, 1.0, pow( 1.0 - VdotH, 5.0 ) );
+          ampRem *= Fh / Fn * G * VdotH / ( NdotH * NdotV );
+        }
+        rd = wo;
+      } else {
+        if ( inMedium > 0.0 ) {
+          // refract
+          // cringe
+          vec3 H = importanceSampleGGX( REFRACT_ROUGH, isect.xyz );
+          rd = refract( rd, H, 1.0 / ior );
+          ro += 0.001 * rd;
+          ampRem *= baseColor;
+          continue;
+        }
+
+        // diffuse
+        vec3 wo = importanceSampleLambert( isect.xyz );
+        vec3 H = normalize( -rd + wo );
+        if ( dot( wo, isect.xyz ) < 0.0 ) {
+          ampRem *= 0.0;
+          continue;
+        }
+
+        float VdotH = safeDot( -rd, H );
+        float Fh = mix( 0.04, 1.0, pow( 1.0 - VdotH, 5.0 ) );
+
+        ampRem *= ( 1.0 - Fh ) / ( 1.0 - Fn ) * baseColor;
+        rd = wo;
+      }
+
+      ro += 0.001 * rd;
+    } else {
+      ampRem *= 0.0;
+    }
+  }
+
+  outColor = col / col.w;
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,324 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+	<param name="iChannel3" type="int" default="3" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+		<bind param="iChannel3" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+uniform sampler2D iChannel3;
+
+// Complex arithmetic
+vec2 cMul(vec2 a, vec2 b)
+{
+    return vec2(a.x * b.x - a.y * b.y, 
+                a.x * b.y + a.y * b.x);
+}
+
+vec2 cConj(vec2 a)
+{
+    return vec2(a.x, -a.y);
+}
+
+vec2 cInverse(vec2 a)
+{
+    return cConj(a) / dot(a,a);
+}
+
+vec2 cDiv(vec2 a, vec2 b)
+{
+    return cMul(a, cInverse(b));
+}
+
+// Apollonian Britney, mla, 2023
+//
+// Modification of @fizzer's original https://www.shadertoy.com/view/WtdSDf
+// See mainImage around line 210 for limit circle uv calculation.
+// Also made a few mods to the code, eg. only invert combined transformation
+// at the end & a different way of handling a division by zero.
+
+const float pi = acos(-1.);
+const int numCircles = 4; // Set this to 4, for the classic gasket.
+
+// For more on Möbius transformations see: 
+// https://en.wikipedia.org/wiki/M%C3%B6bius_transformation
+// https://en.wikipedia.org/wiki/Indra%27s_Pearls_(book)
+
+// Transformations are represented by 2x2 complex matrices, mat4x2(a,b,c,d):
+// with z -> (az+b)/(cz+d), so multiplying a matrix by complex w represents
+// the same transformation. Inverse transformation is just (any multiple of)
+// the inverse matrix.
+const mat4x2 midentity = mat4x2(vec2(1, 0),
+                                vec2(0, 0),
+                                vec2(0, 0),
+                                vec2(1, 0));
+
+// Apply transformation m to point x
+vec2 cMobius(mat4x2 m, vec2 x)
+{
+    return cDiv(cMul(x, m[0]) + m[1], cMul(x, m[2]) + m[3]);
+}
+
+// Matrix multiplication, in fact.
+mat4x2 cMobiusConcat(mat4x2 ma, mat4x2 mb)
+{
+    return mat4x2(cMul(ma[0], mb[0]) + cMul(ma[1], mb[2]),
+                  cMul(ma[0], mb[1]) + cMul(ma[1], mb[3]),
+                  cMul(ma[2], mb[0]) + cMul(ma[3], mb[2]),
+                  cMul(ma[2], mb[1]) + cMul(ma[3], mb[3]));
+}
+
+// Matrix inverse, but no need to divide by determinant.
+mat4x2 cMobiusInverse(mat4x2 m)
+{
+    return mat4x2(m[3], -m[1], -m[2], m[0]);
+}
+
+// Apply transformation T to circle C
+vec3 cMobiusOnCircle(mat4x2 T, vec3 C)
+{
+    vec3 D;
+    vec2 z = C.xy;
+    // Handle zero division.
+    if (T[2] != vec2(0)) z -= cDiv(vec2(C.z * C.z, 0), cConj(cDiv(T[3], T[2]) + C.xy));
+    D.xy = cMobius(T,z).xy;
+    D.z = length(D.xy - cMobius(T,C.xy + vec2(C.z, 0)));
+    return D;
+}
+
+// These are the N inversion circles necessary to produce the fractal which is the limit
+// set of a Kleinian group. The Möbius transformations which represent inversions in these circles
+// are the generators of the Kleinian group.
+vec3 getInversionCircle(int i)
+{
+    float theta = pi / float(numCircles - 1);
+    float r0 = tan(theta);
+    float r1 = 1. / cos(theta);
+    if(i == numCircles - 1) return vec3(0, 0, r1 - r0); // Central circle
+    return vec3(cos(float(i) * theta * 2.) * r1, sin(float(i) * theta * 2.) * r1, r0);
+}
+
+// These are the N circles which are the minimum set of circles which all of the other circles
+// in the limit set are images of. There are N-1 circles in a circular chain of tangency, and
+// one circle surrounding the gasket with radius 1.
+vec3 getLimitCircle(int i)
+{
+    float theta = pi / float(numCircles - 1);
+    float r0 = tan(theta);
+    float r1 = 1. / cos(theta);
+    float r = (r1 - r0) * tan(theta);
+    float r2 = (r1 - r0) / cos(theta);
+    if(i == numCircles - 1) return vec3(0, 0, 1);
+    return vec3(-cos((float(i)) * theta * 2.) * r2, sin((float(i)) * theta * 2.) * r2, r);
+}
+
+vec3 getInnerLimitCircle()
+{
+    float theta = pi / float(numCircles - 1);
+    float r0 = tan(theta);
+    float r1 = 1. / cos(theta);
+    float r = (r1 - r0) * tan(theta);
+    float r2 = (r1 - r0) / cos(theta);
+    return vec3(0., 0., r2 - r);
+}
+
+mat4x2 makeMobiusForInversionInCircle(vec3 ic)
+{
+    mat4x2 ma = mat4x2(vec2(1. / ic.z, 0),
+                       vec2(-ic.x / ic.z, ic.y / ic.z),
+                       vec2(0, 0),
+                       vec2(1, 0));
+
+    mat4x2 mb = mat4x2(vec2(ic.x, ic.y),
+                       vec2(ic.z, 0),
+                       vec2(1, 0),
+                       vec2(0, 0));
+
+    return cMobiusConcat(mb, ma);
+}
+
+
+// Function to compute UVs for a circle
+vec2 computeUV(vec2 pos, vec2 center, float radius, sampler2D textureChannel) {
+    vec2 uv = (pos - center) / radius * 0.5 + 0.5; // Normalize based on radius and position
+    uv *= 0.9; // Slight scaling to avoid edge artifacts
+    return texture(textureChannel, uv).xy;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 p = -1.0 + 2.0 * fragCoord.xy / viewPort.xy;
+    p.x *= viewPort.x / viewPort.y;
+
+    float scale = 1.;
+
+    outColor = vec4(0, 0, 0, 1);
+
+    vec2 z = vec2(p.x, p.y);
+
+    mat4x2 mi = midentity;
+
+    if(iMouse.x > .5)
+    {
+        mat4x2 m = midentity;
+        vec2 mo = (2.0 * iMouse.xy / viewPort.y - vec2(viewPort.x / viewPort.y, 1.0)) * vec2(1, -1);
+
+        if(length(mo) < 0.999)
+        {
+            vec2 c = mo * (1.0 / dot(mo, mo));
+            vec3 ic = vec3(c, sqrt(dot(c, c) - 1.));
+
+            m = makeMobiusForInversionInCircle(ic);
+        }
+
+        mi = cMobiusConcat(m,mi);
+
+        z = cMobius( m,z );
+    }
+
+    float t = iTime * .4;
+    mat4x2 mrotation = mat4x2(vec2(cos(t), sin(t)),
+                              vec2(0, 0),
+                              vec2(0, 0),
+                              vec2(1, 0));
+
+    mi = cMobiusConcat(mrotation,mi);
+    z = cMobius( mrotation, z );
+
+    int parity = 0;
+    
+    for(int i = 0; i < 65; ++i)
+    {
+        parity = i % 2;
+        int k = -1;
+        mat4x2 m;
+        vec3 ic;
+
+        for(int j = 0; j < numCircles; ++j)
+        {
+            vec3 c = getInversionCircle(j);
+            
+            if(distance(z.xy, c.xy * vec2(1, -1)) < c.z)
+            {
+                k = j;
+                ic = c;
+                break;
+            }
+        }
+
+        if(k == -1) break;
+
+        ic.x += 1e-9;
+        m = makeMobiusForInversionInCircle(ic);
+        mi = cMobiusConcat(m, mi);
+        z = cMobius(m, z);
+    }
+
+    mi = cMobiusInverse(mi); // Get inverse transformation
+
+    vec3 col = vec3(0);
+
+    float px = fwidth(p.x);
+    //inside loop where each circle is processed
+    for(int i = 0; i < numCircles; ++i)
+{
+    vec3 C = getLimitCircle(i);
+    vec3 D = cMobiusOnCircle(mi, C);
+
+    if(D.z > 1e-9 && D.z < 1. && abs(D.z - 1.) > .01)
+    {
+        vec2 v = p.xy - D.xy;
+        if(length(v) < D.z)
+        {
+            vec2 uv = v / (2.0 * D.z) + 0.5;  // Normalize UV coordinates to fit within the circle
+
+            // Invert the UV coordinates based on the type of flip needed
+			uv.y = 1.0 - uv.y;  // This line inverts the video vertically
+
+            // Select texture based on circle index
+            if (i == 0) {
+                col = texture(iChannel0, uv).rgb;
+            } else if (i == 1) {
+                col = texture(iChannel1, uv).rgb;
+            } else if (i == 2) {
+                col = texture(iChannel2, uv).rgb;
+            } else if (i == 3) {
+                col = texture(iChannel3, uv).rgb;
+            } 
+
+            // Blending and boundary handling
+            float twidth = 0.001;
+            col *= smoothstep(0.0, px, D.z - length(v));
+            col *= smoothstep(0.0, px, abs(D.z - length(v) - 2.0 * D.z * twidth));
+            break;
+        }
+    }
+}
+    col = pow(col, vec3(1. / 2.2));
+    outColor = vec4(col, 1.0);
+}
+		
+]]>
+</program>
+</language>
+</jittershader>

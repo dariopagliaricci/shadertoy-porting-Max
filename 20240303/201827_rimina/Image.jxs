@@ -1,0 +1,84 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			
+			out jit_PerVertex {
+				vec2 uv;
+				
+			} jit_out;
+			uniform mat4 MVP;
+	
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+	
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform sampler2D iChannel0;
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 p = fragCoord.xy / viewPort.xy;
+    
+    vec4 color = vec4(0.0);
+    
+    vec2 pp = vec2(2.0/viewPort.x, 3.0/viewPort.y);
+    vec4 kertoimet = vec4(0.1531, 0.12245, 0.0918, 0.051);
+    color = texture(iChannel0, p) * 0.1633;
+    color += texture(iChannel0, p) * 0.1633;
+    for(int i = 0; i < 4; ++i){
+        color += texture(iChannel0, vec2( p.x - (float(i)+1.) * pp.y, p.y ) ) * kertoimet[i] +
+        texture(iChannel0, vec2( p.x, p.y - (float(i)+1.) * pp.x ) ) * kertoimet[i] +
+        texture(iChannel0, vec2( p.x + (float(i)+1.) * pp.y, p.y ) ) * kertoimet[i] +
+        texture(iChannel0, vec2( p.x, p.y + (float(i)+1.) * pp.x ) ) * kertoimet[i];
+    }
+    color = color + texture(iChannel0, p);
+    
+    
+    color = smoothstep(0.2, 0.9, color);
+    color.xyz = pow(color.xyz, 1.0/vec3(2.2));
+	outColor = color;
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

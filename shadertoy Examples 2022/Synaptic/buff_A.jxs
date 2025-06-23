@@ -1,0 +1,132 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+
+	<param name="buff_A" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+
+		<bind param="buff_A" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform int iFrame;
+			uniform sampler2D buff_A;
+			uniform sampler2D iChannel1;
+			
+			// Synaptic by nimitz (twitter: @stormoid)
+			// https://www.shadertoy.com/view/MdG3Dd
+			// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
+			// Contact the author for other licensing options
+
+			//Velocity handling
+
+			const float initalSpeed = 10.;
+			#define time iTime
+
+			vec3 hash3(vec3 p)
+			{
+			    p = fract(p * vec3(443.8975,397.2973, 491.1871));
+			    p += dot(p.zxy, p.yxz+19.1);
+			    return fract(vec3(p.x * p.y, p.z*p.x, p.y*p.z))-0.5;
+			}
+
+			vec3 update(in vec3 vel, vec3 pos, in float id)
+			{   
+			    vel.xyz = vel.xyz*.999 + (hash3(vel.xyz + time)*2.)*7.;
+			    
+			    float d = pow(length(pos)*1.2, 0.75);
+			    vel.xyz = mix(vel.xyz, -pos*d, sin(-time*.55)*0.5+0.5);
+			    
+			    return vel;
+			}
+
+			void main()
+			{
+				vec2 fragCoord = jit_in.texcoord * iResolution;
+
+				vec2 q = fragCoord.xy / iResolution.xy;
+			    
+			    vec4 col= vec4(0);
+			    vec2 w = 1./iResolution.xy;
+			    
+			    vec3 pos = texture(buff_A, vec2(q.x,100.*w)).xyz;
+			    vec3 velo = texture(buff_A, vec2(q.x,0.0)).xyz;
+			    velo = update(velo, pos, q.x);
+			    
+			    if (fragCoord.y < 30.)
+			    {
+			    	col.rgb = velo;
+			    }
+			    else
+			    {
+			        pos.rgb += velo*0.002;
+			        col.rgb = pos.rgb;
+			    }
+				
+			    //Init
+			    if (iFrame < 10) 
+			    {
+			        if (fragCoord.y < 30.)
+			        	col = ((texture(iChannel1, q*1.9))-.5)*10.;
+			        else
+			        {
+			            col = ((texture(iChannel1, q*1.9))-.5)*.5;
+			        }
+			    }
+			    
+				fragColor = col;
+			}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

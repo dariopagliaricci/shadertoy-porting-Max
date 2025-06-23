@@ -1,0 +1,104 @@
+<jittershader name="stripes">
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="position" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+
+    <param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+    <language name="glsl" version="1.5">
+        <bind param="MVP" program="vp" />
+        <bind param="position" program="vp" />
+        <bind param="uv" program="vp" />
+
+        <bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+</program>      
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+    vec2 uv;
+} jit_in;
+out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform samplerCube iChannel0;
+uniform sampler2D iChannel1;
+    
+// https://thebookofshaders.com/10/
+float random (vec2 st) {
+return fract(sin(dot(st.xy,
+                     vec2(12.9898,78.233)))*
+    43758.5453123);
+}
+
+
+void main()
+{
+vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+vec2 uv = fragCoord/viewPort.xy;
+
+float speed = 30.0;
+// speed = 2.0;
+float t = floor(iTime * speed);
+
+vec2 a = vec2(random(vec2(t, 0.12)), random(vec2(t, 3.54)));
+vec2 b = vec2(random(vec2(t, 1.76)), random(vec2(t, 2.99)));
+b = fract(a + 0.2 + b * 0.8);
+
+vec2 minbox = min(a, b);
+vec2 maxbox = max(a, b);
+
+vec2 x = step(minbox, uv) * step(uv, maxbox);
+
+if (abs(minbox.x - maxbox.x) > 0.5) x.x = 1.0 - x.x;
+if (abs(minbox.y - maxbox.y) > 0.5) x.y = 1.0 - x.y;
+
+float blend = x.x * x.y;
+
+// Assuming 'fragCoord' is in screen space and you want to convert it to a direction vector for the cube map.
+vec3 direction = normalize(vec3(fragCoord.xy / viewPort.xy * 2.0 - 1.0, 1.0)); // Convert to [-1, 1] space
+
+// Example direction vector for sampling the cube map
+// vec3 direction = normalize(vec3(fragCoord.xy, 1.0));
+
+// Sample the cube map
+vec4 old = texture(iChannel0, direction);
+// vec4 old = texture(iChannel0, fragCoord/viewPort.xy);
+vec4 new = texture(iChannel1, fragCoord/viewPort.xy);
+
+outColor = mix(old, new, blend);
+
+// fragColor.r += step(distance(a, uv), 0.01);
+// fragColor.r += step(distance(b, uv), 0.01);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

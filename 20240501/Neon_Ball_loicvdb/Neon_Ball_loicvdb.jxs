@@ -1,0 +1,172 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	// <param name="iFrame" type="int" default="0" />
+	// <param name="iChannel0" type="int" default="0" />
+	// <param name="iMouse" type="vec3" default="0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		// <bind param="iFrame" program="fp" />
+		// <bind param="iChannel0" program="fp" />
+		// <bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 o;
+
+uniform vec2 viewPort;
+uniform float iTime;
+// uniform int iFrame;
+// uniform vec3 iMouse;
+// uniform sampler2D iChannel0;
+
+// uncomment this line for a faster version
+//#define LOW_QUALITY
+
+
+#ifdef LOW_QUALITY
+#define AA 1
+#define DOF_SAMPLES 3
+#else
+#define AA 2
+#define DOF_SAMPLES 6
+#endif
+
+
+#define APERTURE .01
+#define DOF_CLAMPING .7
+#define FOCAL_DISTANCE 8.
+
+vec4 sampleDof(sampler2D channel, vec2 channelDim, vec2 dir, vec2 u) {
+    float screenAperture = channelDim.y*APERTURE;
+    float sampleToRad = screenAperture * DOF_CLAMPING / float(DOF_SAMPLES);
+    vec4 o = vec4(0);
+    float sum = 0.;
+    for(int i = -DOF_SAMPLES; i <= DOF_SAMPLES; i++) {
+        float sRad = float(i)*sampleToRad;
+        vec4 p = texture(channel, (u+dir*sRad)/channelDim);
+        float rad = min(abs(p.a-FOCAL_DISTANCE)/p.a, DOF_CLAMPING);
+        float influence = clamp((rad*screenAperture - abs(sRad)) + .5, 0., 1.) / (rad*rad+.001);
+        o += influence * p;
+        sum += influence;
+    }
+    return o/sum;
+}
+
+float fresnel(const vec3 dir, const vec3 n) {
+    const float ior = 1.8;
+    const float r0 = ((1. - ior) / (1. + ior)) * ((1. - ior) / (1. + ior));
+    float x = 1.+dot(n, dir);
+    return r0 + (1.-r0) * x*x*x*x*x;
+}
+
+mat3 rotationMatrix(const vec3 rotation) {
+    vec3 c = cos(rotation), s = sin(rotation);
+    mat3 rx = mat3(1, 0, 0, 0, c.x, -s.x, 0, s.x, c.x);
+    mat3 ry = mat3(c.y, 0, -s.y, 0, 1, 0, s.y, 0, c.y);
+    mat3 rz = mat3(c.z, -s.z, 0, s.z, c.z, 0, 0, 0, 1);
+    return rz * rx * ry;
+}
+
+//--------------------------------------------------------------------------------
+
+vec4 sphereI(vec3 pos, const vec3 dir, vec3 sPos){
+    pos -= sPos;
+	float b = -dot(pos, dir);
+	float d = b * b - dot(pos, pos) + .2;
+	if (d < 0.0) return vec4(-1.);
+	b -= sqrt(d);
+	return vec4(normalize(pos+b*dir), b);
+}
+
+vec4 sceneI(const vec3 pos, const vec3 dir) {
+    vec3 s = sign(dir);
+    float t   = max(0., -(pos.y+s.y*1.3)/dir.y);
+    float end = max(0., -(pos.y-s.y*1.0)/dir.y);
+    for(int i = 0; i < 16 && t < end; i++) {
+        vec3 p = pos+t*dir;
+        vec2 fp = floor(p.xz);
+        vec2 co = cos(fp*.5+iTime);
+        vec4 sI = sphereI(pos, dir, vec3(fp+.5, co.x*co.y).xzy);
+        if(sI.w > 0.) return sI;
+        vec2 l = (s.xz*.5+.5+fp-p.xz) / dir.xz;
+        t += min(l.x, l.y) + .1;
+    }
+    return vec4(-1.);
+}
+
+void main() {
+    
+	vec2 u = jit_in.uv * viewPort.xy;
+    mat3 rot = rotationMatrix(vec3(-.7, iTime*.15, 0.));
+    o = vec4(0.);
+    for(int y = 1; y <= AA; y++) {
+        for(int x = 1; x <= AA; x++) {
+            vec2 uv = (floor(u)+vec2(x, y)/float(AA+1)-viewPort.xy*.5) / viewPort.y;
+            vec3 pos = vec3(0., 0., 7.) * rot;
+            vec3 dir = normalize(vec3(uv, -1.)) * rot;
+            pos.x += iTime*2.;
+            float att = 1.;
+            float d = 10.;
+            for(int i = 0; i < 2; i++) {
+                vec4 t = sceneI(pos, dir);
+                if(t.w < 0.) break;
+                if(i == 0) d = t.w;
+                pos += t.w*dir;
+                vec3 orientation = normalize(vec3(cos(floor(pos.xz) - iTime), .5).xzy);
+                vec3 emission = abs(dot(t.xyz, orientation)) < .2 ? (orientation.yxz+1.) : vec3(.0);
+                emission *= 4.*abs(fract(orientation.y*5.)*2.-1.);
+                float f = fresnel(dir, t.xyz);
+                o.rgb += att*(1.-f) * emission;
+                att *= f;
+                dir = reflect(dir, t.xyz);
+            }
+            o += vec4(att*vec3(1., 1.5, 2.)*step(0., dir.y), d);
+        }
+    }
+    o /= float(AA*AA);
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,111 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_A" type="int" default="0" />
+	
+	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<bind param="buff_A" program="fp" />
+		
+		
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+			
+
+		uniform vec2 iResolution;
+		uniform float iTime;
+		
+		uniform sampler2D buff_A;
+		
+			
+		// FXAA implementation by mudlord (I think?)
+		void main(){
+
+			vec2 fragCoord = jit_in.texcoord * iResolution;
+
+		    vec2 p = fragCoord.xy/iResolution.xy;
+		    vec2 pp = 1.0 / iResolution.xy;
+		    vec4 color = texture(buff_A, vec2(fragCoord.xy * pp));
+		    vec3 luma = vec3(0.299, 0.587, 0.114);
+		    float lumaNW = dot(texture(buff_A, (fragCoord.xy + vec2(-1.0, -1.0)) * pp).xyz, luma);
+		    float lumaNE = dot(texture(buff_A, (fragCoord.xy + vec2(1.0, -1.0)) * pp).xyz, luma);
+		    float lumaSW = dot(texture(buff_A, (fragCoord.xy + vec2(-1.0, 1.0)) * pp).xyz, luma);
+		    float lumaSE = dot(texture(buff_A, (fragCoord.xy + vec2(1.0, 1.0)) * pp).xyz, luma);
+		    float lumaM  = dot(color.xyz,  luma);
+		    float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+		    float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+
+		    vec2 dir = vec2(-((lumaNW + lumaNE) - (lumaSW + lumaSE)), ((lumaNW + lumaSW) - (lumaNE + lumaSE)));
+
+		    float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) *
+		                          (0.25 * (1.0/8.0)), (1.0/128.0));
+
+		    float rcpDirMin = 2.5 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+		    dir = min(vec2(8.0, 8.0),
+		              max(vec2(-8.0, -8.0),
+		              dir * rcpDirMin)) * pp;
+
+		    vec3 rgbA = 0.5 * (
+		        texture(buff_A, fragCoord.xy * pp + dir * (1.0 / 3.0 - 0.5)).xyz +
+		        texture(buff_A, fragCoord.xy * pp + dir * (2.0 / 3.0 - 0.5)).xyz);
+		    vec3 rgbB = rgbA * 0.5 + 0.25 * (
+		        texture(buff_A, fragCoord.xy * pp + dir * -0.5).xyz +
+		        texture(buff_A, fragCoord.xy * pp + dir * 0.5).xyz);
+
+		    float lumaB = dot(rgbB, luma);
+		    if ((lumaB < lumaMin) || (lumaB > lumaMax)){
+		        fragColor = vec4(rgbA, color.w);
+		    } else {
+		        fragColor = vec4(rgbB, color.w);
+		    }
+
+		}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

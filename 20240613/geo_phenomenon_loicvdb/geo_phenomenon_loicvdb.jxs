@@ -1,0 +1,288 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+    <param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+        <bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+
+#define Bounces 4
+#define MaxSteps 256
+#define SceneRadius 2.
+#define DetailLevel 2.
+#define StepFactor 1.
+
+#define Pi 3.14159265359
+#define ORTHO( v ) abs(v.x)>abs(v.z)?vec3(-v.y,v.x,0.):vec3(0.,-v.z,v.y)
+#define HASH( seed ) fract(cos(seed)*43758.5453)
+#define RANDOM HASH(seed++)
+#define RANDOM2D vec2(RANDOM, RANDOM)
+#define HITDIST( p ) length(p-Cam.pos)/viewPort.y/Cam.focalLength/DetailLevel
+
+struct Surface {
+    bool metallic;
+    float ior, roughness;
+    vec3 emission, diffuse;
+};
+
+struct Camera {
+    vec3 pos, rot;
+    float focalLength, focalDistance, aperture;
+} Cam;
+
+float seed;
+
+mat3 rotationMatrix(vec3 rotEuler){
+    float c = cos(rotEuler.x), s = sin(rotEuler.x);
+    mat3 rx = mat3(1, 0, 0, 0, c, -s, 0, s, c);
+    c = cos(rotEuler.y), s = sin(rotEuler.y);
+    mat3 ry = mat3(c, 0, -s, 0, 1, 0, s, 0, c);
+    c = cos(rotEuler.z), s = sin(rotEuler.z);
+    mat3 rz = mat3(c, -s, 0, s, c, 0, 0, 0, 1);
+    
+    return rz * rx * ry;
+}
+
+float fresnel(vec3 dir, vec3 n, float ior) {
+    float cosi = dot(dir, n);
+    float etai = 1.0;
+    float etat = ior;
+    if (cosi > 0.0) {
+         float tmp = etai;
+         etai = etat;
+         etat = tmp;
+     }
+    float sint = etai / etat * sqrt(max(0.0, 1.0 - cosi * cosi));
+    if (sint >= 1.0) return 1.0;
+    float cost = sqrt(max(0.0, 1.0 - sint * sint));
+    cosi = abs(cosi);
+    float sqrtRs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
+    float sqrtRp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
+    return (sqrtRs * sqrtRs + sqrtRp * sqrtRp) / 2.0;
+}
+
+vec3 getCosineWeightedSample(vec3 dir) {
+    vec3 o1 = normalize(ORTHO(dir));
+    vec3 o2 = normalize(cross(dir, o1));
+    vec2 r = RANDOM2D;
+    r.x = r.x * 2.0 * Pi;
+    r.y = pow(r.y, .5);
+    float oneminus = sqrt(1.0-r.y*r.y);
+    return cos(r.x) * oneminus * o1 + sin(r.x) * oneminus * o2 + r.y * dir;
+}
+
+// n-blade aperture
+vec2 sampleAperture(int nbBlades, float rotation) {
+    
+    float side = sin(Pi / float(nbBlades));
+    vec2 tri = RANDOM2D;
+    if(tri.x-tri.y > 0.0) tri = vec2(tri.x-1.0, 1.0-tri.y);
+    tri *= vec2(side, -sqrt(1.0-side*side));
+    float angle = rotation + 2.*Pi*floor(RANDOM * float(nbBlades))/float(nbBlades);
+    return vec2(tri.x * cos(angle) + tri.y * sin(angle),
+                tri.y * cos(angle) - tri.x * sin(angle));
+}
+
+vec2 sphereIntersect(vec3 pos, vec3 dir, float radius) {
+    float b = dot(pos, dir);
+    float c = dot(pos, pos) - radius * radius;
+    float discriminant = b * b - c;
+    if (discriminant < 0.) return vec2(-1.);
+    float s = sqrt(discriminant);
+    return vec2(-b - s, -b + s);
+}
+
+void fold(inout vec3 z, vec3 o, vec3 n) {
+    z -= 2.*n*min(dot(z-o, n), 0.);
+}
+
+float sdfIFS(vec3 z, out Surface surf){
+    
+    float scale = 2.;
+    int Iterations = 16;
+    mat3 rot = rotationMatrix(vec3(.5)*Pi);
+    
+    vec3 n1 = normalize(vec3(1., 1., -1.));
+    vec3 n2 = normalize(vec3(1., -1., -1.));
+    //vec3 n3 = normalize(vec3(1., -1., 1.));
+    
+    vec3 ot = vec3(1.);
+    for(int i = 0; i < Iterations; i++) {
+        fold(z, vec3(-.0), n1);
+        fold(z, vec3(-.25), n2);
+        //fold(z, vec3(-.25), n3);
+        n1 *= rot;
+        z = z*scale - sign(z)*(scale-1.0);
+        ot = min(abs(z), ot);
+    }
+    surf = Surface(true, 1.0, .1, vec3(0.), vec3(.8));
+    if(ot.r >= .75) surf = Surface(false, 1., .0, ot.ggb*30.*vec3(12., 2., .5), vec3(0.1));
+    return length(z) * pow(scale, float(-Iterations));
+}
+
+
+float sdf(in vec3 pos, out Surface surf) {
+    float sSc = length(pos)-SceneRadius;
+    float s = sdfIFS(pos * rotationMatrix(vec3(.5, .0, .0)*Pi), surf);
+    return abs(sSc) > abs(s) || s > 0. ? s : sSc;
+    
+}
+
+float sdf(vec3 pos){
+    Surface surf;
+    return sdf(pos, surf);
+}
+
+
+vec3 normalEstimation(vec3 pos, float hd){
+  vec2 k = vec2(hd, 0);
+  return normalize(vec3(sdf(pos + k.xyy) - sdf(pos - k.xyy),
+                        sdf(pos + k.yxy) - sdf(pos - k.yxy),
+                        sdf(pos + k.yyx) - sdf(pos - k.yyx)));
+}
+
+
+bool trace(inout vec3 pos, in vec3 dir, out vec3 normal, out Surface surf) {
+    vec2 ts = sphereIntersect(pos, dir, SceneRadius);
+    if(sign(ts) != vec2(-1.)) {
+        float t = max(ts.x, 0.);
+        for(int i = 0; i < MaxSteps; i++) {
+            if(t >= ts.y) break;
+            vec3 p = pos+t*dir;
+            float dist = sdf(p, surf);
+            float hd = HITDIST(p);
+            if(dist < hd) {
+                pos += (t-hd*2.) * dir;
+                normal = normalEstimation(pos, hd);
+                return true;
+            }
+            t += dist*StepFactor*(RANDOM*.5+.5);
+        }
+    }
+    pos += ts.y*dir;
+    return false;
+}
+
+vec3 background(vec3 dir) {
+    return vec3(.8, .9, .9);
+}
+
+vec3 pathTrace(vec3 pos, vec3 dir) {
+    Surface surf;
+    vec3 normal, col = vec3(0.), abso = vec3(1.);
+    for(int i = 0; i <= Bounces; i++) {
+        bool t = trace(pos, dir, normal, surf);
+        if(!t) return col + abso * background(dir);
+        vec3 difuseDir = getCosineWeightedSample(normal);
+        vec3 reflectDir = normalize(mix(reflect(dir, normal), difuseDir, surf.roughness));
+        if(surf.metallic){
+            dir = reflectDir;
+            col += abso * surf.emission;
+            abso *= surf.diffuse;
+        } else {
+            float f = fresnel(dir, normal, surf.ior);
+            col += abso * surf.emission * (1.-f);
+            if(RANDOM < f-.1e-7) {
+                dir = reflectDir;
+            } else {
+                dir = difuseDir;
+                abso *= surf.diffuse;;
+            }
+        }
+        if(abso == vec3(0.)) break;
+    }
+    return col;
+}
+
+
+void main(){
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    outColor = iFrame == 0 ? vec4(0.) : texture(iChannel0, vec3(fragCoord, 0.0));
+    if(iMouse.z > 0.) outColor.a = 0.;
+    
+    //comment these lines if you have a good GPU, this is just to avoid timeout on my PC
+    if(sign(fragCoord.x-viewPort.x/2.) != ((iFrame&1)==0?-1.:1.)) return;
+    if(sign(fragCoord.y-viewPort.y/2.) != ((iFrame&2)==0?-1.:1.)) return;
+    
+    seed = sin(float(iFrame)) + cos(fragCoord.x) + sin(fragCoord.y);
+    
+    Cam = Camera(vec3(.0, .0, -.2), vec3(.1, -2.2, 0.), 1.5, .3, .002);
+    Cam.pos *= rotationMatrix(Cam.rot);
+    Cam.pos += vec3(-.5, 1.1, 0.5);
+    
+    vec2 uv = (fragCoord+RANDOM2D-viewPort.xy/2.) / viewPort.y;
+
+    vec3 focalPoint = vec3(uv * Cam.focalDistance / Cam.focalLength, Cam.focalDistance);
+    vec3 aperture = Cam.aperture * vec3(sampleAperture(5, 1.0), 0.0);
+    vec3 dir = normalize(focalPoint-aperture);
+    vec3 pos = aperture;
+    vec3 cdir = vec3(0., 0., 1.);
+
+    mat3 CamMatrix = rotationMatrix(Cam.rot);
+    dir *= CamMatrix;
+    cdir *= CamMatrix;
+    pos = pos*CamMatrix + Cam.pos;
+    
+    vec3 col = max(vec3(0.), pathTrace(pos, dir) * dot(dir, cdir));
+    
+    outColor.a++;
+    outColor.rgb = mix(outColor.rgb, col, 1./outColor.a);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

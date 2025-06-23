@@ -1,0 +1,216 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 Q;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+#define s 5.
+#define R viewPort.xy
+#define pi 3.141592653897
+#define Main void main()
+// #define A(U) texture(iChannel0,(U)/R)
+#define A(direction) texture(iChannel0, normalize(direction))
+#define B(U) texture(iChannel1,(U)/R)
+vec2 sphere (vec3 p, vec3 d, float r) {
+
+    // (p+dx)^2=r^2
+    // pp-rr + 2pdx + xx = 0
+    
+    float c = dot(p,p)-r*r;
+    float b = 2.*dot(p,d);
+    float det = b*b-4.*c;
+    if (det < 0.) return vec2(-1);
+    return 0.5*(-b+vec2(-1,1)*sqrt(det));
+}
+float plane (vec3 p, vec3 d, vec3 n) {
+    
+    // p + dx . n = 0
+    // p.n + d.n x = 0
+    // x = -p.n/d.n
+    
+    return -dot(p,n)/dot(d,n);
+    
+}
+vec4 hash(vec4 p4)
+{
+    p4 = fract(p4  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+#define ei(a) mat2(cos(a),sin(a),-sin(a),cos(a))
+
+Main {
+    
+    vec2 U = jit_in.uv * viewPort.xy;
+
+    #define O .5
+    // Convert U (vec2) to a vec3 for cube map sampling
+    vec3 cubeDir = normalize(vec3(U, 1.0)); 
+    Q = A(cubeDir); // Use the cube map sampling for Q
+    // Q = A(U);
+    U = 2.*(U+hash(vec4(U,iFrame,1)).xy-.5*R)/R.y;
+    for (int k = 0; k < 5; k++) {
+        
+        vec3 p = vec3(0,0,-2.5);
+        vec3 d = normalize(vec3(U,3));
+        p.yz *= ei(.4);
+        d.yz *= ei(.4);
+        
+    for (float j = 0.; j < 15.; j++) {
+        vec4 h = hash(vec4(R*U,iFrame*10+k,j));
+        float x = -1.;
+        vec3 o = d;
+        { // main sphere
+            vec2 i = sphere(p,o,.8);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o-O*n);
+            
+        }
+        
+        { // inner sphere 1
+            vec2 i = sphere(p-vec3(.4,.2,0),o,.2);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o+O*n);
+            
+        }
+        
+        { // inner sphere 2
+            vec2 i = sphere(p-vec3(-.0,.3,-.5),o,.15);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o+O*n);
+            
+        }
+        
+        { // inner sphere 3
+            vec2 i = sphere(p-vec3(-.3,-.2,-.3),o,.3);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o+O*n);
+            
+        }
+        { // inner sphere 4
+            vec2 i = sphere(p-vec3(.4,-.1,.3),o,.1);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o+O*n);
+            
+        }
+        
+        { // inner sphere 5
+            vec2 i = sphere(p-vec3(0.1,-.4,-.5),o,.15);
+            bool b = false;
+            if (i.x>0.&&(i.x<x||x<0.)) x = i.x, b=true;
+            if (i.y>0.&&(i.y<x||x<0.)) x = i.y, b=true;
+            vec3 m = p+o*x;
+            vec3 n = normalize(m);
+            if (b) d = h.z<.5?reflect(o,n):normalize(o+O*n);
+            
+        }
+        
+        { // backsplash
+            float i = plane(p-vec3(0,0,3 ),o,vec3(0,0,1));
+            if (i>0.&&(i<x||x<0.)) {
+                x = i;
+                vec3 m = p + o*x;
+                d = normalize(h.xyz*2.-1.);
+                    d.z = -abs(d.z);
+                if (sin(10.*m.x)*sin(10.*m.y)<0.) {
+                    d = normalize(reflect(o,vec3(0,0,1))+d);
+                }
+            }
+
+        }
+        
+        { // light
+            float i = plane(p-vec3(0,0,-4),o,vec3(0,0,1));
+            if (i>0.&&(i<x||x<0.)) {
+                x = i;
+                p += o*x;
+                Q += 5.*vec4(3,2,1,1)*float(length(p.xy-vec2(-6,1))<1.);
+                Q += 20.*vec4(1,2,3,1)*float(length(p.xy-vec2(3,-1))<.4);
+                Q += 1.*vec4(1,3,2,1)*float(length(p.xy-vec2(2,8))<2.);
+                break;
+            }
+
+        }
+        if (x>0.) p = p+o*x+d*1e-3;
+    }
+    }
+    
+    
+
+}
+
+]]>
+</program>
+</language>
+</jittershader>

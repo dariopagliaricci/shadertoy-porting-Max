@@ -1,0 +1,165 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+    <param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+        <bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+				vec4 color;
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+/*
+
+Extruded Maze
+-------------
+
+See "Buffer A".
+
+*/
+
+  
+
+// Just a very basic depth of field routine -- I find a lot of it is
+// common sense. Basically, you store the scene distance from the camera 
+// in the fourth channel, then use it to determine how blurry you want
+// your image to be at that particular distance.
+//
+// For instance, in this case, I want pixels that are 6.25 units away from 
+// the camera to be in focus (not blurred) and for things to get more 
+// blurry as you move away from that point -- aptly named the focal point 
+// for non camera people. :)
+//
+// I based this on old code of mine, but adopted things that I found in 
+// IQ and Nesvi7's examples, which you can find here:
+//
+// Ladybug - IQ
+// https://www.shadertoy.com/view/4tByz3
+//
+// Cube surface II - Nesvi7
+// https://www.shadertoy.com/view/Mty3DV
+//
+vec3 DpthFld(sampler2D iCh, vec2 uv){
+    
+    // Focal point and circle of confusion.
+    const float focD = 2.75, coc = .75;
+    // Linear distance from either side of the focal point.
+    float l = abs(texture(iCh, uv).w - focD) - coc;
+    // Using it to calculate the DOF.
+    float dof = clamp(l/coc, 0., 2.)*2.; 
+    
+    // Combine samples. Samples with a larger DOF value are taken further 
+    // away from the original point, and as such appear blurrier.
+    vec3 acc = vec3(0);
+
+    for(int i = 0; i<25; i++){
+        // Accumulate samples.
+        acc += texture(iCh, uv + (vec2(i/5, i%5) - 2.)/viewPort.y*dof).xyz;
+        //acc.x *= dof/2.;
+    }
+
+    // Return the new variably blurred value.
+    return acc /= 25.;
+    // Visual debug representation of DOF value.
+    //return vec3(length(dof)*450./2.5);
+}
+
+void main(){
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Screen oordinates.
+    vec2 uv = fragCoord/viewPort.xy;
+
+
+    // Retrieving the stored color.
+    //vec4 col = texture(iChannel0, uv);
+
+    // Depth of field.
+    vec4 col = DpthFld(iChannel0, uv).xyzz;
+ 
+    // Bokeh function.
+    //vec4 col = bokeh(iChannel0, uv);
+    
+    
+    // Hardware bloom that I made up on the spot. It's
+    // not as nice as software bloom, but it's way cheaper
+    // and definitely easier to implement.
+    float a = 1., w = 1.;
+    vec4 col2 = vec4(0);
+    for (int i = 0; i<6; i++){
+        vec2 jit = (texture(iChannel1, uv + float(i)/6. + fract(iTime)).xy - .5)/viewPort.y;
+        col2 += texture(iChannel0, uv + jit, float(i)/2.)*w;
+        a += w;
+        //w *= .7071;
+    }
+    col2 /= a;
+    
+    col += smoothstep(.25, 1., col2);
+    
+   
+ 
+    // Rough Reinhard tone mapping.
+    //col /= 1. + col/2.5;
+    
+    // Subtle vignette.
+    //col *= pow(16.*uv.x*uv.y*(1. - uv.x)*(1. - uv.y) , 1./16.);
+
+    // Rough gamma correction and screen presentation.
+    outColor = pow(max(col, 0.), vec4(1./2.2)); 
+    
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>

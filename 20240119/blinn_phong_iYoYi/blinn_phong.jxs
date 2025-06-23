@@ -1,0 +1,714 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+    <param name="iFRame" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+        <bind param="iFrame" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+
+// General
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#define iFrameRate 24.
+#define ZERO min(0,iFrame)
+#define PI 3.14159265
+#define HALF_PI 1.5707963267948966
+#define PI2 (2.0*PI)
+#define PHI (sqrt(5.0)*0.5 + 0.5)
+#define saturate(x) clamp(x, 0.0, 1.0)
+
+#define s2u(x) (x*.5+.5)
+#define u2s(x) ((x*2.)-1.)
+
+// Random & Noise
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// Hash / Noise by Anonymous:
+// I forgot where I found this...
+float hash( float n )
+{
+    return fract(sin(n)*158.5453);
+}
+float noise( in float x )
+{
+    float p = floor(x);
+    float f = fract(x);
+    f = f*f*(3.0-2.0*f);
+    return mix( hash(p+0.0), hash(p+1.0),f);
+}
+
+float rand(vec2 co){
+    return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+}
+
+float noise (in vec2 st) {
+    vec2 i = floor(st);
+    vec2 f = fract(st);
+
+    float a = rand(i);
+    float b = rand(i + vec2(1.0, 0.0));
+    float c = rand(i + vec2(0.0, 1.0));
+    float d = rand(i + vec2(1.0, 1.0));
+
+    vec2 u = f * f * (3.0 - 2.0 * f);
+
+    return mix(a, b, u.x) +
+            (c - a)* u.y * (1.0 - u.x) +
+            (d - b) * u.x * u.y;
+}
+
+float fbm(vec2 n){
+    float sum = 0.0;
+    float amp= 1.0;
+    for (int i = 0; i <5; i++){
+        sum += noise(n) * amp;
+        n += n*4.0;
+        amp *= 0.25;
+    }
+    return sum;
+}
+
+float fbm(vec2 n, int rep){
+    float sum = 0.0;
+    float amp= 1.0;
+    for (int i = 0; i <rep; i++){
+        sum += noise(n) * amp;
+        n += n*4.0;
+        amp *= 0.25;
+    }
+    return sum;
+}
+
+float noise(vec3 x) {
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n = p.x + p.y * 157.0 + 113.0 * p.z;
+    return mix(
+            mix(mix(hash(n + 0.0), hash(n + 1.0), f.x),
+                    mix(hash(n + 157.0), hash(n + 158.0), f.x), f.y),
+            mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+                    mix(hash(n + 270.0), hash(n + 271.0), f.x), f.y), f.z);
+}
+float fbm(vec3 p) {
+    float f = 0.0;
+    f = 0.5000 * noise(p);
+    p *= 2.01;
+    f += 0.2500 * noise(p);
+    p *= 2.02;
+    f += 0.1250 * noise(p);
+
+    return f;
+}
+
+// Raymarching
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#define MIN_DIST 0.01
+#define MAX_DIST 1000.
+#define ITERATION 200
+#define MAT_VOID vec3(-1)
+
+#define AMB_COL vec3(1., 0.7717, 0.6500)
+#define AMB_STRENGTH 0.9100
+#define FOG_COL vec3(1., 0.7717, 0.6500)
+#define FOG_START 0.5740
+
+
+// Cheap Rotation by las:
+// http://www.pouet.net/topic.php?which=7931&page=1
+#define R(p, a) p=cos(a)*p+sin(a)*vec2(p.y,-p.x)
+vec3 rot(vec3 p,vec3 r){
+    R(p.xz, r.y);
+    R(p.yx, r.z);
+    R(p.zy, r.x);
+    return p;
+}
+
+// "Hash without Sine" by Dave_Hoskins:
+// https://www.shadertoy.com/view/4djSRW
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// Hash without Sine
+// MIT License...
+/* Copyright (c)2014 David Hoskins.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.*/
+
+//----------------------------------------------------------------------------------------
+//  1 out, 1 in...
+float hash11(float p)
+{
+    p = fract(p * .1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+}
+
+//----------------------------------------------------------------------------------------
+//  1 out, 2 in...
+float hash12(vec2 p)
+{
+    vec3 p3  = fract(vec3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+//----------------------------------------------------------------------------------------
+//  1 out, 3 in...
+float hash13(vec3 p3)
+{
+    p3  = fract(p3 * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+//----------------------------------------------------------------------------------------
+//  2 out, 1 in...
+vec2 hash21(float p)
+{
+    vec3 p3 = fract(vec3(p) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+//----------------------------------------------------------------------------------------
+///  2 out, 2 in...
+vec2 hash22(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+//----------------------------------------------------------------------------------------
+///  2 out, 3 in...
+vec2 hash23(vec3 p3)
+{
+    p3 = fract(p3 * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+
+//----------------------------------------------------------------------------------------
+//  3 out, 1 in...
+vec3 hash31(float p)
+{
+   vec3 p3 = fract(vec3(p) * vec3(.1031, .1030, .0973));
+   p3 += dot(p3, p3.yzx+33.33);
+   return fract((p3.xxy+p3.yzz)*p3.zyx); 
+}
+
+
+//----------------------------------------------------------------------------------------
+///  3 out, 2 in...
+vec3 hash32(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yxz+33.33);
+    return fract((p3.xxy+p3.yzz)*p3.zyx);
+}
+
+//----------------------------------------------------------------------------------------
+///  3 out, 3 in...
+vec3 hash33(vec3 p3)
+{
+    p3 = fract(p3 * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yxz+33.33);
+    return fract((p3.xxy + p3.yxx)*p3.zyx);
+
+}
+
+//----------------------------------------------------------------------------------------
+// 4 out, 1 in...
+vec4 hash41(float p)
+{
+    vec4 p4 = fract(vec4(p) * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+    
+}
+
+//----------------------------------------------------------------------------------------
+// 4 out, 2 in...
+vec4 hash42(vec2 p)
+{
+    vec4 p4 = fract(vec4(p.xyxy) * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+
+}
+
+//----------------------------------------------------------------------------------------
+// 4 out, 3 in...
+vec4 hash43(vec3 p)
+{
+    vec4 p4 = fract(vec4(p.xyzx)  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+
+//----------------------------------------------------------------------------------------
+// 4 out, 4 in...
+vec4 hash44(vec4 p4)
+{
+    p4 = fract(p4  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+
+// "init": initialize camera and lights.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+vec3  Camera_pos;
+vec4  Camera_quat;
+float Camera_fov;
+vec3  sdLight001_dir;
+vec3  sdLight001_col;
+float sdLight001_clip_start;
+float sdLight001_clip_end;
+float sdLight001_softness;
+#define L0_dir sdLight001_dir
+#define L0_col sdLight001_col
+#define L0_str sdLight001_clip_start
+#define L0_end sdLight001_clip_end
+#define L0_sft sdLight001_softness
+vec3  sdLight002_dir;
+vec3  sdLight002_col;
+float sdLight002_clip_start;
+float sdLight002_clip_end;
+float sdLight002_softness;
+#define L1_dir sdLight002_dir
+#define L1_col sdLight002_col
+#define L1_str sdLight002_clip_start
+#define L1_end sdLight002_clip_end
+#define L1_sft sdLight002_softness
+
+void init()
+{
+	Camera_pos = vec3(-0.0913, 38.7396, 4.6344);
+	Camera_quat = vec4(0.0205, 0.7140, 0.6996, 0.0200);
+	Camera_fov = 0.1974;
+	sdLight001_dir = normalize(vec3(-0.0538, 0.6674, 0.7427));
+	sdLight001_col = vec3(1., 0.9681, 0.8761);
+	sdLight001_clip_start = 0.0050;
+	sdLight001_clip_end = 50.;
+	sdLight001_softness = 2.2260;
+	sdLight002_dir = normalize(vec3(0.0538, -0.6674, -0.7427));
+	sdLight002_col = vec3(0.1523, 0.1523, 0.1523);
+	sdLight002_clip_start = 0.0500;
+	sdLight002_clip_end = 30.;
+	sdLight002_softness = 50.;
+
+}
+
+vec3 ro = vec3(0), rd = vec3(0);
+vec3 col = vec3(0);
+
+// "camera": create camera vectors.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+vec3 quat_rotate(vec4 quat, vec3 dir)
+{
+    return dir + 2.0 * cross(quat.xyz, cross(quat.xyz, dir) + quat.w * dir);
+}
+
+void camera(vec2 uv)
+{
+    vec3 dir = quat_rotate(Camera_quat, vec3(0,0,-1)).xzy;
+    vec3 up = quat_rotate(Camera_quat, vec3(0,1,0)).xzy;
+    vec3 pos = Camera_pos.xzy;
+    float fov = Camera_fov;
+    vec3 target = pos-dir;
+
+    vec3 cw = normalize(target - pos);
+    vec3 cu = normalize(cross(cw, up));
+    vec3 cv = normalize(cross(cu, cw));
+
+    mat3 camMat = mat3(cu, cv, cw);
+    rd = normalize(camMat * normalize(vec3(sin(fov) * uv.x, sin(fov) * uv.y, -cos(fov))));
+    ro = pos;
+}
+
+// SDF functions
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+float vmax(vec3 v){
+    return max(max(v.x, v.y), v.z);
+}
+
+float sdPlane(in vec3 p){
+    return p.y;
+}
+
+float sdSphere(in vec3 p,in float r)
+{
+    return length(p)-r;
+}
+
+float sdEllipsoid(in vec3 p, in vec3 r)
+{
+    return (length(p/r)-1.0)*min(min(r.x,r.y),r.z);
+}
+
+float sdCapsule(vec3 p, float r, float c)
+{
+    return mix(length(p.xz) - r, length(vec3(p.x, abs(p.y) - c, p.z)) - r, step(c, abs(p.y)));
+}
+
+float sdCappedTorus(vec3 p, vec2 r, float per)
+{
+    p.x = abs(p.x);
+    vec2 sc = vec2(sin(per),cos(per));
+    float k = (sc.y*p.x>sc.x*p.z) ? dot(p.xz,sc) : length(p.xz);
+    return sqrt( dot(p,p) + r.x*r.x - 2.0*r.x*k ) - r.y;
+}
+
+float sdConeSection( in vec3 p, in float h, in float r1, in float r2 )
+{
+    vec2 q = vec2( length(p.xz), p.y );
+    vec2 k1 = vec2(r2,h);
+    vec2 k2 = vec2(r2-r1,2.0*h);
+    vec2 ca = vec2(q.x-min(q.x,(q.y < 0.0)?r1:r2), abs(q.y)-h);
+    vec2 cb = q - k1 + k2*clamp( dot(k1-q,k2)/dot(k2,k2), 0.0, 1.0 );
+    float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+    return s*sqrt( min(dot(ca,ca),dot(cb,cb)) );
+}
+
+float sdBox(vec3 p,vec3 b)
+{
+    vec3 d=abs(p)-b;
+    return length(max(d,vec3(0)))+vmax(min(d,vec3(0.0)));
+}
+
+float fOpUnion(in float a,in float b)
+{
+    return a<b?a:b;
+}
+
+
+vec4 v4OpUnion(in vec4 a,in vec4 b)
+{
+    return a.x<b.x?a:b;
+}
+
+float fOpUnionSmooth(float a,float b,float r)
+{
+    vec2 u = max(vec2(r - a,r - b), vec2(0));
+    return max(r, min (a, b)) - length(u);
+}
+
+vec4 v4OpUnionSmooth(vec4 a,vec4 b,float r)
+{
+    float h=clamp(0.5+0.5*(b.x-a.x)/r,0.0,1.0);
+    float res = mix(b.x,a.x,h)-r*h*(1.0-h);
+    return vec4(res, mix(b.yzw,a.yzw,h));
+}
+
+// scene: Shapes.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#define MAT_001 vec3(0.6415, 0.6584, 0.7382)
+#define MAT_002 vec3(0.9627, 0.8670, 0.7296)
+#define MAT_003 vec3(0.5510, 0.9288, 0.9146)
+#define MAT_004 vec3(0.8725, 0.6954, 0.7670)
+#define MAT_005 vec3(0.9622, 0.9396, 0.2231)
+#define MAT_006 vec3(0.9991, 1.0000, 0.8002)
+#define MAT_007 vec3(0.5713, 0.8689, 0.6389)
+
+vec4 sdScene(vec3 p)
+{
+    float d = MAX_DIST;
+    vec4 res = vec4(MAX_DIST, MAT_VOID);
+
+	d = sdBox(p+vec3(1.5245, -9.0242, 0.6086), vec3(1., 1., 1.))-0.0100;
+	res = v4OpUnion(vec4(d, MAT_004), res);
+
+	d = sdCappedTorus(rot(p+vec3(3.9270, -5.4430, -1.0193), vec3(1.5708, 0., 0.)), vec2(5.3682, 0.0245), 3.1413);
+	res = v4OpUnion(vec4(d, MAT_007), res);
+
+	d = sdCapsule(p+vec3(-1.5767, -6.2993, -0.6990), 2.0201, 0.);
+	d = fOpUnionSmooth(sdCapsule(rot(p+vec3(-0.5540, -4.9952, -2.5487), vec3(-0.0330, 0.0176, 0.6502)), 0.0125, 6.1996), d, 0.2800);
+	res = v4OpUnionSmooth(vec4(d, MAT_006), res, 0.4000);
+
+	d = sdConeSection(p+vec3(5.0217, -5.8192, -0.8244), 1.1768, 1.5291, 0.)-0.0100;
+	res = v4OpUnion(vec4(d, MAT_003), res);
+
+	d = sdEllipsoid(p+vec3(7.7937, -3.2336, 1.0291), vec3(1.1783, 1.1783, 1.1783));
+	res = v4OpUnionSmooth(vec4(d, MAT_002), res, 0.0100);
+
+	d = sdPlane(p);
+	res = v4OpUnionSmooth(vec4(d, MAT_001), res, 0.0100);
+
+	d = sdSphere(p+vec3(-3.8602, -3.7245, 0.8280), 1.);
+	res = v4OpUnionSmooth(vec4(d, MAT_004), res, 0.0100);
+
+	d = sdEllipsoid(rot(p+vec3(-1.6491, -3.7357, -0.7067), vec3(0., 3.1416, 0.)), vec3(0.3514, 0.3514, 0.3514));
+	res = v4OpUnionSmooth(vec4(d, MAT_005), res, 0.8072);
+
+	d = sdEllipsoid(p+vec3(4.1916, -3.8762, -2.3231), vec3(0.0480, 0.0480, 0.0480));
+	d = fOpUnionSmooth(sdEllipsoid(p+vec3(4.1916, -4.3946, -2.3231), vec3(0.0480, 0.0480, 0.0480)), d, 0.5279);
+	d = fOpUnionSmooth(sdEllipsoid(p+vec3(-0.0216, -4.2403, 0.2753), vec3(0.5796, 0.5796, 0.5796)), d, 1.8479);
+	res = v4OpUnionSmooth(vec4(d, MAT_003), res, 0.5279);
+
+	d = sdEllipsoid(rot(p+vec3(1.3863, -4.7328, -1.8904), vec3(-0.3705, 0.4450, -2.3236)), vec3(0.7026, 0.7026, 0.7026));
+	res = v4OpUnionSmooth(vec4(d, MAT_004), res, 2.0786);
+
+	d = sdEllipsoid(rot(p+vec3(-2.8616, -2.8558, -0.9923), vec3(-0.3705, 0.4450, -2.3236)), vec3(0.5893, 0.5893, 0.5893));
+	res = v4OpUnionSmooth(vec4(d, MAT_003), res, 1.5842);
+
+	d = sdEllipsoid(rot(p+vec3(0.7289, -2.3445, -2.7742), vec3(-0.3705, 0.4450, -2.3236)), vec3(0.2146, 0.2146, 0.2146));
+	res = v4OpUnionSmooth(vec4(d, MAT_004), res, 1.2901);
+
+    return res;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+vec4 intersect()
+{
+    float d = 1.;
+    vec3  m = MAT_VOID;
+
+    int i = 0;
+    for (int i = ZERO; i < ITERATION; i++)
+    {
+        vec3 p = ro + d * rd;
+        vec4 res = sdScene(p);
+        m = res.yzw;
+        res.x *= .5;
+        if (abs(res.x) < MIN_DIST || res.x >= MAX_DIST) break;
+        d += res.x;
+        if (d >= MAX_DIST) break;
+    }
+
+    return vec4(d,m);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+vec3 normal(vec3 p)
+{
+    // Copy from iq shader.
+    // inspired by tdhooper and klems - a way to prevent the compiler from inlining map() 4 times
+    vec3 n = vec3(0.0);
+    for( int i=ZERO; i<4; i++ )
+    {
+        vec3 e = 0.5773*(2.0*vec3((((i+3)>>1)&1),((i>>1)&1),(i&1))-1.0);
+        n += e*sdScene(p+0.0005*e).x;
+    }
+    return normalize(n);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+float shadow(vec3 o, vec3 n)
+{
+    float mint=L0_str;
+    float maxt=L0_end;
+    float k = L0_sft;
+    float res = 1.;
+    float t=mint;
+    for( int i=0; i < ITERATION; i++)
+    {
+        float h = sdScene(o + L0_dir*t).x;
+        res = min( res, k*h/t);
+        t += h;
+        if( res<0.0001 || t>maxt ) break;
+    }
+    return clamp( res, 0.0, 1.0 );
+}
+
+
+vec3 randomSphereDir(vec2 rnd)
+{
+    float s = rnd.x*PI*2.;
+    float t = rnd.y*2.-1.;
+    return vec3(sin(s), cos(s), t) / sqrt(1.0 + t * t);
+}
+vec3 randomHemisphereDir(vec3 dir, float i)
+{
+    vec3 v = randomSphereDir( vec2(hash11(i+1.), hash11(i+2.)) );
+    return v * sign(dot(v, dir));
+}
+
+// "Hemispherical SDF AO" by XT95:
+// https://www.shadertoy.com/view/4sdGWN
+float ambientOcclusion( in vec3 p, in vec3 n, in float maxDist, in float falloff )
+{
+    const int nbIte = 12;
+    const float nbIteInv = 1./float(nbIte);
+    const float rad = 1.-1.*nbIteInv;
+
+    float ao = 0.0;
+
+    for( int i=0; i<nbIte; i++ )
+    {
+        float l = hash11(float(i))*maxDist;
+        vec3 aord = normalize(n+randomHemisphereDir(n, l )*rad)*l;
+
+        ao += (l - max(sdScene( p + aord ).x,0.)) / maxDist * falloff;
+    }
+
+    return clamp( 1.-ao*nbIteInv, 0., 1.);
+}
+
+// Phong specular
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+float specular(vec3 p, vec3 n, vec3 ld)
+{
+    float power = 50.;
+    vec3 to_eye = normalize(p - ro);
+    vec3 reflect_light = normalize(reflect(ld, n));
+    return pow(max(dot(to_eye, reflect_light), 0.), power);
+}
+float ref(vec3 p, vec3 n, vec3 ld)
+{
+    float power = 1.;
+    vec3 to_eye = normalize(p - ro);
+    vec3 reflect_light = normalize(reflect(ld, n));
+    return pow(max(dot(to_eye, reflect_light), 0.), power);
+}
+
+// https://hanecci.hatenadiary.org/entry/20130505/p2
+// http://www.project-asura.com/program/d3d11/d3d11_006.html
+float normalizedBlinnPhong(vec3 p, vec3 n, vec3 vd, vec3 ld){
+    float m = 300.;
+    float norm_factor = (m+1.) / (2.*PI);
+    vec3 h  = normalize(vd+ld);
+    return pow(max(0., dot(h, n)), m) * norm_factor;
+}
+float normalizedRef(vec3 p, vec3 n, vec3 vd, vec3 ld){
+    float m = 6.;
+    float norm_factor = (m+1.) / (2.*PI);
+    vec3 h  = normalize(vd+ld);
+    return pow(max(0., dot(h, n)), m) * norm_factor;
+}
+
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+void render()
+{
+    vec4 hit = intersect();
+    vec3 p = ro + hit.x * rd;
+    vec3 base_col = hit.yzw;
+
+    if (hit.x>=MAX_DIST)
+    {
+        col=AMB_COL;
+    }
+    else
+    {
+        vec3 n = normal(p);
+        vec3 offset = n * .00001;
+        float light1 = saturate(dot(n, L0_dir)) * (1./PI)*3.5;
+        float light2 = saturate(dot(n, L1_dir)) * (1./PI);
+        float shadow = shadow(p+offset, n);
+
+        float ao=0.;
+        ao = ambientOcclusion(p, n, .1, .5);
+        ao += ambientOcclusion(p, n, .5, .5);
+        ao += ambientOcclusion(p, n, 2., 2.);
+        ao += ambientOcclusion(p, n, 4., 2.);
+        ao = smoothstep(0., 4., ao);
+
+        float shade = 0.;
+        shade = light1;
+
+        vec3 shadeLight1 = vec3(L0_col*light1);
+        vec3 shadeLight2 = vec3(L1_col*light2);
+
+        col = shadeLight1;
+        col *= shadow;
+        col+= shadeLight2*ao;
+        col+= AMB_COL*ao*AMB_STRENGTH*(1.-normalizedRef(p, n, -rd, L0_dir)*.45);
+        col*= base_col;
+        //col = mix(col, col+L0_col, specular(p, n, L0_dir)*shadow*1.);
+        col = mix(col, col+L0_col, normalizedBlinnPhong(p, n, -rd, L0_dir)*shadow*.025);
+        col = mix(col, FOG_COL, saturate(pow(distance(ro,p)/MAX_DIST+FOG_START, 3.5)));
+    }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+void main()
+{
+   
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 uv = fragCoord.xy / viewPort.xy;
+    
+    vec2 offset = u2s(hash22(fragCoord+iTime))/viewPort.xy*.5; // AA: Offset coord for each frame.
+    uv += offset; //
+    
+    uv = (uv*2.-1.)*viewPort.y/viewPort.x;
+    uv.x *= viewPort.x / viewPort.y;
+
+    init();
+    camera(uv);
+    render();
+
+    outColor = vec4(col, 1.);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

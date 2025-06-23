@@ -1,0 +1,85 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+// radial blur
+#define H(a) (cos(radians(vec3(0, 60, 120))+(a)*6.2832)*.5+.5)  // hue
+#define T(p) texture(iChannel0, mix(u, vec2(.5), p-i*p), a).rgb // scale texture
+void main()
+{
+    vec2 U = jit_in.uv * viewPort.xy;
+    vec2 R = viewPort.xy,
+         u = U/R;
+    
+    vec3 c = texture(iChannel0, u).rgb, k;
+    
+    float l = 50.,  // loop size
+          j = 1./l, // increment size
+          a = length((U+U-R)/R.y*3.), // mipmap aa
+          b = j*4., // brightness
+          i = j;
+    
+    for (; i<=1.; i+=j)
+          k = T(1.) + T(-1.), // blur out & in
+          c += b * H(i) * k;  // brightness, color, texture
+    
+    c.r += .3-a*.1; // add red to center
+    outColor = vec4(tanh(c*c), 1);
+}
+]]>
+</program>
+</language>
+</jittershader>

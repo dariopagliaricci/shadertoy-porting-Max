@@ -1,0 +1,87 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+
+	<param name="buff_A" type="int" default="0" />
+	<param name="buff_B" type="int" default="1" />
+	
+	
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+
+
+		<bind param="buff_A" program="fp" />
+		<bind param="buff_B" program="fp" />
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="Phyllotaxes_common.glsl" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+			
+
+		uniform vec2 iResolution;
+		uniform float iTime;
+		uniform int iFrame;
+		
+		uniform sampler2D buff_A;
+		uniform sampler2D buff_B;
+		
+		void main() {
+
+		vec2 fragCoord = jit_in.texcoord * iResolution;
+
+	    vec4 col = texelFetch(buff_A, ivec2(fragCoord.xy), 0);
+	    #ifdef TRACE_PREVIEW
+			fragColor = col * float(iFrame + 1); return;
+	    #endif
+	    #ifdef PREVIEW
+			fragColor = col * float(iFrame + 1); return;
+	    #endif
+		vec4 last = texelFetch(buff_B, ivec2(fragCoord.xy), 0);
+	    fragColor = last + col;
+	}
+		]]>
+		</program>
+	</language>
+</jittershader>

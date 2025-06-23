@@ -1,0 +1,120 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_D" type="int" default="0" />
+	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+
+		<bind param="buff_D" program="fp" />
+		
+		
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="PTGI_common.glsl" program="fp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform sampler2D buff_D;
+	
+			
+			
+			vec3 ACESFilm(vec3 x){
+		    float a = 2.51;
+		    float b = 0.03;
+		    float c = 2.43;
+		    float d = 0.59;
+		    float e = 0.14;
+		    return (x*(a*x+b))/(x*(c*x+d)+e);
+		}
+
+
+		mat3 gaussianFilter = mat3(41, 26, 7,
+		                           26, 16, 4,
+		                           7,  4,  1) / 273.;
+
+		vec3 bloom(float scale, float threshold, vec2 fragCoord){
+		    float logScale = log2(scale);
+		    vec3 bloom = vec3(0);
+		    for(int y = -2; y <= 2; y++)
+		        for(int x = -2; x <= 2; x++)
+		            bloom += gaussianFilter[abs(x)][abs(y)] * textureLod(buff_D, (fragCoord+vec2(x, y)*scale)/iResolution.xy, logScale).rgb;
+		    
+		    return max(bloom - vec3(threshold), vec3(0));
+		}
+
+		void main(){
+
+			vec2 fragCoord = floor(jit_in.texcoord * iResolution);
+		    
+		    Camera cam = getCam(iTime);
+		    
+		    vec4 col = vec4(0.);
+		    float frd = iResolution.y*cam.aperture*DoFClamping;
+		    int rd = int(ceil(frd - .5));
+		    for(int y = -rd; y <= rd; y++){
+		        int ln = int(ceil(sqrt(frd*frd-float(y*y)) - .5));
+		        for(int x = -ln; x <= ln; x++){
+		            vec4 p = texelFetch(buff_D, ivec2(clamp(fragCoord + vec2(x, y), vec2(0), iResolution.xy-1.)), 0);
+		            float dof = min(abs(p.a-cam.focalDistance)/p.a, DoFClamping) * iResolution.y*cam.aperture;
+		            p.a = 1.;
+		            p *= clamp((dof - length(vec2(x, y))) + .5, 0.0, 1.0) / (dof*dof+.5);
+		            col += p;
+		    	}
+		    }
+		    
+		    col /= col.a;
+		    
+		    vec3 bloomSum = vec3(0.);
+		    bloomSum += bloom(.07 * iResolution.y, .0, fragCoord) * .06;
+		    
+		    fragColor = vec4(ACESFilm(col.rgb + bloomSum), 1.);
+		}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

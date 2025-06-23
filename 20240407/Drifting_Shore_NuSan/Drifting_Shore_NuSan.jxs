@@ -1,0 +1,505 @@
+<jittershader name="default">
+    <description>Default Slab </description>
+
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="position" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+
+    <param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+
+    <language name="glsl" version="1.5">
+
+        <bind param="MVP" program="vp" />
+        <bind param="position" program="vp" />
+        <bind param="uv" program="vp" />
+
+        <bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+
+
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 position;
+            in vec2 uv;
+
+            out jit_PerVertex {
+                vec2 uv;
+
+            } jit_out;
+            uniform mat4 MVP;
+
+            
+            void main(void) {
+                gl_Position = MVP*vec4(position, 1.);
+                jit_out.uv = uv;
+
+            }
+        ]]>
+        </program>
+        
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+    vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+
+float c01(float a) {return clamp(a,0.,1.);}
+
+//DAVE HOSKINS' HASH FUNCTIONS
+float rnd11(float p)
+{
+    p = fract(p * .1031);
+    p *= p + 33.33;
+    return fract(2.*p*p);
+}
+
+vec3 rnd23(vec2 p)
+{
+  vec3 p3 = fract(p.xyx * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yxz+33.33);
+    return fract((p3.xxy+p3.yzz)*p3.zyx);
+}
+
+vec3 rnd33(vec3 p3)
+{
+  p3 = fract(p3 * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yxx) * p3.zyx);
+}
+
+// rotation function
+mat2 rot(float a) {return mat2(cos(a),sin(a),-sin(a),cos(a));}
+
+// fade in, stay on for d duration and then fade out 
+float block(float t, float d, float fi, float fo) {
+  return c01(t/fi+1.)*c01((d-t)/fo+1.);
+}
+
+// out 1 for half the time and then 0 for the rest, with fade in/out
+float chop(float t) {
+  return c01(min(fract(t)*30.,fract(1.-t)*30.-15.));
+}
+
+// only for webgl, as it gives infinites when normalizing a zero vector, which lead to visual glitches
+vec3 safenorm(vec3 val) {
+    float vald=length(val);
+    if(vald<=0.) return vec3(0,1,0);
+    return val/vald;
+}
+
+//-------------------------------------------------
+
+// Main rendering pass
+
+// change this to adjust quality versus speed
+// for this shadertoy version I put 10 has is't already looking fine
+// for the release I choose 25 but compo PC could probably
+// have gone for more but it starts to loose impact pretty fast
+#define SAMPLE_COUNT 10.
+
+float time;
+
+////////////////////////////
+// PATHTRACING            //
+////////////////////////////
+
+// current ray start position, ray direction, normal at hit point, emissive color at hit point
+vec3 s,r,n,emit;
+// distance of first collision along the ray, starts very high
+float d=10000.;
+
+// analytical intersection between current ray and a sphere of "size" at a position "pos", with a specific color "co"
+void sphere(vec3 pos, float size, vec3 co) {  
+    vec3 l = pos - s;
+  float tca = dot(l, r);
+    float d2 = dot(l,l) - tca*tca;
+  if(d2 < size*size) {
+        float thc = tca - sqrt(size*size-d2);
+        if (thc > 0. && thc < d)
+        {
+            d =  thc;
+            n = safenorm(d*r-l);
+      emit = co;
+        }
+    }
+}
+
+// color of the sky for the current ray direction
+vec3 skycol() {
+  // lighting in first scene, just some large blurry white blobs, inspired by Blackle's way of doing that
+  if(time<90.) return vec3(.7,.8,1)*abs(dot(sin(r*vec3(5,7,13)),vec3(1)));
+  // lighting in final scene, a pure desaturated blueish sky with a small bright pink rising sun
+  if(time>120.) return c01((time-123.)/2.)*mix(vec3(0.6,0.8,1)*.8, vec3(1,0.3,0.3) * 15., pow(max(dot(r,safenorm(vec3(-1,0,-1.5))),0.),50.));
+  // lighting in "flashing pink bars" scene
+  vec3 cid = floor(abs(r)*vec3(30,1,30)+floor(time*6.));
+  float fad = c01((116.4-time)*4.);
+  // makes pink bars that flashes at random intervals
+  return fad*vec3(pow(1.-abs(r.y),4.)+.3,0.5,1.)*8.*rnd33(cid).y*max(0.,sin(time*8.*rnd11(cid.x)));
+}
+
+////////////////////////////
+// MAIN PASS              //
+////////////////////////////
+
+void main()
+{ 
+  
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+  vec2 frag = fragCoord.xy;
+  vec2 uv = (frag-viewPort.xy*0.5)/viewPort.y;
+  
+  vec3 col = vec3(0);
+      
+  time = max(iTime-1.,0.);
+                
+  //////// CAMERA ANIMATION ////////
+
+  // sections are 8 beats, the music is like 120 bpm, so no need to put any factor there
+  int section = int(time/8.)%18;
+  // variable going from 0 to 8 in a section
+  float rest = mod(time,8.);
+  // way to separate section in two parts, this variable is at 1 if in the second half of a section
+  float mi = floor(rest/4.);
+
+  // Main way to control the intro (camera, DOF focus, shape)
+    // Each vec3 is a section of the intro
+    // first value is the seed of the camera motionpath/speed/FOV, fractionnal part is a time offset, negative values subdivide the section in two parts
+    // second value is the focus distance for the DOF, negative value makes the DOF bigger
+    // third value is the shape seed, integer value is the background shape, fractionnal part is the center shape
+  vec3 mot[18] = vec3[18]( // 18 sections in total
+     vec3(18.32,-12,0)
+    ,vec3(-16,-18,0)
+    ,vec3(-7,-20.-max(0.,rest-7.5)*200.,0)
+    ,vec3(-7,-min(rest,4.)*10.,8)
+    // -------------- // 32
+    ,vec3(-4.+mi*4.1,-13,8)
+    ,vec3(-13.+mi*3.,15,14.1)
+    ,vec3(-7.97,-25.+mi*10.,8.2)
+    ,vec3(-4.9,8,11)
+    // -------------- // 64
+    ,vec3(-5.9,7,2.6)
+    ,vec3(-7.5,-18,15)
+    ,vec3(-16.95-mi*5.,20,8)
+    ,vec3(25.+mi,-20,4.6)
+    // -------------- // 96
+    ,vec3(-35,20,6.9)
+    ,vec3(-51,-20.+mi*10.,7.9)
+    ,vec3(-16,30,14.4-mi)
+    ,vec3(-5,-20.-rest*30.,13.025+mi*(25.-.025))
+    // -------------- // 128
+    ,vec3(2.+mi*39.,10,6)
+    ,vec3(31.+mi*7.,-12.-rest*2.,0)
+    );
+
+  // my way of working was to put random seeds for the shape or camera and find some that I find good
+  // then I can just copy/past that seed in the array above to put it in a section
+
+  // seed values for the current section
+  vec3 mval = mot[section];
+  // camera avance along it's path
+  vec3 pcam = rnd23(vec2(round(abs(mval.x)),0));
+  float avance = pcam.x*300. + rest * (pcam.y*.5-0.2) + fract(mval.x)*8.;
+  if(mval.x<0.) avance += floor(rest/4.)*100.;
+  if(section==9) avance += rest*0.05;
+  
+  // distance where scene will be sharp (no blur)
+  float focusdist = abs(mval.y)*5.;
+  // extra push that lets you put the camera far away without actually moving it or having objects going in front of it
+  float extrapush = mval.y>0. ? 0. : 50.;
+  // if extrapush is activated, use a larger amount of dof
+  float dofamount = .075+extrapush/50.;
+  // adjust fov to compensate for extrapush
+  float fov = 1. + extrapush/50.;
+  
+  // size of the sphere that limits the 3 planes
+  float bigsphere=100000.;
+  // location of that sphere
+  vec3 msp=vec3(0,-10,0);
+
+  // lissajous curve to makes interesting camera motion
+  // a section of the intro is only a time offset in that very long lissajous curve
+  float dt=rnd11(pcam.z)*20.-10.;
+  vec3 bs=vec3(100.*sin(avance*.4 + 0.7),-20. + sin(avance*.2)*3.,100.*sin(avance*.9));
+  vec3 t = vec3(100.*sin(avance*.4 + 0.7 + dt),sin(avance*.3)*3.,100.*sin(avance*.9 + dt));
+  if (section==12) t+=vec3(-80,0,-0);
+
+  //////// CAMERA COMPUTE ////////
+  vec3 cz=safenorm(t-bs);
+  vec3 cx=safenorm(cross(cz,vec3(0,1,0)));
+  vec3 cy=cross(cz,cx);
+    
+  // number of samples per pixel, here 25 give about 30fps on my RTX3070 but will give at least 60fps on the compo machine
+  float steps=SAMPLE_COUNT;
+  for(float i=0.; i<steps; ++i) {
+    
+    s=bs;
+    // DOF
+    vec2 h = rnd23(frag-13.6-i*184.7).xy;
+    vec3 voff = sqrt(h.x)*(cx*sin(h.y*6.283)+cy*cos(h.y*6.283))*dofamount;
+    s-=voff;
+    r=safenorm(uv.x*cx+uv.y*cy+fov*cz + voff*fov/(focusdist+extrapush));
+    s += (r-cz) * extrapush;
+    
+    // up to 3 rays per sample (1 primary ray and 2 bounces)
+    float alpha = 1.;
+    for(float j=0.; j<3.; ++j) {
+      ////////// TRACE //////////
+      d=100000.;
+      
+      emit=vec3(0);
+      
+      ////////// SCENE //////////
+            
+      // the scene is made of 3 rotating planes
+      for(float k=0.;k<3.;++k) {
+      
+        float seed=k+round(mval.z)*100.4;
+
+        // we keep around previous ray hit values, in case we are going through a hole of this plane
+        float d2 = d;
+        vec3 n2 = n;
+        vec3 emit2 = emit;
+    
+        vec3 planenorm = vec3(0,1,0);
+        
+        // animation variables
+        float ani=fract(mval.z)*4.;
+        float ani2=time>48. && time<80.?1.:0.;
+        float adj=0.;
+        
+        // distance from origin of the plane
+        float dist = rnd11(seed-.1)*40.+40.;
+        // plane thickness
+        float size = 2.5;
+        // radius of the sphere inside the plane
+        float minsph = 2.5;
+        // value that "pushes" the sphere back from camera so you can have sphere thicker than the plane
+        float artpush=0.;
+        
+        // size of the main repeating grid of boxes that carve through the planes
+        vec3 p2=vec3(100,100,100);
+
+        if(time>80.) {
+          dist=min(3.,-80.+(time-88.)*20.);
+          if (time>90.) bigsphere=mix(80.,26.,smoothstep(0.,1.,(time-90.)/4.));
+        }
+
+        if (time>117.) {
+          bigsphere=(time-117.)*400.;
+          p2 *= vec3(1,3,1);
+          dist = (time-117.)*70.;
+          artpush=5.;
+        } else if (time>100.) {
+          ani2=2.;
+          // cheat to deform the planes "organicaly"
+          // we just offset the rotation according to the original ray direction
+          // the reflection doesn't follow properly but it breaks the rigidity of the scene a lot
+          vec3 br=safenorm(uv.x*cx+uv.y*cy+fov*cz);
+          adj=br.y*3.-sin(br.z*3.)+sin(br.x*3.);
+          size=5.;
+          minsph = 5.;
+          p2 = vec3(20,100,20);
+        }
+        if(time>120.) { dist=300.+(time-120.)*5.; p2 = vec3(140); ani2=1.;}
+        if(time>=124.) { dist=200.; minsph=0.;artpush=0.; size=1.; ani2=0.;}
+        
+        // the 3 planes are mostly rotating with a random speed
+        planenorm.yz *= rot(sin(rest*.13*ani + rnd11(seed)*7.)*1.57+adj);
+        planenorm.xz *= rot(rest*.07*ani + rnd11(seed+.1)*7.+adj*.7);
+                
+        if (time<24.) {
+          // first scene, the 3 planes are nearly flat
+          planenorm=vec3(k*0.01,1,-0.02);
+          dist = max(16.-time,0.);
+          if(section==2) dist+= 10./(1.+rest)-4.;
+          minsph = 0.;
+        } else if(time<40.) {
+          // second scene, the 3 planes are less flat
+          planenorm.y+=4.-pow(max(time-33.,0.),2.)*.05;
+          dist=10.;
+          float tre=min(time-24.,6.);
+          minsph=min(tre,2.5);
+          artpush=tre*6.;
+        }
+        
+        planenorm=safenorm(planenorm);
+
+        // find the collision with a plane of thickness "size"
+        float dn = dot(r,planenorm);
+        float ds = dot(s,planenorm);
+        float dplane = (dist-ds)/dn;
+        float dsi = abs(size/dn);
+
+        // ray start is inside the thickness of the plane
+        if(abs(dplane)<dsi) {
+          d = 0.;
+          n = vec3(0);
+          emit = vec3(0);
+        } else if(dplane<d+dsi && dplane>dsi) { // hit the plane, works from both side of it
+          d = dplane-dsi;
+          n = -planenorm * sign(dn);
+          emit = vec3(0);
+        }
+        
+        // location of the hit with the plane
+        vec3 uv = s+r*d;
+          
+        // octree subdivision:
+        // we split the space 3 times, each time we divide in 2 blocks at a random offset on each axes (so 8 blocks)
+        // this lets us have a non-repeating slicing of our plane
+        // we can then animate the slip location
+        vec3 offp = floor(uv/p2)*p2;
+        // p1 and p2 are the two extreme of the block containing the hit location
+        vec3 p1=offp;
+        p2+=offp;
+        // we also want a random id different for each block
+        vec3 id=offp+vec3(seed);
+    
+        for (float l=0.; l<3.; ++l) {
+          float t3=time*0.5*ani2+l*.2;
+          vec3 c = (mix(rnd33(id+floor(t3)),rnd33(id+floor(t3)+1.),pow(smoothstep(0.,1.,fract(t3)),10.)) * 0.5 + 0.25)*(p2-p1)+p1;
+          p1=mix(p1,c,step(c,uv));
+          p2=mix(c,p2,step(c,uv));
+          id+=mix(vec3(0.03),vec3(0.1),step(c,uv));
+        }
+
+        // now each block contain a box that carve the plane
+        // here we compute it's position and size
+        vec3 cubepos=(p1+p2)*.5;
+        vec3 cubesize=(p2-p1)*.5-0.3;
+        
+        // carving box intersection
+        vec3 invd = 1./r;
+  
+        vec3 t0 = ((cubepos-cubesize) - s) * invd;
+        vec3 t1 = ((cubepos+cubesize) - s) * invd;
+        vec3 mi = min(t0, t1);
+        vec3 ma = max(t0, t1);
+  
+        float front = min(min(ma.x,ma.y),ma.z);
+        float back = max(max(mi.x,mi.y),mi.z);
+  
+        if(front>d && front > 0.) {
+          vec3 cur = step(abs(s+r*d-cubepos),cubesize);
+          if (min(cur.x,min(cur.y,cur.z))>0.) {
+            // we hit a side of the cube, compute it's normal
+            d = front;
+            n = (1.-clamp((ma-front)*1000.,0.,1.)) * sign(t1-t0);
+            emit = vec3(0);
+          }
+        }
+    
+        // in each block, there is also a sphere
+        // to get it's position, we project the middle position of the block on plane
+        vec3 mp=(p1+p2)*0.5;
+        mp-=(dot(mp,planenorm)-dist)*planenorm;
+        
+        mp += planenorm*artpush;
+        // lighting of the small sphere
+        vec3 lglow=vec3(0);
+        if (time>30. && rnd33(floor(mp/5.)).x>.8) lglow=vec3(4.+sin(time/8.)*3.,1,5);
+        if (time>117.) lglow=vec3(5,3.2,1.8);
+        if (time>124.) lglow=vec3(0);
+
+        sphere(mp, minsph + artpush, lglow);
+  
+        if(d>dplane+dsi || d>=d2) {
+          // if the intersection we found is beyond the thickness of the plane
+          // we skip it, we want the ray to go through the plane
+          // so we restore original ray hit values
+          d=d2;
+          n=n2;
+          emit=emit2;
+        }
+  
+        // for the pink sky section, I wanted to limit the size of the planes to a "big sphere"
+        // it's not perfectly working, the sphere limits have no thickness
+        // but it's good enough for my use
+        vec3 bigp = s + r*d-msp;
+        if (dot(bigp,bigp)>bigsphere*bigsphere){
+          // if ray hit of the plane is outside the big sphere, we undo it
+          d=d2;
+          n=n2;
+          emit=emit2;
+        }
+
+        d2=d;
+        n2=n;
+        emit2=emit;
+        sphere(msp, bigsphere,vec3(0));
+        vec3 bigp2 = s + r * d;
+        if (abs(dot(bigp2,planenorm)-dist)>size) {
+          // display the hit with the big sphere only if inside the thickness of the plane
+          d=d2;
+          n=n2;
+          emit=emit2;
+        }
+      }
+      
+      // the main sphere of the intro
+      // stay perfectly still all the time, and just glow a bit in the middle, it really is a lazy one :)
+      vec3 spglow=vec3(1,0.5,0.2)*6.*c01(time*2.-131.)*c01(94.-time);
+      sphere(msp, 20., spglow);
+      
+      // ground plane intersection
+      float dplane = (4.-s.y)/r.y;
+            
+      if(dplane<d && dplane>0.) {
+        d = dplane;
+                //n = vec3(0,-sign(r.y),0);
+        n = vec3(0,-1,0);
+                emit = vec3(0);
+      }
+            
+      // blend color with the sky depending on the distance
+      float fog = exp(-max(d-100.,0.)/2000.);
+      col += alpha * skycol() * (1.-fog);
+      alpha *= fog;
+      
+      // early out if we didn't intersect anything
+      if(d>10000.) {
+        break;
+      }
+            
+      // go to collision point
+      s = s + r * d;
+
+      // accumulate emissive color      
+      col += alpha * max(emit,0.);
+    
+      if(j==2.) break;
+      
+      // next reflection will be dimer (yeah we could do fresnel here but I think it looks cooler like that)
+      alpha *= 0.7;
+
+      // slight offset so the reflexion starts already out of the collision
+      s-=r*0.01;
+      // roughness if just a random amout at each integer coordinate
+      float rough = 0.01+rnd33(floor(s)).x*0.5;
+      if (time>90. && length(s-msp)<20.1) rough=.0;
+      
+      // "shading" model, just add a normalized random vector scaled by the roughness to the reflected normal
+      // first time I saw that kind of reflection was in "HBC-00017: Newton Protocol" at Revision 2019
+      // I love it's simplicity, even if a more physic based approach would probably look better but cost more
+      r=safenorm(reflect(r,n) + safenorm(rnd23(frag+vec2(i*277.,j*375.)+fract(time)*1.)-.5)*rough);
+    }
+  }
+  col *= .6/steps;
+      
+    outColor = vec4(col, 1);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

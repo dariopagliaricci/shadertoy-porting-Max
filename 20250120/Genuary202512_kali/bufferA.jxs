@@ -1,0 +1,187 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+#define PI 3.14159
+
+mat2 rot(float a) {
+    float s = sin(a), c = cos(a);
+    return mat2(c, s, -s, c);
+}
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec3 hash3(vec2 p)
+{
+    const vec2  k1 = vec2(127.1, 311.7);
+    const vec2  k2 = vec2(269.5, 183.3);
+    const vec2  k3 = vec2(419.2, 371.9);
+    const float scale = 43758.5453;
+    vec3 q = vec3(
+        dot(p, k1),
+        dot(p, k2),
+        dot(p, k3)
+    );
+    return fract(sin(q) * scale)-.5;
+}
+
+float sph(vec3 p, float f) {
+    p.y -= abs(sin(iTime * 0.5 + f)) * 5.;
+    p.xy *= rot(iTime);
+    return length(p) - 2. - length(sin(p * 5.))*.3;
+}
+
+float sph1, tub2;
+
+float cube(vec3 p, vec3 size) {
+    vec3 d = abs(p) - size;
+    return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
+}
+
+
+float de(vec3 p2) 
+{
+    p2.xz*=rot(iTime*.05);
+    vec3 p=p2;
+    p.yz*=rot(PI/5.);
+    p.xz*=rot(PI/4.);
+    float s=1.;
+    float sc=1.8;
+    float l=cube(p,vec3(1.5));
+    for (float i=0.; i<7.; i++) {
+        if (i>mod(iTime*2.,20.)) break;
+        p=abs(p*sc)-1.5;
+        float b=cube(p,vec3(.9));
+        l=max(l,-b/s);
+        s*=sc;
+    }
+    p=p2;
+    sph1=length(p)-1.25;
+    float d=min(l*.5, sph1);    
+    
+    return d;
+}
+
+float det = 0.001;
+
+vec3 normal(vec3 p) {
+    vec2 e = vec2(0., det);
+    return normalize(vec3(de(p + e.yxx), de(p + e.xyx), de(p + e.xxy)) - de(p));
+}
+
+vec3 march(vec3 from, vec3 dir) {
+    vec2 uv = gl_FragCoord.xy / viewPort.xy;
+    vec3 p = from, col = vec3(0.0);
+    float d = 0., maxdist = 100.;
+    float at=1.;
+    for (int b = 0; b < 5; b++) {
+        for (int i = 0; i < 80; i++) {
+            p += d * dir;
+            d = de(p);
+            if (d < det || length(p) > 30.) break;
+        }
+        vec3 n = normal(p);
+        if (d < .01) {
+            p-=dir*det*2.;
+            vec3 r=hash3(uv*10.+mod(iTime,10.)*1.234+p.xy);
+            float rso = dot(n,r)<0.?-1.:1.;
+            vec3 v = r*rso;
+            vec3 c=vec3(0.);
+            if (sph1 < 0.01) {
+                c=abs(p*.7);
+                c.xy*=rot(iTime);
+                c.rb*=rot(length(p.xy)*.1);
+                c=abs(c);
+            }
+            col+=c*at;
+            at*=.9;
+            dir = mix(v,reflect(dir,n),.3);
+        }
+        if (length(p) > 30.) {
+            col+=exp(-5.*length(dir.xy))*vec3(.8,.7,.6);
+            break;
+        }
+    }
+    return col;
+}
+
+void main() {
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = fragCoord / viewPort.xy - 0.5;
+    uv.x *= viewPort.x / viewPort.y;
+    vec3 dir = normalize(vec3(uv, 2.+2.*step(5.,mod(iTime,10.))));
+    vec3 from = vec3(0.5, .7, -5.);
+    vec3 col = march(from, dir);
+    col=mix(vec3(length(col)*.7),col,.8);
+    // Normalize a direction vector for sampling the cube map
+	vec3 cubeDir = normalize(vec3(fragCoord.xy / viewPort.xy, 1.0));
+
+	// Use textureCube or texture for cube map sampling, depending on GLSL version
+	col = mix(col, texture(iChannel0, cubeDir).rgb, 0.85);
+
+    // col=mix(col,texture(iChannel0,fragCoord/viewPort.xy).rgb, .85);
+    outColor = vec4(col, 1.);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

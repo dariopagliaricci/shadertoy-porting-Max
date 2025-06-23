@@ -1,0 +1,404 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+// Created by EvilRyu
+// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
+
+// Another simple pathtracer with phong model.
+
+#define SAMPLES 1
+#define LIGHT_SAMPLES 1
+#define MAX_DEPTH 4
+#define DE_ITER 10
+
+#define PI 3.1415926
+
+float seed;
+float rnd() 
+{ 
+    return fract(sin(seed++)*43758.5453123); 
+}
+
+
+
+//==========  spudsville ===========================
+const vec3 c = vec3(.808, .7, 1.137);
+float f(vec3 p)
+{
+	float scale = 1.0;
+	
+	for(int i=0; i < DE_ITER;i++)
+	{
+		p = 2.0*clamp(p, -c, c) - p;
+		float r2 = dot(p,p);
+		float k = max((1.)/(r2), 0.03);
+		p *= k;
+		scale *= k;
+	}
+	float l = length(p.xy);
+	float rxy = l - 3.;
+	float n = l * p.z;
+	rxy = max(rxy, -(n) / (length(p))-0.02);
+	return (rxy) / abs(scale);
+}
+
+//from Dave_Hoskins: https://www.shadertoy.com/view/llX3zr
+vec3 get_material(vec3 p)
+{
+    float col	= 0.0;		
+	for( int i=0; i < DE_ITER+1;i++ )
+	{
+		vec3 p1= 2.0 * clamp(p, -c, c)-p;
+		col += abs(p1.z-p.z);
+		p = p1;
+		float r2 = dot(p,p);
+		float k = max((1.)/(r2), .03);
+		p *= k;
+	}
+	return (0.5+0.5*sin(col*vec3(1.75, -1.,4.6)));
+}
+
+
+float shadow(vec3 ro, vec3 rd)
+{
+    float res = 0.0;
+    float tmax = 1.5;
+    float t = 0.001;
+    for(int i=0; i<30; i++ )
+    {
+        float h = f(ro+rd*t);
+        if( h<0.0001 || t>tmax) break;
+        t += h;
+    }
+    if( t>tmax ) res = 1.0;
+    return res;
+}
+
+
+float intersect(vec3 ro, vec3 rd)
+{
+    float res;
+    float t = 0.01;
+    for(int i = 0; i < 100; ++i)
+    {
+        vec3 p = ro + rd * t;
+        res = f(p);
+        if(res < 0.0001 || res > 100.)
+            break;
+        t += res;
+    }
+    
+    if(res > 100.) t = -1.;
+    return t;
+}
+
+
+vec3 get_normal(vec3 pos)
+{
+    vec3 eps = vec3(0.0001,0.0,0.0);
+	return normalize(vec3(
+           f(pos+eps.xyy) - f(pos-eps.xyy),
+           f(pos+eps.yxy) - f(pos-eps.yxy),
+           f(pos+eps.yyx) - f(pos-eps.yyx)));
+}
+
+
+float schlick_fresnel(float rs, float cos_theta) 
+{
+    return rs + pow(1.0 - cos_theta, 5.) * (1. - rs);
+}
+
+// http://orbit.dtu.dk/files/126824972/onb_frisvad_jgt2012_v2.pdf
+void basis(vec3 n, out vec3 b1, out vec3 b2) 
+{
+    if(n.z < -0.999999) {
+        b1 = vec3(0 , -1, 0);
+        b2 = vec3(-1, 0, 0);
+    } else {
+    	float a = 1./(1. + n.z);
+    	float b = -n.x*n.y*a;
+    	b1 = vec3(1. - n.x*n.x*a, b, -n.x);
+    	b2 = vec3(b, 1. - n.y*n.y*a , -n.y);
+    }
+}
+
+vec3 local_to_world(vec3 local_dir, vec3 normal)
+{
+    vec3 a,b;
+    basis(normal, a, b);
+	return local_dir.x*a + local_dir.y*b + local_dir.z*normal;
+}
+
+vec3 spherical_to_cartesian(float rho, float phi, float theta) {
+    float sin_theta = sin(theta);
+    return vec3( sin_theta*cos(phi), sin_theta*sin(phi), cos(theta))*rho;
+}
+
+vec3 sample_hemisphere_cos_weighted(vec3 n, float Xi1, float Xi2) 
+{
+    float theta = acos(sqrt(1.0-Xi1));
+    float phi = 2. * PI * Xi2;
+
+    return local_to_world(spherical_to_cartesian(1.0, phi, theta), n);
+}
+
+vec3 sample_phone_specular(vec3 n, float roughness, float Xi1, float Xi2)
+{
+    float theta = acos(pow(Xi1, 1./(roughness + 1.)));
+    float phi = 2. * PI * Xi2;
+    return local_to_world(spherical_to_cartesian(1., phi, theta), n);
+}
+
+
+vec3 sun_col = 6.0*vec3(1.0,0.8,0.6);
+vec3 sun_dir = normalize(vec3(4.0,2.,2.));
+vec3 sky_col = vec3(0.5, 0.8, 1.);
+const float shininess = 32.;
+const float spec_weight = 0.3;
+
+// standard phong brdf
+// kd*(1./pi) + ks*((n+2)/2pi * (reflect * eye)^n
+vec3 brdf(vec3 wi, vec3 wo, vec3 n, vec3 x)
+{
+	vec3 wr = reflect(-wi, n);
+    vec3 wh = normalize(wi + wo);
+    
+    float F = schlick_fresnel(0.1, max(0., dot(wi, wh)));
+    
+    vec3 mtl = get_material(x);
+    
+    float diff = (1. - F) * 1./PI;
+    float spec = F * ((shininess + 2.)/(2.*PI)) * 
+    pow(max(0., dot(wr, wo)), shininess);
+   
+    
+    vec3 diff_refl = diff * mtl;
+    vec3 spec_refl = spec * vec3(1.);
+    
+    return mix(diff_refl, spec_refl, spec_weight);
+}
+
+// randomly picking sun or sky
+void light_pick(vec3 n, out vec3 Li, out vec3 wi)
+{
+    if(rnd() > 0.3)
+    {
+        Li = sun_col;
+        wi = sun_dir;
+    }
+    else
+    {
+        Li = sky_col;
+        
+        float Xi1 = rnd();
+        float Xi2 = rnd();
+
+        wi = sample_hemisphere_cos_weighted(n, Xi1, Xi2);
+    }
+}
+
+vec3 sample_light(vec3 x, vec3 n, vec3 rd)
+{
+    vec3 Lo = vec3(0.);
+    
+    for(int i = 0; i < LIGHT_SAMPLES; ++i)
+    {
+        vec3 Li, wi;
+        light_pick(n, Li, wi);
+        
+        float cos_theta = max(0., dot(n, wi));
+        
+        if(cos_theta > 0.00001)
+        {
+        	float sha = shadow(x, wi);
+        	Lo += Li * brdf(wi, -rd, n, x) * cos_theta * sha;
+        }
+    }
+    
+    Lo /= float(LIGHT_SAMPLES);
+    
+    return Lo;
+}
+
+vec3 radiance(vec3 ro, vec3 rd)
+{
+   	vec3 acc = vec3(0.);
+    float dist = 0.;
+    
+    float t = intersect(ro, rd);
+    
+    if(t < 0.)
+    {
+        return sky_col;
+    }
+    
+    dist = t;
+    
+    for(int i = 0; i < MAX_DEPTH; ++i)
+    {        
+        
+        vec3 x = ro + t * rd;
+        vec3 n = get_normal(x);
+        
+        acc += sample_light(x, n, rd);
+        
+        float Xi1 = rnd();
+        float Xi2 = rnd();
+
+        // sample the next ray
+        if(rnd() > spec_weight)
+        {
+        	rd = sample_hemisphere_cos_weighted(n, Xi1, Xi2);
+        }
+        else
+        {
+            rd = sample_phone_specular(n, shininess, Xi1, Xi2);
+        }
+        
+        ro = x;
+        rd = normalize(rd);
+        
+        t = intersect(ro, rd);
+        
+        if(t < 0.)
+        {
+            break;
+        }
+    }
+    acc = mix(acc, sky_col, 1.0-exp(-0.01*dist*dist)); 
+
+    return acc;
+}
+
+mat3 camera(vec3 ro, vec3 ta)
+{
+    vec3 cf = normalize(ta - ro);
+    vec3 cs = normalize(cross(cf, vec3(0,0,1)));
+    vec3 cu = normalize(cross(cs, cf));
+    return mat3(cs, cu, cf);
+}
+ 
+void main() 
+{ 
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    seed = iTime + viewPort.y * fragCoord.x / viewPort.x + fragCoord.y / viewPort.y;
+
+    // vec3 ro = vec3(-14.4, -9.4, -2.24);
+    vec3 ro = eye;
+    // vec3 ta = vec3(-30.4, -9.3, -1.1);
+    vec3 ta = vec3(0.0);
+
+    
+    vec2 offset = -0.5 + vec2(rnd(), rnd());
+    vec2 p = (-viewPort.xy + 2.0*(fragCoord+offset)) / viewPort.y;
+
+    vec3 cf = normalize(ta - ro);
+    vec3 cs = normalize(cross(cf, vec3(0,0,1)));
+    vec3 cu = normalize(cross(cs, cf));
+    mat3 cam = mat3(cs, cu, cf);
+    
+    vec3 rd = normalize(cam * vec3(p, 3.));
+    
+    // DoF
+    vec3 fp = ro + rd * 0.2;
+	ro += (cs*rnd() + cu*rnd())*0.0015;
+	rd = normalize( fp - ro );
+    
+ 	// vec3 col = texture(iChannel0, fragCoord/viewPort.xy).xyz;
+
+ 	vec2 normalizedCoord = (fragCoord / viewPort.xy) * 2.0 - 1.0; // Normalize to range [-1, 1]
+    vec3 direction = normalize(vec3(normalizedCoord, 1.0)); // Create a direction vector
+    vec3 col = texture(iChannel0, direction).xyz; // Sample the cube map
+
+    if(iFrame==0) col = vec3(0.0);
+    
+    vec3 col_acc = vec3(0.);
+    for(int i = 0; i < SAMPLES; ++i)
+    {
+        col_acc += radiance(ro, rd);
+    }
+    
+    col_acc /= float(SAMPLES);
+
+    //gamma correction
+
+    vec2 uv = fragCoord.xy / viewPort.xy;
+
+    if(iFrame>0)
+    {
+        // col = texture(iChannel0, uv).xyz;
+        col /= float(iFrame);
+        col = pow(col, vec3(0.45));
+    }
+
+    col=col*0.6+0.4*col*col*(3.0-2.0*col);  // contrast
+    col *= 0.5 + 0.5*pow( 16.0*uv.x*uv.y*(1.0-uv.x)*(1.0-uv.y), 0.1 );
+     
+   	col += col_acc;
+    outColor = vec4(col, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

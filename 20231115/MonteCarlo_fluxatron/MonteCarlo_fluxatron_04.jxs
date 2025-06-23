@@ -1,0 +1,579 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform vec4 iMouse;
+
+#define BIG_FLOAT 9999999.
+#define SMOL_FLOAT 0.0000001
+#define PI 3.1415926
+#define TAU 6.2831853
+
+// TYPES //////////////////////////////////////////////////////////////////////////////////
+
+struct Material
+{
+    vec3 BaseColor; // IsMetal ? Reflectance : Albedo
+    float Metalness;
+    float Roughness;
+    float Emissive; // Emissive strength. Set light color with BaseColor
+    bool IsCheckerHack;
+};
+struct Sphere
+{
+    vec3 Center;
+    float Radius;
+    Material Mat;
+};
+struct Ray 
+{
+    vec3 Origin;
+    vec3 Dir;
+};
+struct Hit 
+{
+    vec3 Pos; // point in space
+    vec3 Normal; // normal of hit surface
+    float LengthAlongRay; // length along ray of hit
+   //bool IsFrontFace; // whether we hit the outside or inside of the surface
+    //int MatId;
+    Material Mat;
+    //bool IsMetal;
+    //bool BaseColor; // IsMetal ? Reflectance : Albedo
+};
+    
+    
+float length2(vec2 v) { return dot(v,v); }
+float length2(vec3 v) { return dot(v,v); }
+    
+
+// RANDOM /////////////////////////////////////////////////////////////////////////////////
+
+// 1 out, 1 in... https://www.shadertoy.com/view/4djSRW
+float hash11(float seed)
+{
+    seed = fract(seed * .1031);
+    seed *= seed + 33.33;
+    seed *= seed + seed;
+    return fract(seed);
+}
+//  1 out, 2 in...  https://www.shadertoy.com/view/4djSRW
+float hash12(vec2 seed)
+{
+    vec3 p3  = fract(vec3(seed.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+// 2 out, 1 in... https://www.shadertoy.com/view/4djSRW
+vec2 hash21(float seed)
+{
+    vec3 p3 = fract(vec3(seed) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+//  2 out, 2 in...
+vec2 hash22(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+//  3 out, 1 in...
+vec3 hash31(float p)
+{
+   vec3 p3 = fract(vec3(p) * vec3(.1031, .1030, .0973));
+   p3 += dot(p3, p3.yzx+33.33);
+   return fract((p3.xxy+p3.yzz)*p3.zyx); 
+}
+
+vec3 RandomUnitVector(float seed) 
+{
+    vec2 rand = hash21(seed);
+    float a = rand.x*TAU;     //  0 to TAU
+    float z = rand.y*2. - 1.; // -1 to 1
+    float r = sqrt(1. - z*z);
+    return vec3(r*cos(a), r*sin(a), z);
+}
+
+vec3 RandomInUnitSphere(float seed)
+{
+    vec3 hash = hash31(seed);
+    
+    float theta = hash.x * TAU;
+    float v = hash.y;
+    float r = pow(hash.z, 0.333333);
+    
+    float phi = acos((2.*v)-1.);
+    float sinphi = sin(phi);
+    
+    vec3 p;
+    p.x = r * sinphi * cos(theta);
+    p.y = r * sinphi * sin(theta);
+    p.z = r * cos(phi); 
+    
+    return p;
+}
+
+vec3 RandomInHemisphere(float seed, vec3 normal) 
+{
+    vec3 p = RandomInUnitSphere(seed);
+    return (dot(p, normal) > 0.0) ? p : -p;
+}
+
+vec2 RandomInUnitCircle(float seed)
+{
+    // https://programming.guide/random-point-within-circle.html
+    vec2 rand = hash21(seed);
+    float angle = rand.x*TAU;
+    float radius = sqrt(rand.y);
+    return radius * vec2(cos(angle), sin(angle));
+}
+
+// PBR /////////////////////////////////////////////////////////////////////////////////////
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0)
+{
+    cosTheta = min(cosTheta,1.); // fixes issue where cosTheta is slightly > 1.0. a floating point issue that causes black pixels where the half and view dirs align
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+/*
+vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
+{
+    cosTheta = min(cosTheta,1.); // fixes issue where cosTheta is slightly > 1.0. a floating point issue that causes black pixels where the half and view dirs align
+    vec3 factor = max(vec3(1.0 - roughness), F0); // make rough surfaces reflect less strongly on glancing angles
+    return F0 + (factor - F0) * pow(1.0 - cosTheta, 5.0);
+}
+float DistributionGGX(float NdotH, float roughness)
+{
+    float a = roughness*roughness; // disney found rough^2 had more realistic results
+    float a2 = a*a;
+    float NdotH2 = NdotH*NdotH;
+    float numerator = a2;
+    float denominator = NdotH2 * (a2-1.0) + 1.0;
+    denominator = PI * denominator * denominator;
+    return numerator / max(denominator, SMOL_FLOAT);
+    
+}
+float GeometrySchlickGGX_Direct(float NdotV, float roughness)
+{
+    float r = roughness + 1.0; 
+    float k = (r*r) / 8.; // k computed for direct lighting. we use a diff constant for IBL
+    return NdotV / (NdotV * (1.0-k) + k); // bug: div0 if NdotV=0 and k=0?
+}
+float GeometrySmith(float NdotV, float NdotL, float roughness)
+{
+    float ggx2 = GeometrySchlickGGX_Direct(NdotV,roughness);
+    float ggx1 = GeometrySchlickGGX_Direct(NdotL,roughness);
+    return ggx1*ggx2;
+}
+*/
+
+#define APERTURE 0.1      /* diameter of the lens */
+#define VERTICAL_FOV 25.  /* degrees */
+
+#define MAX_BOUNCES 7
+#define SAMPLES_PER_PIXEL 8
+
+
+#define SRGB_TO_LINEAR(R,G,B) pow(vec3(R,G,B) / vec3(255,255,255), vec3(2.2))
+const vec3 _gold   = SRGB_TO_LINEAR(255,226,115);
+const vec3 _silver = SRGB_TO_LINEAR(252,250,245);
+const vec3 _copper = SRGB_TO_LINEAR(250,208,192);
+
+
+const int _numSpheres = 8;
+Sphere[_numSpheres] _spheres;
+void InitScene()
+{
+    vec3 v = vec3(.15,.5,.85);
+    
+    // Ground
+    _spheres[0].Center = vec3(0,-1000,0);
+    _spheres[0].Radius = 1000.;
+    _spheres[0].Mat.BaseColor = v.bbb;
+    _spheres[0].Mat.Metalness = 0.;
+    _spheres[0].Mat.Roughness = 0.2;
+    _spheres[0].Mat.Emissive = 0.;
+    _spheres[0].Mat.IsCheckerHack = true;
+    
+    // Light    
+    _spheres[1].Center = vec3(-35,35,35);
+    _spheres[1].Radius = 15.;
+    _spheres[1].Mat.BaseColor = vec3(1);
+    _spheres[1].Mat.Metalness = 0.;
+    _spheres[1].Mat.Roughness = 0.;
+    _spheres[1].Mat.Emissive = 10.;
+    
+    
+    // Metal balls
+    _spheres[2].Center = vec3(-5,2.,2.5);
+    _spheres[2].Radius = 2.;
+    _spheres[2].Mat.BaseColor = _silver;
+    _spheres[2].Mat.Metalness = 1.;
+    _spheres[2].Mat.Roughness = 0.02;
+    _spheres[2].Mat.Emissive = 0.;
+    
+    _spheres[3].Center = vec3(0,2.,2.5);
+    _spheres[3].Radius = 2.;
+    _spheres[3].Mat.BaseColor = _gold;
+    _spheres[3].Mat.Metalness = 1.;
+    _spheres[3].Mat.Roughness = 0.2;
+    _spheres[3].Mat.Emissive = 0.;
+    
+    _spheres[4].Center = vec3(5.,2.,2.5);
+    _spheres[4].Radius = 2.;
+    _spheres[4].Mat.BaseColor = _copper;
+    _spheres[4].Mat.Metalness = 1.;
+    _spheres[4].Mat.Roughness = 0.7;
+    _spheres[4].Mat.Emissive = 0.;
+    
+    
+    // RGB balls
+    _spheres[5].Center = vec3(-5.,2,-2.5);
+    _spheres[5].Radius = 2.;
+    _spheres[5].Mat.BaseColor = v.brr;
+    _spheres[5].Mat.Metalness = 0.;
+    _spheres[5].Mat.Roughness = .65;
+    _spheres[5].Mat.Emissive = 0.;
+    
+    _spheres[6].Center = vec3(0,2,-2.5);
+    _spheres[6].Radius = 2.;
+    _spheres[6].Mat.BaseColor = v.rbr;
+    _spheres[6].Mat.Metalness = 0.;
+    _spheres[6].Mat.Roughness = 0.05;
+    _spheres[6].Mat.Emissive = 6.;
+    
+    _spheres[7].Center = vec3(5.,2.,-2.5);
+    _spheres[7].Radius = 2.;
+    _spheres[7].Mat.BaseColor = v.rrb;
+    _spheres[7].Mat.Metalness = 0.;
+    _spheres[7].Mat.Roughness = .01;
+    _spheres[7].Mat.Emissive = 0.;
+    
+}
+
+
+// OTHER //////////////////////////////////////////////////////////////////////////////////
+    
+// vec4 EncodeNumFramesAccumulated(float frame)
+// {
+//     return vec4(frame,0,0,0);
+// }
+
+// float DecodeNumFramesAccumulated()
+// {
+//     return texelFetch(iChannel0, ivec2(0,0), 0).r;
+// }
+
+mat3 ViewLookAtMatrix(vec3 eye, vec3 target, float roll)
+{
+    vec3 rollVec = vec3(sin(roll), cos(roll), 0.);
+    vec3 w = normalize(eye-target); // right handed TODO Change all math to left handed? 
+    vec3 u = normalize(cross(rollVec,w));
+    vec3 v = normalize(cross(w,u));
+    return mat3(u, v, w);
+}
+      
+
+// SCENE //////////////////////////////////////////////////////////////////////////////////
+           
+bool HitSphere(Sphere sph, Ray ray, float tMin, float tMax, inout Hit outHit)
+{
+    vec3 oc = ray.Origin - sph.Center;
+    
+    float a = dot(ray.Dir, ray.Dir);
+    float half_b = dot(oc, ray.Dir);
+    float c = length2(oc) - sph.Radius*sph.Radius;
+    float discriminant = half_b*half_b - a*c;
+    
+    
+    if (discriminant > 0.) 
+    {
+        float root = sqrt(discriminant);
+        float temp = (-half_b - root)/a;
+       
+        if (temp > tMin && temp < tMax) 
+        {
+            outHit.LengthAlongRay = temp;
+            outHit.Pos = ray.Origin + ray.Dir*temp;
+            
+            //vec3 outwardNormal = (hit.Pos - sph.Center) / sph.Radius;
+            //hit.IsFrontFace = dot(outwardNormal, ray.Dir) < 0.;
+            //hit.Normal = hit.IsFrontFace ? outwardNormal : -outwardNormal;
+            outHit.Normal = (outHit.Pos - sph.Center) / sph.Radius;
+            outHit.Mat = sph.Mat;
+            return true;
+        }
+        
+        temp = (-half_b + root)/a;
+        if (temp > tMin && temp < tMax)
+        { 
+            outHit.LengthAlongRay = temp;
+            outHit.Pos = ray.Origin + ray.Dir*temp;
+            
+            //vec3 outwardNormal = (hit.Pos - sph.Center) / sph.Radius;
+            //hit.IsFrontFace = dot(outwardNormal, ray.Dir) < 0.;
+            //hit.Normal = hit.IsFrontFace ? outwardNormal : -outwardNormal;
+            outHit.Normal = (outHit.Pos - sph.Center) / sph.Radius;
+            outHit.Mat = sph.Mat;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool FindClosestHit(Ray ray, inout Hit outHit)
+{
+    float tMin = 0.0001;
+    float closestSoFar = BIG_FLOAT;
+    
+    bool hitAnything = false;
+
+    Hit tempHit;
+    for (int i = 0; i < _numSpheres; i++)
+    {
+        Sphere sph = _spheres[i];
+        if (HitSphere(sph, ray, tMin, closestSoFar, tempHit))
+        {
+            hitAnything = true;
+            closestSoFar = tempHit.LengthAlongRay;
+            outHit = tempHit;
+        }
+    }
+    
+    return hitAnything;
+}
+
+vec3 _skyColor;
+
+vec3 Color(Ray ray, float seed)
+{
+    const float epsilon = 0.001;
+    
+    vec3 attenuation = vec3(1);
+    Hit hit;
+    
+    
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++)
+    {
+        if (FindClosestHit(ray, hit))
+        {
+            if (hit.Mat.IsCheckerHack) // Quick hack to add some checkery goodness
+            {
+                vec3 fragPos = ray.Origin + ray.Dir*hit.LengthAlongRay; 
+                fragPos *= .3;
+                vec2 q = floor(vec2(fragPos.x, fragPos.z));
+                float f = mod(q.x+q.y, 2.0);  // xor pattern
+                
+                hit.Mat.BaseColor = mix(_copper, vec3(.12), f);
+                hit.Mat.Roughness = mix(0.75, 0.2, f);
+                //hit.Mat.Metalness = 0.;
+            }
+            
+            if (hit.Mat.Emissive > epsilon)
+            {
+                attenuation *= hit.Mat.Emissive * vec3(hit.Mat.BaseColor); 
+                break; // End tracing
+            }
+             
+            
+            // Random values
+            float raySeed = seed + 7.1*float(iFrame) + 5681.123 + float(bounce)*92.13;
+            bool isDiffuseRay = hash11(raySeed + 23.5123) < 0.5; // TODO this should be weighted by the Fresnel term so we fire more useful rays. Need to think about it to it's unbiased as our F0 is RGB.
+            
+            
+            // Fire a ray
+            vec3 L = isDiffuseRay
+                ? hit.Normal + RandomUnitVector(raySeed)
+                : reflect(ray.Dir, hit.Normal) + hit.Mat.Roughness*RandomInUnitSphere(raySeed+17.1321);
+            
+            
+            // Some constants
+            vec3 fragPos = ray.Origin + ray.Dir*hit.LengthAlongRay; // intersection point
+            vec3 V = normalize(ray.Origin - fragPos); // View dir
+            float VdotN = max(dot(V,hit.Normal), 0.0);
+            
+            
+            // Fresnel term
+            vec3 F0 = vec3(0.04); // Good average 'Fresnel at 0 degrees' value for common dielectrics
+            F0 = mix(F0, hit.Mat.BaseColor, vec3(hit.Mat.Metalness));
+            vec3 F = FresnelSchlick(VdotN, F0);
+            
+            
+            // Diffuse vs Specular contribution
+            vec3 kS = F;                            // Specular contribution
+            vec3 kD = vec3(1.0) - kS;               // Diffuse contribution
+            
+            
+            // Finally, compute our output values
+            attenuation *= isDiffuseRay 
+                ? mix(/*kD**/hit.Mat.BaseColor, vec3(0.0), hit.Mat.Metalness)  // Metals, aka conductors, absorb all transmitted light
+                : kS;//mix(kS, kS*hit.Mat.BaseColor, hit.Mat.Metalness);   // I swear i read that metals reflect their own color but everything i'm trying looks unnatural...
+            
+            ray.Dir = normalize(L);  // Not 100% if ray must be unit length, but it gives me peace of mind.
+            ray.Origin = hit.Pos + hit.Normal * epsilon; // Slightly off the hit surface stops self intersection
+        }
+        else
+        {
+            // We hit sky!
+            attenuation *= _skyColor;
+            break; // End tracing
+        }
+    }
+    
+    return attenuation;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    float aspect = viewPort.x / viewPort.y;
+    //vec2 uv = (2.*(fragCoord) - viewPort.xy) / viewPort.yy; // -(aspect,1) -> (aspect,1)
+    vec2 uvNorm = (fragCoord) / viewPort.xy;                     //       (0,0) -> (1,1)
+    vec2 m = iMouse.xy == vec2(0) 
+        ? vec2(-.9,-0.2)                                           // Put default cam somewhere perdy
+        : (2.*iMouse.xy - viewPort.xy) / viewPort.yy;         // -(aspect,1) -> (aspect,1)
+    
+    
+    // vec3 oldCol = vec3(0);
+    
+    // // HandleState
+    // {
+    //     float numFramesAccumulated = DecodeNumFramesAccumulated();
+    //     oldCol = texelFetch(iChannel0, ivec2(fragCoord), 0).xyz;       
+        
+    //     if(iFrame == 0 || numFramesAccumulated == 0.) {
+    //         oldCol = vec3(0,0,0);
+    //     }
+
+    //     // Track accumulated frames
+    //     if (ivec2(fragCoord) == ivec2(0,0))
+    //     {
+    //         numFramesAccumulated++;
+
+    //          // Get mouse state
+    //         bool mousePressed = iMouse.z > 0.0;
+    //         if (mousePressed) { 
+    //             numFramesAccumulated = 0.; 
+    //         }
+
+    //         outColor = EncodeNumFramesAccumulated(numFramesAccumulated);
+    //         return;
+    //     }
+    // }
+ 
+    
+    InitScene();
+    
+    
+    vec3 newCol = vec3(0);
+    for (int sampleId = 0; sampleId < SAMPLES_PER_PIXEL; sampleId++) // TODO Test if stratifying samples improves convergence
+    {
+        float seed = hash11( dot( fragCoord, vec2(12.9898, 78.233) ) + 1113.1*hash11(float(iFrame*sampleId)) );
+    
+        // Camera ray
+        Ray ray;
+        {
+            // Position the camera
+            vec3 camPos = 24. * vec3(
+                sin(-m.x*PI), 
+                mix(0.05, 2., smoothstep(-.75,.75,m.y)), 
+                cos(m.x*PI));
+            vec3 camTarget = vec3(0,1,0);
+
+            
+            // Compute ray at origin from lens
+            vec3 rayStart = APERTURE * 0.5 * vec3(RandomInUnitCircle(seed + 84.123), 0.);
+            vec3 lensRay;
+            {
+                // Sub pixel offset
+                vec2 pixelOffset = hash21(seed+13.271) / viewPort.xy;
+                float s = uvNorm.x + pixelOffset.x;
+                float t = uvNorm.y + pixelOffset.y;
+
+                // Calc point in target image plane
+                float focalDist = length(camTarget - camPos);
+                float vertical = focalDist* 2.*tan(radians(VERTICAL_FOV/2.));
+                float horizontal = vertical*aspect;
+                vec3 lowerLeftCorner = -vec3(horizontal/2., vertical/2., focalDist);
+                vec3 rayEnd = lowerLeftCorner + vec3(s*horizontal, t*vertical, 0.);
+                
+                lensRay = normalize(rayEnd - rayStart);
+            }
+
+            
+            // Aim the ray
+            mat3 viewMat = ViewLookAtMatrix(camPos, camTarget, 0.);
+            ray.Origin = camPos + viewMat * rayStart;
+            ray.Dir = viewMat * lensRay;
+        }
+
+        _skyColor = .2*mix(vec3(1.), 2.*vec3(.5,.7,1.), 0.5*uvNorm.y + .5);
+        newCol += Color(ray, seed);
+    }
+    newCol /= float(SAMPLES_PER_PIXEL);
+    
+    
+    // outColor = vec4(oldCol + newCol, 1.0);
+    outColor = vec4(newCol, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

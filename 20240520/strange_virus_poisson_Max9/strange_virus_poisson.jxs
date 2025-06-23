@@ -1,0 +1,311 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+
+
+//#define MODEL
+
+float seed; // randoms seed
+int ray; // ray idx: red, green or blue
+
+// hash functions by me
+float hash1() {return fract(sin(seed+=.1)*4561.7564);}
+
+vec2 hash2() {return fract(sin(seed+=.1)*vec2(8472.5636,9854.4213));}
+
+vec3 hash3() {return fract(sin(seed+=.1)*vec3(7653.1285,6912.8512,5914.7134));}
+
+// random unit vector
+vec3 uniformVector() {
+    vec3 v = hash3()*2.-1.;
+    return normalize(v);
+}
+
+// lambertian diffuse BRDF
+vec3 cosineDirection(vec3 n) {
+    vec2 r = hash2();
+    
+    vec3 u = normalize(cross(n, vec3(0,1,1)));
+    vec3 v = cross(u, n);
+    
+    float ra = sqrt(r.y);
+    float rx = ra*cos(2.*3.141592*r.x); 
+    float ry = ra*sin(2.*3.141592*r.x);
+    float rz = sqrt(1.-r.y);
+    return normalize(rx*u + ry*v + rz*n);
+}
+
+// ray vs sphere intersection
+// thanks to iq: https://iquilezles.org/articles/intersectors/
+float sphIntersect(vec3 ro, vec3 rd, vec3 ce, float ra) {
+    vec3 oc = ro - ce;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - ra*ra;
+    float h = b*b - c;
+    if(h<0.) return -1.;
+    return 1.;
+}
+
+// mandelbulb distance function
+// thanks to iq again: https://www.shadertoy.com/view/ltfSWn
+// "d" is the scattered light
+float sdMandelbulb(vec3 p, vec3 d, bool n) {
+    vec3 w = p;
+    float m = dot(w,w);
+
+    vec4 trap = vec4(abs(w),m);
+    float dz = 1.;
+    
+    for (int i=0; i<3; i++) {
+        dz = 8.*pow(m,3.5)*dz + 1.;
+      
+        float r = length(w);
+        float b = 8.*acos(w.y/r);
+        float a = 8.*atan(w.x, w.z);
+        w = p + pow(r,8.) * vec3(sin(b)*sin(a), cos(b), sin(b)*cos(a));
+        
+        trap = min(trap,vec4(abs(w),m));
+
+        m = dot(w,w);
+        if(m > 256.)
+            break;
+    }
+    float h = .1*hash1()*(n?0.:1.)*(ray==0 ? d.x : ray==1 ? d.y : d.z); // volumetric
+    return .25*log(m)*sqrt(m)/dz + h;
+}
+
+// scene
+float map(vec3 p, bool n) {
+    float d = 1e10;
+    
+    d = min(d, sdMandelbulb(p, vec3(1.8,1.3,1.1), n));
+    #ifndef MODEL
+    d = min(d, sdMandelbulb(p-vec3(2.6,-.5,.5), vec3(1.3,1.8,1.1), n));
+    d = min(d, sdMandelbulb(p-vec3(-2.3,-1,-1.2), vec3(1.8,1.1,1.3), n));
+    d = min(d, sdMandelbulb(p-vec3(-3,1.5,3.5), vec3(1.3,1.8,1.1), n));
+    d = min(d, sdMandelbulb(p-vec3(3,2.5,4.5), vec3(1.8,1.1,1.3), n));
+    d = min(d, sdMandelbulb(p-vec3(1,-3,4), vec3(1.8,1.3,1.1), n));
+    #endif
+    
+    return d;
+}
+
+// raymarching loop
+float intersect(vec3 ro, vec3 rd) {
+    float t = 0.;
+    for (int i=0; i<512 && t<64.; i++) {
+        vec3 p = ro + rd*t;
+        float h = map(p, false);
+        if (h<.0001) break;
+        t += h;
+    }
+    return t;
+}
+
+vec3 calcNormal(vec3 p) {
+    float h = map(p, true);
+    const vec2 e = vec2(.0001,0);
+    
+    return normalize(h - vec3(map(p-e.xyy, true),
+                              map(p-e.yxy, true),
+                              map(p-e.yyx, true)));
+}
+
+// shadow function
+float shadow(vec3 ro, vec3 rd) {
+    for (float t=.01; t<16.;) {
+        vec3 p = ro + rd*t;
+        float h = map(p, false);
+        if (h<.001) return 0.;
+        t += h;
+    }
+    return 1.;
+}
+
+const vec3 sunDir = normalize(vec3(1,2,0)); // sun direction (it's not a sun)
+
+// draw a particle
+float particle(vec3 ro, vec3 rd, vec3 ce) {
+    return step(0., sphIntersect(ro, rd, ce,.03));
+}
+
+// main rendering function
+vec3 render(vec3 ro, vec3 rd) {
+    vec3 col = vec3(0);
+    vec3 tro = ro; // save the first ray origin
+    vec3 trd = rd; // save the first ray direction
+    for (int i=0; i<3; i++) { // GI bounces
+        float t = intersect(ro, rd);
+        if (t<64.) {
+            vec3 p = ro + rd*t;
+            vec3 n = calcNormal(p);
+            
+            ro = p+n*.01;
+            rd = cosineDirection(n);
+                
+            float dif = clamp(dot(n,sunDir),0.,1.); // diffuse light
+            float sha = shadow(p,sunDir); // shadow
+            col += dif*sha;
+        } else {
+            break;
+        }
+    }
+    #ifndef MODEL
+    // draw the particles
+    col += particle(tro, trd, vec3(-1.4,1.8,1));
+    col += particle(tro, trd, vec3(1,0,-2.5));
+    col += particle(tro, trd, vec3(-.8,0,-1.5));
+    col += particle(tro, trd, vec3(-.2,-.9,-2.5));
+    col += particle(tro, trd, vec3(.8,3,2));
+    col += particle(tro, trd, vec3(1,-1.2,-2));
+    #endif
+    
+    // glare
+    col += hash1()<.2*pow(clamp(dot(trd, sunDir),0.,1.),4.) ? 1. : 0.;
+    
+    return col;
+}
+
+// camera function
+mat3 setCamera(vec3 ro, vec3 ta) {
+    vec3 w = normalize(ta - ro);
+    vec3 u = normalize(cross(w, vec3(0,1,0)));
+    vec3 v = cross(u, w);
+    return mat3(u, v, w);
+}
+
+// // bloom function
+// vec4 bloom(sampler2D sam, vec2 p) {
+//     vec4 col = vec4(0);
+//     for (int i=-2; i<=2; i++) {
+//     for (int j=-2; j<=2; j++) {
+//         vec2 of = vec2(i,j)*.01;
+//         col += textureLod(sam, p+of, 4.);
+//     }
+//     }
+//     return col;
+// }
+
+// bloom function (modified)
+vec4 bloom(samplerCube sam, vec3 dir) {
+    vec4 col = vec4(0);
+    for (int i=-2; i<=2; i++) {
+    for (int j=-2; j<=2; j++) {
+        vec2 of = vec2(i,j)*.01;
+        vec3 offsetDir = normalize(dir + vec3(of, 0.0) * 0.05);
+        // blurred texture
+        col += textureLod(sam, offsetDir, 4.0);
+
+    }
+    }
+    return col;
+}
+
+void main()
+{
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    seed = iTime+dot(sin(fragCoord),vec2(443.712,983.234)); // init randoms seed
+    seed += hash1()*434.251;
+    
+    vec2 of = hash2()-.5; // antialiasing offset
+    vec2 p = (fragCoord+of - .5*viewPort.xy) / viewPort.y;
+
+    vec3 ro = vec3(0, -.75, -5.); // ray origin
+    vec3 ta = vec3(0); // target
+    
+    mat3 ca = setCamera(ro, ta); // camera matrix 
+    vec3 rd = ca * normalize(vec3(p,1.)); // ray direction
+    
+    // depth of field
+    float t = intersect(ro, normalize(ta-ro)); // distance to the scene in the forward vector
+    vec3 fp = ro + rd*t; // focus plane;
+    ro += uniformVector()*.05; // offsetting the ray direction
+    rd = normalize(fp-ro);
+    
+    ray = 0; // red render
+    float r = render(ro/.99, rd).r;
+    ray = 1; // green render
+    float g = render(ro, rd).g;
+    ray = 2; // blue render
+    float b = render(ro*.99, rd).b;
+    vec3 col = vec3(r,g,b);
+
+    //
+    vec4 blur = bloom(iChannel0, vec3(fragCoord, 0.0));
+    vec3 bloom = blur.rgb/blur.a;
+
+    // post proscessing effects
+    
+    col = pow(col,vec3(.4545)); // gamma correction
+    col += .4*bloom;
+    col = pow(col,vec3(.9,.85,.75)); // color grade
+    
+    // vec4 data = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    vec4 data = texture(iChannel0, vec3(fragCoord, 0.0));
+    data += vec4(col,1);
+
+    // output
+    outColor = data;
+}
+]]>
+</program>
+</language>
+</jittershader>

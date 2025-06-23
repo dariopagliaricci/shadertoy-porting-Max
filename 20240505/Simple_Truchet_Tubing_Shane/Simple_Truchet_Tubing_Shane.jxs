@@ -1,0 +1,661 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />	
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+/*
+	Simplex Truchet Tubing
+	----------------------
+
+	This was inspired by Mattz's "Rainbow Sphaghetti" example, which I've always admired
+	for both its aesthetics and mathematical content. However, this version was constructed
+	via a more direct simplex grid approach. In fact, I made it a point not to look at 
+	Mattz's code too deeply in the hope that I might bring something new to the table... 
+	Not sure if I did, but here it is anyway. :)
+
+	The idea is very simple: Break space into a simplex grid, which is just a bunch of 
+	packed regular tetrahedrons. Each tetrahedron has four faces, so run a tube from one
+	face center to another face center, then do the same with the remaining two faces - 
+	If you require a visual reference, look up cubic Truchet tiles, then picture one with
+	tetrahedrons instead of cubes. The result is a grid space full of double-tubed 
+	tetrahedral Truchet blocks which can each be randomly oriented to produce a Truchet 
+	pattern.
+
+	Running a straight tube, or even a Bezier curve, from one tetrahedral face center to 
+	the next is almost trivial, but threading tori through them was slighly more tricky. 
+	Each had to be centered on the correct central edge, then aligned accordingly. The code 
+	to do that turned out to be reasonably simple, but I had to make a lot of really stupid 
+	mistakes to get there. :)
+
+	Anyway, for anyone interested, the relevant code is contained in the distance function;
+	The rest is window dressing. I also have a much, much more simplistic version using 
+	straight tubes that I'll put up pretty soon which should be much easier to absorb. With
+	a bit of trial and error, I've also managed to produce an animated version, so I'll
+	put that up too.
+	
+
+	By the way, I really rushed in the comments, but I'll tidy them up later.
+    
+
+    // Relevant examples:
+
+    // Truchet pattern using an octahedral and tetrahedral setup.
+    rainbow sphagetti - Mattz
+    https://www.shadertoy.com/view/lsjGRV
+
+	// Classic cubic Truchet pattern. Easier to understand.
+	Twisted Tubes - Shane
+	https://www.shadertoy.com/view/lsc3DH
+ 
+
+*/
+
+
+#define FAR 20. // Maximum ray distance. Analogous to the far plane.
+
+//#define NO_BOLTS // Bland, but faster, plus it allows you to see the pattern better.
+
+
+// Scene object ID. Either the bolts (0) or the tube itself (1).
+float objID;
+float svObjID; // Global ID to keep a copy of the above from pass to pass.
+
+float hash(float n){ return fract(sin(n)*43758.5453); }
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+
+// The path is a 2D sinusoid that varies over time, depending upon the frequencies, and amplitudes.
+vec2 path(in float t){ 
+
+    //return vec2(0); // Straight path override.
+   
+    // Curvy path.
+    float a = sin(t * 0.22);
+    float b = cos(t * 0.28);
+    return vec2(a*2. -b*.75, b*.85 + a*.75);
+
+}
+
+// Tri-Planar blending function. Based on an old Nvidia tutorial.
+vec3 tex3D( sampler2D t, in vec3 p, in vec3 n ){ 
+    
+    //p -= vec3(path(p.z), 0.);
+     
+    n = max(abs(n), 0.001);
+    n /= dot(n, vec3(1));
+	vec3 tx = texture(t, p.yz).xyz;
+    vec3 ty = texture(t, p.zx).xyz;
+    vec3 tz = texture(t, p.xy).xyz;
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear space 
+    // (squaring is a rough approximation) prior to working with them... or something like that. :)
+    // Once the final color value is gamma corrected, you should see correct looking colors.
+    return (tx*tx*n.x + ty*ty*n.y + tz*tz*n.z);
+}
+
+
+float hash31(vec3 p) { 
+
+    // Faster, but doesn't disperse things quite as nicely as the block below it. However, when framerate
+    // is an issue, and it often is, this is the one to use. Basically, it's a tweaked amalgamation I put
+    // together, based on a couple of other random algorithms I've seen around... so use it with caution,
+    // because I make a tonne of mistakes. :)
+    float n = sin(dot(p, vec3(7.31, 157.47, 113.93)));    
+    return fract(n); // return fract(vec3(64, 8, 1)*32768.0*n)*2.-1.; 
+
+    // I'll assume the following came from IQ.
+    //p = vec3( dot(p, vec3(127.1, 311.7, 74.7)), dot(p, vec3(269.5, 183.3, 246.1)), dot(p, vec3(113.5, 271.9, 124.6)));
+    //return (fract(sin(p)*43758.5453)*2. - 1.);
+
+}
+
+// A cheap orthonormal basis vector function - Taken from Nimitz's "Cheap Orthonormal Basis" example, then 
+// modified slightly.
+//
+//Cheap orthonormal basis by nimitz
+//http://orbit.dtu.dk/fedora/objects/orbit:113874/datastreams/file_75b66578-222e-4c7d-abdf-f7e255100209/content
+//via: http://psgraphics.blogspot.pt/2014/11/making-orthonormal-basis-from-unit.html
+mat3 basis(in vec3 n){
+    
+    float a = 1./(1. + n.z);
+    float b = -n.x*n.y*a;
+    return mat3(1. - n.x*n.x*a, b, n.x, b, 1. - n.y*n.y*a, n.y, -n.x, -n.y, n.z);
+    //return transpose(mat3(vec3(1. - n.x*n.x*a, b, -n.x), vec3(b, 1. - n.y*n.y*a , -n.y), n));
+                 
+}
+
+// Torus function, with the standard large radius and smaller cross-sectional radius. With just a 
+// standard torus shape, this would be a very simple algorithm, but just to make it a little more
+// interesting, I spaced some bolts around the tori segments, so that added a few more lines.
+vec2 tor(vec3 p, float rad, float rad2){
+    
+    // "p" has been passed in as "p - p0," where "p0" is the central torus axial point. 
+  
+    #ifndef NO_BOLTS
+    // Bolts. Standard object repetition around a torus.
+    vec3 q = p;
+    q.xy = rot2(-3.14159/12.)*q.xy; // Rotating the bolts to avoid seam lines.
+    // Animation: I'd love to include this but there are some boundary issues that I'll have
+    // to compensate for first. It's on the list though.
+    //q.xy = rot2(iTime/2.)*q.xy;
+
+    float a = atan(q.y, q.x); // Polar angle of "q.xy" coordinate.
+    
+    // Partitioning the the torus into centered cells - "oNum" in all.
+    const float oNum = 6.; // Six objects in all.
+    float ia = floor(a/6.2831853*oNum);
+    ia = (ia + .5)/oNum*6.2831853; 
+    
+    // Converting the cell coordinates to polar positions. "X" now represents the radial
+    // distance, and "Y" repesents the radial distance.
+    q.xy = rot2(ia)*q.xy; 
+    
+    q.x -= rad; // Edging the object out to the distance of the outer radius.
+    
+    // Drawing some hexagon bolts at the postion.
+    q = abs(q);
+    float sh = max(max(q.x*.866025 + q.z*.5, q.z) - rad2 - .0125, q.y - .045);
+    sh = max(sh, -q.y + .01); // Taking out the center to make it look like two bolts.
+    #endif               
+    
+    #ifndef NO_BOLTS
+    // The torus itself. Without the bolts, the following would be all you need:
+    
+    // Sweeping a circle "rad" units about the center point. 
+    p.xy = vec2(length(p.xy) - rad, p.z);
+   
+    // Producing the inner circle and adding some tiny ribbing ("cos" term) to emulate a thread.
+    float tor = length(p.xy) - rad2 + cos(a*180.)*.0002;
+    
+    // Hexagonal cross section. Cool, but I have to deal with segment alignment first.
+    ////p.xy = rot2(a)*p.xy;
+    //p = abs(p);
+    //float tor = max(p.x, p.y) - rad2;// + cos(a*180.)*.0002;
+
+    
+    // Returning the torus value and the shape (bolt) value seperately (for ID purposes), but
+    // they'll be combined afterward.
+    
+    return vec2(tor, sh);
+    #else
+    float a = atan(p.y, p.x);
+    p.xy = vec2(length(p.xy) - rad, p.z);
+    float tor = length(p.xy) - rad2 + cos(a*180.)*.0002;
+    return vec2(tor, 1e8);
+    #endif
+    
+}
+
+
+// Breaking space into a 3D simplex grid (packed tetrahedra), constructing tetrahedral Truchet tiles,
+// then randomly rotating them to form a 3D simplex Truchet pattern.
+float simplexTruchet(in vec3 p)
+{
+    
+    // Breaking space into tetrahedra and obtaining the four verticies. The folowing three code lines
+    // are pretty standard, and are used for all kinds of things, including 3D simplex noise. In this
+    // case though, we're constructing tetrahedral Truchet tiles.
+    
+    // Skewing the cubic grid, then determining relative fractional position.
+    vec3 i = floor(p + dot(p, vec3(1./3.)));  p -= i - dot(i, vec3(1./6.)) ;
+    
+    // Breaking the skewed cube into tetrahedra with partitioning planes, then determining which side of 
+    // the intersecting planes the skewed point is on. Ie: Determining which tetrahedron the point is in.
+    vec3 i1 = step(p.yzx, p), i2 = max(i1, 1. - i1.zxy); i1 = min(i1, 1. - i1.zxy);    
+    
+    
+    // Using the above to produce the four vertices for the tetrahedron.
+    vec3 p0 = vec3(0), p1 = i1 - 1./6., p2 = i2 - 1./3., p3 = vec3(.5);
+
+    
+    
+    // Using the verticies to produce a unit random value for the tetrahedron, which in turn is used 
+    // to determine its rotation.
+    float rnd = hash31(i*57.31 + i1*41.57 + i2*27.93);
+    
+    // This is a cheap way (there might be cheaper, though) to rotate the tetrahedron. Basically, we're
+    // rotating the vertices themselves, depending on the random number generated.
+    vec3 t0 = p1, t1 = p2, t2 = p3, t3 = p0;
+    if (rnd > .66){ t0 = p2, t1 = p3; t2 = p0; t3 = p1; }
+    else if (rnd > .33){ t0 = p3, t1 = p0; t2 = p1; t3 = p2; } 
+    
+
+    
+    // Threading two torus segments through each pair of faces on the tetrahedron.
+    
+    // Used to hold the distance field values for the tori segments and the bolts.
+    // v.xy holds the first torus and bolt values, and v.zw hold the same for the second torus.
+    vec4 v;
+    
+    // Axial point of the torus segment, and the normal from which the orthonormal bais is derived.
+    vec3 q, bn; 
+ 
+    
+    // I remember reasoning that the outer torus radius had to be this factor (sqrt(6)/8), but I 
+    // can't for the life of me remember why. A lot of tetrahedral lengths involve root six. I 
+    // think it's equal to the tetrahedral circumradius... I'm not happy with that explanation either, 
+    // so I'll provide a proper explanation later. :D Either way, it's the only value that fits.
+    float rad = .306186218; // Equal to sqrt(6)/8.
+    float rad2 = .025; // The smaller cross-sectional torus radius.
+
+
+    // Positioning the center of each torus at the corresponding edge mid-point, then aligning with
+    // the direction of the edge running through the midpoint. One of the ways to align an object is to
+    // determine a face normal, construct an orthonormal basis from it, then multiply the object by it
+    // relative to its position. On a side note, orientation could probably be achieved with a few 
+    // matrix rotations instead, which may or may not be cheaper, so I'll look into it later.
+    
+    // First torus. Centered on the line between verticies t0 and t1, and aligned to the face that
+    // the edge runs through.
+    bn = (t0 - t1)*1.1547005; // Equivalent to normalize(t0 - t1);
+    q = basis(bn)*(p - mix(t0, t1, .5)); // Applying Nimitz's basis formula to the point to realign it.
+    v.xy = tor(q, rad, rad2); // Obtain the first torus distance.
+
+    // Second torus. Centered on the line between verticies t2 and t3, and aligned to the face that
+    // the edge runs through.
+    bn = (t2 - t3)*1.1547005; // Equivalent to normalize(t2 - t3);
+    q = basis(bn)*(p - mix(t2, t3, .5)); // Applying Nimitz's basis formula to the point to realign it.
+    v.zw = tor(q, rad, rad2); // Obtain the second torus distance.
+
+    // Determine the minium torus value, v.x, and the minimum bolt value, v.y.
+    v.xy = min(v.xy, v.zw);
+    
+ 
+    // Object ID. It's either the ribbed torus itself or a bolt.
+    objID = step(v.x, v.y);
+
+    // Return the minimum surface point.
+    return min(v.x, v.y);
+    
+    
+}
+
+// The main distance field function. In this case, it's just calling the 
+// simplex Truchet object.
+float map(vec3 p){
+    
+ 
+    p.xy -= path(p.z).xy; // Perturb the object around the camera path.
+    
+
+    float ns = simplexTruchet(p); // The Truchet object.
+    
+    // If a field function adheres to Lipschitz conditions, then no ray shortening is
+    // necessary, but this one seems to require just a touch. I've tried to use the highest 
+    // shortening factor possible.
+    return ns*.9;
+    
+}
+
+
+// Texture bump mapping. Four tri-planar lookups, or 12 texture lookups in total. I tried to 
+// make it as concise as possible. Whether that translates to speed, or not, I couldn't say.
+vec3 bumpMap(sampler2D tx, in vec3 p, in vec3 n, float bf){
+   
+    const vec2 e = vec2(0.001, 0);
+    
+    // Three gradient vectors rolled into a matrix, constructed with offset greyscale texture values.    
+    mat3 m = mat3( tex3D(tx, p - e.xyy, n), tex3D(tx, p - e.yxy, n), tex3D(tx, p - e.yyx, n));
+    
+    vec3 g = vec3(0.299, 0.587, 0.114)*m; // Converting to greyscale.
+    g = (g - dot(tex3D(tx,  p , n), vec3(0.299, 0.587, 0.114)) )/e.x; g -= n*dot(n, g);
+                      
+    return normalize( n + g*bf ); // Bumped normal. "bf" - bump factor.
+    
+}
+
+
+// Standard raymarching routine.
+float trace(vec3 ro, vec3 rd){
+   
+    float t = 0., d;
+    
+    for (int i=0; i<96; i++){
+
+        d = map(ro + rd*t);
+        
+        if(abs(d)<.001*(t*.125 + 1.) || t>FAR) break;//.001*(t*.125 + 1.)
+        
+        t += d; // Using slightly more accuracy in the first pass.
+    }
+    
+    return min(t, FAR);
+}
+
+
+
+// Cheap shadows are the bain of my raymarching existence, since trying to alleviate artifacts is an excercise in
+// futility. In fact, I'd almost say, shadowing - in a setting like this - with limited  iterations is impossible... 
+// However, I'd be very grateful if someone could prove me wrong. :)
+float softShadow(vec3 ro, vec3 lp, float k, float t){
+
+    // More would be nicer. More is always nicer, but not really affordable... Not on my slow test machine, anyway.
+    const int maxIterationsShad = 24; 
+    
+    vec3 rd = lp-ro; // Unnormalized direction ray.
+
+    float shade = 1.;
+    float dist = .001*(t*.125 + 1.);  // Coincides with the hit condition in the "trace" function.  
+    float end = max(length(rd), 0.0001);
+    //float stepDist = end/float(maxIterationsShad);
+    rd /= end;
+
+    // Max shadow iterations - More iterations make nicer shadows, but slow things down. Obviously, the lowest 
+    // number to give a decent shadow is the best one to choose. 
+    for (int i=0; i<maxIterationsShad; i++){
+
+        float h = map(ro + rd*dist);
+        //shade = min(shade, k*h/dist);
+        shade = min(shade, smoothstep(0.0, 1.0, k*h/dist)); // Subtle difference. Thanks to IQ for this tidbit.
+        // So many options here, and none are perfect: dist += min(h, .2), dist += clamp(h, .01, stepDist), etc.
+        dist += clamp(h, .01, .25); 
+        
+        // Early exits from accumulative distance function calls tend to be a good thing.
+        if (h<0.0 || dist > end) break; 
+    }
+
+    // I've added a constant to the final shade value, which lightens the shadow a bit. It's a preference thing. 
+    // Really dark shadows look too brutal to me. Sometimes, I'll add AO also, just for kicks. :)
+    return min(max(shade, 0.) + .1, 1.); 
+}
+
+/*
+// Standard normal function. It's not as fast as the tetrahedral calculation, but more symmetrical. Due to 
+// the intricacies of this particular scene, it's kind of needed to reduce jagged effects.
+vec3 getNormal(in vec3 p) {
+	const vec2 e = vec2(0.002, 0);
+	return normalize(vec3(map(p + e.xyy) - map(p - e.xyy), map(p + e.yxy) - map(p - e.yxy),	map(p + e.yyx) - map(p - e.yyx)));
+}
+
+
+*/
+
+// Normal calculation, with some edging and curvature bundled in.
+vec3 getNormal(vec3 p, inout float edge, inout float crv) { 
+	
+    // Roughly two pixel edge spread, regardless of resolution.
+    vec2 e = vec2(2./viewPort.y, 0);
+
+	float d1 = map(p + e.xyy), d2 = map(p - e.xyy);
+	float d3 = map(p + e.yxy), d4 = map(p - e.yxy);
+	float d5 = map(p + e.yyx), d6 = map(p - e.yyx);
+	float d = map(p)*2.;
+
+    edge = abs(d1 + d2 - d) + abs(d3 + d4 - d) + abs(d5 + d6 - d);
+    //edge = abs(d1 + d2 + d3 + d4 + d5 + d6 - d*3.);
+    edge = smoothstep(0., 1., sqrt(edge/e.x*2.));
+/*    
+    // Wider sample spread for the curvature.
+    e = vec2(12./450., 0);
+	d1 = map(p + e.xyy), d2 = map(p - e.xyy);
+	d3 = map(p + e.yxy), d4 = map(p - e.yxy);
+	d5 = map(p + e.yyx), d6 = map(p - e.yyx);
+    crv = clamp((d1 + d2 + d3 + d4 + d5 + d6 - d*3.)*32. + .5, 0., 1.);
+*/
+    
+    e = vec2(.002, 0); //viewPort.y - Depending how you want different resolutions to look.
+	d1 = map(p + e.xyy), d2 = map(p - e.xyy);
+	d3 = map(p + e.yxy), d4 = map(p - e.yxy);
+	d5 = map(p + e.yyx), d6 = map(p - e.yyx);
+	
+    return normalize(vec3(d1 - d2, d3 - d4, d5 - d6));
+}
+
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original.
+float calculateAO(in vec3 pos, in vec3 nor)
+{
+	float sca = 2.0, occ = 0.0;
+    for( int i=0; i<5; i++ ){
+    
+        float hr = 0.01 + float(i)*0.5/4.0;        
+        float dd = map(nor * hr + pos);
+        occ += (hr - dd)*sca;
+        sca *= 0.7;
+    }
+    return clamp( 1.0 - occ, 0.0, 1.0 );    
+}
+
+
+// Coloring\texturing the scene objects, according to the object IDs.
+vec3 getObjectColor(vec3 p, vec3 n){
+    
+    // Object texture color.
+
+    vec3 tx = tex3D(iChannel0, p, n);
+    tx = smoothstep(.05, .5, tx);
+
+    // Shading the steel tubes sepia grey and giving the bolts a splash
+    // of color, just to break up the monotony a bit.
+    if(svObjID>.5) tx *= vec3(1.25, 1., .8); // Steel tubes.
+    else tx *= vec3(.9, .6, .3); // Bolts.
+    
+    return tx; // Return the texture.
+    
+}
+
+
+// Simple environment mapping. Pass the reflected vector in and create some
+// colored noise with it. It's fake, obviously, but gives a bit of a shiny
+// reflected-pass vibe.
+//
+// More sophisticated environment mapping:
+// UI easy to integrate - XT95    
+// https://www.shadertoy.com/view/ldKSDm
+vec3 eMap(vec3 rd, vec3 sn){
+    
+    // Pass the reflected vector into the object color function.
+    vec3 tx = getObjectColor(rd, sn);
+    return smoothstep(.15, .75, tx);
+ 
+}
+
+// Using the hit point, unit direction ray, etc, to color the scene. Diffuse, specular, falloff, etc. 
+// It's all pretty standard stuff.
+vec3 doColor(in vec3 ro, in vec3 rd, in vec3 lp, float t){
+    
+    // Initiate the scene (for this pass) to zero.
+    vec3 sceneCol = vec3(0);
+    
+    if(t<FAR){ // If we've hit a scene object, light it up.
+        
+         // Surface position.
+   		 vec3 sp = ro + rd*t;
+        
+        // Edge and curvature variables. Passed to the normal functions.
+        float edge = 0., crv = 1.;
+
+        // Retrieving the normal at the hit point, plus the edge and curvature values.
+        vec3 sn = getNormal(sp, edge, crv);
+        //vec3 sn = getNormal(sp);
+        vec3 svSn = sn; // Save the unbumped normal.
+
+        // Texture-based bump mapping.
+        // Contorting the texture coordinates to match the contorted scene.
+        sn = bumpMap(iChannel0, sp*2., sn, .01);
+        
+        // Less bumped normal for the fake environment mapping. Sometimes, I prefer it.
+        svSn = mix(sn, svSn, .75); 
+
+
+        // Shading. Shadows, ambient occlusion, etc.
+        float sh = softShadow(sp + sn*.00125, lp, 16., t); // Set to "1.," if you can do without them.
+        float ao = calculateAO(sp, sn);
+        sh = (sh + ao*.3)*ao;
+
+    
+        vec3 ld = lp - sp; // Light direction vector.
+        float lDist = max(length(ld), 0.001); // Light to surface distance.
+        ld /= lDist; // Normalizing the light vector.
+
+        // Attenuating the light, based on distance.
+        float atten = 2./(1. + lDist*0.125 + lDist*lDist*0.25);
+
+        // Diffuse term.
+        float diff = max(dot(sn, ld), 0.);
+        diff = (pow(diff, 2.)*.66 + pow(diff, 4.)*.34)*2.; // Ramping up the diffuse.
+        // Specular term.
+        float spec = pow(max( dot( reflect(-ld, sn), -rd ), 0.0 ), 32.0);
+        // Fresnel term.
+        float fres = clamp(1. + dot(rd, sn), 0., 1.);
+        //float Schlick = pow( 1. - max(dot(rd, normalize(rd + ld)), 0.), 5.0);
+        //float fre2 = mix(.5, 1., Schlick);  //F0 = .5.
+
+        // Coloring the object. You could set it to a single color, to
+        // make things simpler, if you wanted.        
+        vec3 objCol = getObjectColor(sp*2., sn);
+
+        // Combining the above terms to produce the final scene color.
+        sceneCol = objCol*(diff + .5*ao + fres*fres*.25) + vec3(1, .97, .92)*spec*2.;
+        //sceneCol += fres*fres*vec3(.2, .6, 1)*.5;
+        
+        sceneCol += eMap(reflect(rd, svSn)/2., svSn)*.75;
+        
+        // Edges and curvature.
+        //sceneCol *= clamp(crv, 0., 1.);
+        //sceneCol += (sceneCol*.75 + .25)*edge;
+        sceneCol *= 1. - edge*.9;
+        
+
+        // APPLYING SHADOWS
+    	sceneCol *= sh;  
+        
+        // Attenuation only. To save cycles, the shadows and ambient occlusion
+        // from the first pass only are used.
+        sceneCol *= atten;
+    
+    }
+    
+    
+    // APPLYING FOG
+    // Blend in a bit of light fog for atmospheric effect.
+    vec3 fogCol = vec3(0);//vec3(.7, .8, 1.)*(rd.y*.5 + .5)*2.5;
+    sceneCol = mix(sceneCol, fogCol, smoothstep(0., .75, t/FAR)); // exp(-.002*t*t), etc.
+
+    
+  
+    // Return the color. Done once for each pass.
+    return sceneCol;
+    
+}
+
+
+
+void main(){
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Screen coordinates.
+	vec2 uv = (fragCoord - viewPort.xy*.5) / viewPort.y;
+    
+	// Camera Setup.
+	vec3 ro = vec3(0, 0, iTime*.5); // Camera position, doubling as the ray origin.
+	vec3 lk = ro + vec3(0, 0, .25);  // "Look At" position.
+
+   
+    // Light position. Set in the vicinity the ray origin.
+    vec3 lp = ro + vec3(0, 1, .375);
+    
+	// Using the Z-value to perturb the XY-plane.
+	// Sending the camera, "look at," and light vector down the tunnel. The "path" function is 
+	// synchronized with the distance function.
+    ro.xy += path(ro.z);
+	lk.xy += path(lk.z);
+	lp.xy += path(lp.z);
+ 
+    
+
+    // Using the above to produce the unit ray-direction vector.
+    float FOV = 3.14159/2.; // FOV - Field of view.
+    vec3 forward = normalize(lk - ro);
+    vec3 right = normalize(vec3(forward.z, 0., -forward.x )); 
+    vec3 up = cross(forward, right);
+
+    // rd - Ray direction.
+    vec3 rd = normalize(forward + (uv.x*right + uv.y*up)*FOV);
+    rd = normalize(vec3(rd.xy, rd.z - length(rd.xy)*.25 ));
+
+    
+    // Raymarching.
+    // Obtain the scene distance.    
+    float t = trace(ro, rd);
+
+    svObjID = objID; // Save the ID.
+    
+    // Coloring.
+    // Retrieving the color at the hit point.
+    vec3 sceneColor = doColor(ro, rd, lp, t);
+    
+    
+    // Postprocessing.
+    // Subtle vignette.
+    uv = fragCoord/viewPort.xy;
+    sceneColor *= pow(16.*uv.x*uv.y*(1. - uv.x)*(1. - uv.y) , .125)*.5 + .5;
+    // Colored varation.
+    //sceneColor = mix(pow(min(vec3(1.5, 1, 1)*sceneColor, 1.), vec3(1, 2.5, 12.)).zyx, sceneColor, 
+                    // pow( 16.0*uv.x*uv.y*(1.0-uv.x)*(1.0-uv.y) , .125)*.5 + .5);
+    
+
+    // Clamping the scene color, roughly gamma correcting, then presenting to the screen.
+	outColor = vec4(sqrt(clamp(sceneColor, 0., 1.)), 1);
+}
+]]>
+</program>
+</language>
+</jittershader>

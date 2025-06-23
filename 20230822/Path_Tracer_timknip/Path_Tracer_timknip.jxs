@@ -1,0 +1,302 @@
+<jittershader name="Path tracing">
+    <description>Default Slab </description>
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="pos" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+    <param name="viewPort" type="vec2" state ="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+
+    <language name="glsl" version="1.5">
+
+        <bind param="MVP" program="vp" />
+        <bind param="pos" program="vp" />
+        <bind param="uv" program="vp" />
+        <bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+        <bind param="iTime" program="fp" />
+
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 pos;
+            in vec2 uv;
+
+            out jit_PerVertex {
+                vec2 uv;
+            } jit_out;
+            uniform mat4 MVP;
+            uniform mat4 textureMatrix0;
+            
+            void main(void) {
+                gl_Position = MVP*vec4(pos, 1.);
+                jit_out.uv = uv;
+            }
+        ]]>
+        </program>
+        
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+// https://www.shadertoy.com/view/ctK3WV
+#define PI     3.14159265
+#define TWO_PI 6.28318530
+#define MAX_RAY_DEPTH 4
+
+float _x = 0.0;
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+    float fresnel;
+    int type;
+};
+
+struct Sphere {
+    vec3 center;
+    float radius;
+    vec3 color;
+    float reflectivity;
+    float transparency;
+    vec3 emission;
+};
+
+struct Hit {
+    float t;
+    vec3 pt;
+    vec3 normal;
+    Sphere sphere;
+    int idx;
+};
+
+bool intersectSphere (in Ray ray, in Sphere sphere, inout float t) {
+    vec3 L = sphere.center - ray.origin;
+    float tca = dot(L, ray.direction);
+    float d2 = dot(L, L) - (tca * tca);
+    float radius2 = sphere.radius * sphere.radius;
+    
+    if (d2 > radius2) {
+        return false;
+    }
+    
+    float thc = sqrt(radius2 - d2);
+    float t0 = tca - thc;
+    float t1 = tca + thc;
+    
+    if (t0 > t1) {
+        float tmp = t0;
+        t0 = t1;
+        t1 = tmp;
+    }
+    
+    if (t0 < 0.0) {
+        t0 = t1;
+        if (t0 < 0.0) {
+            return false;
+        }
+    }
+    
+    t = t0;
+    
+    return true;
+}
+
+Sphere objects[] = Sphere[](
+    Sphere(vec3(0.0, -10004.0, -20.0), 10000.0, vec3(0.2,0.2,0.2), 0.0, 0.0, vec3(0.0)),
+    Sphere(vec3(0.0, 0.0, -20.0), 4.0, vec3(1,0.32,0.36), 1.0, 0.5, vec3(0.0)),
+    Sphere(vec3(5.0, -1.0, -15.0), 2.0, vec3(0.90, 0.76, 0.46), 1.0, 0.6, vec3(0.0)),
+    Sphere(vec3(5.0, 0.0, -25.0), 3.0, vec3(0.65, 0.77, 0.9), 1.0, 0.6, vec3(0.0)),
+    Sphere(vec3(-5.5, 0.0, -15.0), 3.0, vec3(0.9, 0.9, 0.9), 1.0, 0.5, vec3(0.0))
+    // light
+    
+);
+
+const Sphere lights[] = Sphere[](
+    Sphere(vec3(0.0, 20.0, -30.0), 3.0, vec3(0.0), 0.0, 0.0, vec3(1.0, 1.0, 1.0))
+);
+
+float schlick_approximation(in float cosine, in float refraction_factor) {
+    float r0 = (1.0 - refraction_factor) / (1.0 + refraction_factor);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+bool intersect(in Ray ray, out Hit hit) {
+    
+    float min_t = 1000000.0;
+    float t;
+    bool has_hit = false;
+    
+    for (int i = 0; i < 5; i++) {
+       if (intersectSphere(ray, objects[i], t)) {
+           if (t < min_t) {
+               min_t = t;
+               
+               hit.t = t;
+               hit.sphere = objects[i];
+               hit.idx = i;
+               has_hit = true;
+           }
+       }
+    }
+ 
+    if(has_hit) {
+        hit.pt = ray.origin + ray.direction * hit.t;
+        hit.normal = normalize(hit.pt - hit.sphere.center);
+    }
+    
+    return has_hit;
+}
+
+vec3 shade(in Ray ray, in Hit hit, inout vec3 color) {
+    float bias = 1.0e-2;
+    
+    //vec3 color = vec3(0.0);
+    vec3 transmission = vec3(1.0);
+    vec3 lightDirection = normalize(lights[0].center - hit.pt);
+    
+    Ray shadow_ray = Ray(hit.pt + hit.normal * bias, lightDirection, 1.0, 3);
+    Hit hit2;
+    
+    float t;
+    
+    for (int j = 0; j < 5; j++) {
+        if (j != hit.idx) {
+            if(intersectSphere(shadow_ray, objects[j], t)) {
+                transmission = vec3(0.0);
+                break;
+            }
+        }
+        color += hit.sphere.color * transmission * max(0.0, dot(hit.normal, lightDirection)) * lights[0].emission;
+    }
+    return color;
+}
+
+vec3 trace(in Ray ray) {
+    vec3 color = vec3(0.0);
+    
+    float bias = 1.0e-3;
+    int max_bounces = 4;
+    int depth = 0;
+    float reflAmt = 1.0;
+    bool continueLoop = true;
+    vec3 global_attenuation = vec3(1.0);
+    
+    Hit hit;
+    
+    Ray stack[10];
+    int sp = -1;
+
+    /*
+    surfaceColor = (
+            reflection * fresneleffect +
+            refraction * (1 - fresneleffect) * sphere->transparency) * sphere->surfaceColor;
+    */
+    while(continueLoop) {
+    //for (int i = 0; i < max_bounces; i++) {
+        //color = vec3(1.0);
+
+        if(intersect(ray, hit)) {
+            
+            depth++;
+            shade(ray, hit, color);// * reflAmt;
+            
+            color *= reflAmt;//(1.0 / float(depth+1));
+            //color += (hit.sphere.color * ray.fresnel);
+            //color = hit.sphere.color * global_attenuation;
+            bool inside = false;
+            if(dot(ray.direction, hit.normal) > 0.0) {
+                inside = true;
+                hit.normal *= -1.0;
+            }
+            
+            if(hit.sphere.reflectivity > 0.0 && depth < MAX_RAY_DEPTH) {
+                
+                float facingratio = -dot(ray.direction, hit.normal);
+                // change the mix value to tweak the effect
+                float fresneleffect = mix(pow(1.0 - facingratio, 3.0), 1.0, 0.9);
+        
+                if(hit.sphere.transparency > 0.0) {
+                    float ior = 1.1;
+                    float eta = inside ? ior : 1.0 / ior; // are we inside or outside the surface?
+                    
+                    if(inside) {
+                        float travel_distance = length(hit.pt - ray.origin);
+                        vec3 absorbance = hit.sphere.color * (travel_distance * -0.25);
+                        vec3 att = vec3(exp(absorbance.x), exp(absorbance.y), exp(absorbance.z));
+                        global_attenuation *= att;
+                    }
+                    
+                    vec3 refrdir = refract(ray.direction, hit.normal, eta);
+                    stack[++sp]= Ray(hit.pt - hit.normal * bias, refrdir, (1.0 - fresneleffect) * hit.sphere.transparency, 2);
+                    depth++;
+                }
+                ray = Ray(hit.pt + hit.normal * bias, reflect(ray.direction, hit.normal), fresneleffect, 1);
+                reflAmt *= 0.5;
+            } else {
+                // diffuse
+                //shade(ray, hit, color);
+                continueLoop = false;
+            }
+            
+
+           // break;
+        } else {
+            //color = vec3(1.0);
+            continueLoop = false;
+        }
+        
+        if (!continueLoop && sp >= 0) {
+            ray = stack[sp--];
+            depth--;
+            continueLoop = true;
+        }
+    }
+    
+    return color;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/viewPort.xy;
+
+    // Time varying pixel color
+    vec3 col = 0.5 + 0.5*cos(iTime+uv.xyx+vec3(0,2,4));
+    
+    float scale = tan((40.0 * 0.5)*(PI / 180.0));
+    float aspect = viewPort.x / viewPort.y;
+
+    float x = (2.0 * ((uv.x * viewPort.x) + 0.5) / viewPort.x - 1.0) * aspect * scale;
+    float y = (1.0 - 2.0 * ((uv.y * viewPort.y) + 0.5) / viewPort.y) * scale;
+    
+    objects[3].center.z = -25.0 + cos(iTime*2.0) * 5.0;
+    objects[2].center.x = 3.0 + sin(iTime) * 8.0;
+    objects[2].center.z = -16.0 + cos(iTime) * 8.0;
+    objects[1].center.x = cos(iTime) * 3.0;
+    objects[1].center.z = -20.0+cos(iTime);
+    Ray ray;
+    ray.origin = vec3(0.0, 0.0, 0.0);
+    ray.direction = normalize(vec3(x, -y, -1.0));
+    ray.fresnel = 1.0;
+    ray.type = 0;
+    
+   
+    outColor = vec4(trace(ray), 1.0);
+}
+
+]]>
+    </program>
+    </language>
+</jittershader>

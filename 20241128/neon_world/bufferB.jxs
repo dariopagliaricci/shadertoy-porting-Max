@@ -1,0 +1,104 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform samplerCube iChannel1;
+
+const float radialBlurInstensity = 0.01;
+const float speed = 3.0;
+const float pi = 3.14159265359;
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    float s = sin(iTime*speed * pi / 16.0 - 1.0);
+    vec2 radialBlurCenter = vec2((s * 0.5 + 0.5) * 0.5 + 0.25, abs(s)* 0.2 + 0.35);
+    
+	vec2 uv = fragCoord.xy/viewPort.xy;
+    vec2 uvCenter = uv - radialBlurCenter;
+    float c = length(uv - radialBlurCenter);
+    vec4 texBlurred = texture(iChannel0, uv);
+    
+    float itter = 0.0;
+    
+	for(float itter1 = 0.0; itter1 < 5.0; itter1++)
+    {
+        itter = itter1;
+        texBlurred += texture(iChannel0, uvCenter * (1.0 - radialBlurInstensity * 
+        itter1 * c) + radialBlurCenter);
+    }
+    
+    vec4 res = texBlurred / itter;
+
+    // Use a direction vector for sampling from the cubemap
+    vec3 direction = normalize(vec3(uv - 0.5, 0.5)); // Convert UV to a direction vector
+    vec4 prev = texture(iChannel1, direction); // Sample the cubemap using the direction vector
+
+    
+    // vec3 direction = normalize(vec3(uv, 1.0));    
+    // vec4 prev = texture(iChannel1, direction);
+
+    // vec4 prev = texture(iChannel1, uv);
+
+    float motionBlur = mix(res.w, prev.w, 0.75);
+    vec3 light = motionBlur * vec3(0.25, 0.5, 0.75);
+	outColor = vec4(res.xyz + light*2.0, motionBlur);
+}
+]]>
+</program>
+</language>
+</jittershader>

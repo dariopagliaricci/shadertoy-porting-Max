@@ -1,0 +1,258 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="iResolution" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="1.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iMouse" type="vec2" default="0 0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 iResolution;
+uniform float iTime;
+uniform vec2 iMouse;
+uniform sampler2D iChannel0;
+
+#define mid (iResolution.xy / 2.0)
+
+#define scale = 1.8;
+
+const float escape= 4.;
+const float bAmt = 0.15; // moblur amount
+const float speed = 1.5;
+
+const int fSamples = 5; //quality level (fibonacci sequence index)
+const int iters = 64;
+
+ivec2 fib(const in int f)
+{
+  int n0 = 1;
+  int n1 = 1;
+  int fi = 0;
+    
+  for (int i = 0; i < f; i++) 
+  {
+    fi = n0 + n1;
+    n0 = n1;
+    n1 = fi;
+  }
+    
+  return ivec2(n0, n1);
+}
+
+float rand( vec2 n )
+{
+	return fract(sin(dot(n.xy, vec2(12.9898, 78.233)))* 43758.5453);
+}
+
+vec2 rotate(vec2 v, float t)
+{
+    float tx = cos(t)*v.x-sin(t)*v.y;
+    float ty = sin(t)*v.x+cos(t)*v.y;
+    return vec2(tx,ty);
+}
+
+float avgFrq(float from, float to)
+{
+    float st = (to - from) / 3.0;
+    float s = texture(iChannel0, vec2(from, 0.25)).x +
+                  texture(iChannel0, vec2(from + st, 0.25)).x +
+                  texture(iChannel0, vec2(from + st * 2.0, 0.25)).x +
+                  texture(iChannel0, vec2(from + st * 3.0, 0.25)).x;
+    return s * 0.25;
+}
+
+vec2 julia(vec2 a, float t)
+{
+    float mess = ( (cos(t*0.5) ) * 0.06);
+    float sqrz_x = a.x * a.x - a.y * a.y +a.x*0.25+ 0.50 + ( (sin(t*0.25) ) * 0.1);
+    float sqrz_y = 1.0* a.x * a.y + 0.40 + mess;
+    
+   
+ 	vec2 md =  vec2(sqrz_x,sqrz_y);
+    
+    return (md);
+}
+
+float pxFunc(vec2 st, float t)
+{
+
+	st = rotate( st*1., -t*0.1);
+    
+    vec2 z =st;
+
+	int k = 32;
+
+  	for(int j = 0; j < iters; j++)
+    {
+        z = julia(z, t);
+        
+        if(z.x * z.x + z.y * z.y > escape) 
+        {
+           k = j;
+           break;
+        }
+     }
+  	
+    return (fract(float(k)/float(iters))*16.*( (cos(t*0.5) ) * 0.6)); 
+}
+
+
+float grid(vec2 ipos, vec2 igS, vec2 m, float t){
+    vec2 gS = vec2(2.+sin(t*0.1),2.+ cos(t*0.1))*igS;
+    vec2 uv = ipos/iResolution.xy;
+    vec2 pos = (ipos-mid) / iResolution.xy;
+    
+    pos = rotate(pos+sin(t*0.01)*0.0015, t*0.01);
+    
+    float wave = texture( iChannel0, vec2(uv.x,0.75) ).x;
+    float waveY = texture( iChannel0, vec2(uv.y,0.75) ).x;
+    
+    float bass = avgFrq(0.0,0.008);
+    float hi = avgFrq(0.7,1.);
+    
+    bool bsTrig = ( bass > 0.94);
+    bool trTrig = ( hi > 0.4);
+    
+    
+    
+    float jul = pxFunc(pos, t);
+    
+    float wYClmp = clamp(wave, 0., float(bsTrig));
+    
+    pos = rotate(pos, jul);
+    pos = rotate(pos, -jul*wYClmp);
+    
+    vec2 M = mod(pos,gS); 
+
+    float color = 0.1;
+    float gridColor = 0.8;
+    
+	float modX= mod(pos.x , gS.x);
+	float modY= mod(pos.y , gS.y);	
+
+    vec2 B = gS/50.;
+
+    vec2 space = vec2(6.);
+
+    if (bsTrig) {
+		space.x -= ((5.*abs(sin(t))*bass)/gS.x) * gS.x;
+    }
+    if (trTrig){
+		space.y -= ((12.*hi)/gS.y) * gS.y;
+    }
+
+	space *= 2.;
+
+    vec2 gM = vec2(ceil((M.x)/gS.x) * gS.x, ceil((M.y)/gS.y) * gS.y );
+    
+    vec2 pmod = vec2(mod(pos.x, gS.x*space.x), mod(pos.y, gS.y*space.y));
+    
+    gM.x = floor(fract(gM.x*gS.x*4.+t*0.1)*10.)*gS.x; //tile step
+    gM.y = floor(fract(gM.y*gS.y*128.+t*0.001)*10.)*gS.y;
+    
+    if( gM.x > pmod.x && gM.x < pmod.x + gS.x && gM.y > pmod.y && gM.y < pmod.y + gS.y){
+
+    	color = 1.;
+
+    } 
+
+    float wXClmp = clamp(waveY/40., 0., float(trTrig));
+    
+    
+	if( modX < B.x + wXClmp || modY < B.y ){
+        
+		color = gridColor;
+        
+	}
+
+    return color;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * iResolution.xy;
+        
+    ivec2 fi = fib(fSamples - 2);
+    int ifN = fi.x;
+    
+    float ffN = float(fi.x);
+    float ffk = float(fi.y);
+    
+    vec3 sum = vec3(0.);
+    
+    vec2 gridSize = vec2(25.);
+    
+    vec2 rmGrid = gridSize / iResolution.xy ;
+    
+	vec2 rmRes =  (fragCoord.xy);
+    
+    vec2 m = (iMouse.xy - mid) ;
+
+    float r = rand(fragCoord.xy/ iResolution.xy);
+
+    for (int i = 0; i < ifN; i++) 
+    {
+        vec2 samp = vec2(
+            float(i) / ffN,
+            fract(ffk * (float(i) / ffN))
+        );
+        
+		float timeMap = iTime + (float(i) + r) / ffN * bAmt;
+
+        sum += vec3(grid(rmRes+samp, rmGrid, m.xy,timeMap*speed));
+        
+    }
+
+    vec3 colNorm = sum / ffN;
+
+	outColor = vec4(colNorm,1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

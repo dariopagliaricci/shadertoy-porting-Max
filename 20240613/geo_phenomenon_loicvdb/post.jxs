@@ -1,0 +1,98 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform sampler2D iChannel0;
+
+
+	vec3 ACESFilm(vec3 x) {
+    
+    // ACES system tone scale (RTT+ODT)
+    const float a = .0245786;
+    const float b = -.000090537;
+    const float c = .983729;
+    const float d = .4329510;
+    const float e = .238081;
+    x = (x*(x+a)+b) / (x*(x*c+d)+e);
+    
+    return x;
+}
+
+mat3 gaussianFilter = mat3(41, 26, 7,
+                           26, 16, 4,
+                           7,  4,  1) / 273.;
+
+vec3 bloom(float scale, vec2 fragCoord){
+    float logScale = log2(scale);
+    vec3 bloom = vec3(0);
+    for(int y = -2; y <= 2; y++)
+        for(int x = -2; x <= 2; x++)
+            bloom += gaussianFilter[abs(x)][abs(y)] * textureLod(iChannel0, (fragCoord+vec2(x, y)*scale)/viewPort.xy, logScale).rgb;
+    
+    return bloom;
+}
+
+void main(){
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec3 bloomSum = vec3(0.);
+    bloomSum += bloom(.15 * viewPort.y, fragCoord) * .15;
+    bloomSum += bloom(.05 * viewPort.y, fragCoord) * .07;
+    bloomSum += bloom(.02 * viewPort.y, fragCoord) * .03;
+    
+    outColor = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    outColor.rgb = clamp(ACESFilm(outColor.rgb + bloomSum), vec3(0.), vec3(1.));
+    outColor.rgb = pow(outColor.rgb, vec3(.8));
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

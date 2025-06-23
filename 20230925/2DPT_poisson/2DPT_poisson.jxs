@@ -1,0 +1,336 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+	<param name="sample" type="float" default="0.0" />
+	<param name="tex01" type="int" default="0" />
+
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="sample" program="fp" />
+		<bind param="tex01" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+#version 330 core
+
+in vec3 pos;
+in vec2 uv;
+
+out jit_PerVertex {
+	vec2 uv;
+
+} jit_out;
+uniform mat4 MVP;
+
+void main(void) {
+	gl_Position = MVP*vec4(pos, 1.);
+	jit_out.uv = uv;
+}
+]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float sample;
+uniform sampler2D tex01;
+
+#define SPP 120 // sample per pixel
+#define FRAME_BLEND .75 // prev frame to new frame blend
+#define GI_BOUNCES 5 // global illumination bounces
+
+//#define PROGRESSIVE
+
+float seed; // randoms seed
+
+// random number between 0 and 1
+float hash() {return fract(sin(seed+=.1)*4561.7564);}
+
+// vec2 to float hash
+float hash(vec2 x) {
+	float n = dot(x,vec2(127.1,311.7));
+	return fract(sin(n)*4561.7564);
+}
+
+// normalized 2d vector
+vec2 uniformVector() {
+    float an = hash()*6.283185; // angle
+    return vec2(sin(an), cos(an));
+}
+
+// random 2d vector
+vec2 randomVector() {
+    float an = hash()*6.283185; // angle
+    float ra = sqrt(hash()); // radius
+    return ra * vec2(sin(an), cos(an));
+}
+
+// disk sdf
+float sdDisk(vec2 p, vec3 dsk) {
+    return length(p-dsk.xy) - dsk.z;
+}
+
+// box sdf
+float sdBox(vec2 p, vec4 box) {
+    vec2 q = abs(p-box.xy) - box.zw;
+    return length(max(q,0.));
+}
+
+// disk gradient/normal
+vec2 gDisk(vec2 p, vec3 dsk) {
+    return normalize(p - dsk.xy);
+}
+
+// box gradient/normal
+// thanks to iq: https://iquilezles.org/articles/distgradfunctions2d/
+vec2 gBox(vec2 p, vec4 box) {
+    vec2 w = p - box.xy;
+    vec2 q = abs(w) - box.zw;
+    
+    float g = max(q.x,q.y);
+    vec2 s = sign(w);
+    
+    return s*(g>0. ? normalize(max(q,0.)) : 
+                     step(q.yx,q.xy));
+}
+
+// ray disk intersection
+// thanks to iq: https://iquilezles.org/articles/intersectors/
+float diskIntersect(vec2 ro, vec2 rd, vec3 dsk) {
+    vec2 oc = ro - dsk.xy;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - dsk.z*dsk.z;
+    float h = b*b - c;
+    
+    if (h<0.) return -1.;
+    h = sqrt(h);
+    return c<0. ? -b+h : -b-h;
+}
+
+// ray box intersection
+// thanks to iq: https://iquilezles.org/articles/intersectors/
+float boxIntersect(vec2 ro, vec2 rd, vec4 box) {
+    vec2 oc = ro - box.xy;
+    vec2 m = 1./rd;
+    vec2 n = -m*oc;
+    vec2 k = abs(m)*box.zw;
+	
+    vec2 t1 = n - k;
+    vec2 t2 = n + k;
+
+	float tN = max(t1.x, t1.y);
+	float tF = min(t2.x, t2.y);
+	
+	if(tN>tF || tF<0.) return -1.;
+    
+    vec2 q = abs(oc) - box.zw;
+    float g = max(q.x, q.y);
+    
+    return g>0.?tN:tF;
+}
+
+// objects
+#define NUM_DISCS 6
+vec3 discs[NUM_DISCS];
+
+#define NUM_BOXES 3
+vec4 boxes[NUM_BOXES];
+
+void createScene(void) {
+    // lights angle
+    #ifdef PROGRESSIVE
+    float an = 1.9;
+    #else
+    float an = 1.+.2*sample;
+    #endif
+    //lights position
+    vec2 m = vec2(1.25,.7)*vec2(sin(an),cos(an));
+    
+    // setup scene
+    discs[0] = vec3(0,.1,.2);
+    discs[1] = vec3(.6,0,.125);
+    discs[2] = vec3(-.6,-.3,.18);
+    discs[3] = vec3(-m,.05);
+    discs[4] = vec3(m,.05);
+    discs[5] = vec3(-.15,-.3,.1);
+    
+    boxes[0] = vec4(0,.55,.2,.02);
+    boxes[1] = vec4(.25,-.5,.1,.15);
+    boxes[2] = vec4(-.6,.25,.15,.15);
+}
+
+// intersection function
+float intersect(vec2 ro, vec2 rd, float tmax, out vec2 on, out float oid) {
+    float t = tmax; // final distance
+    
+    // discs
+    for (int i=0; i<NUM_DISCS; i++) {
+        vec3 dsk = discs[i]; // current disk
+        float h = diskIntersect(ro, rd, dsk); // disk distance
+        
+        if (h>0. && h<t) {
+            on = gDisk(ro, dsk); // normal
+            oid = float(i); // disk index
+            t = h;
+        }
+    }
+    
+    // boxes
+    for (int i=0; i<NUM_BOXES; i++) {
+        vec4 box = boxes[i]; // current box
+        float h = boxIntersect(ro, rd, box); // box distance
+        
+        if (h>0. && h<t) {
+            on = gBox(ro, box); // normal
+            oid = float(NUM_DISCS + i); // box index
+            t = h;
+        }
+    }
+    
+    return t<tmax ? t : -1.;
+}
+
+// scene sdf
+float map(vec2 p) {
+    float d = 1e10; // final distance
+    
+    for (int i=0; i<NUM_DISCS; i++) {
+        vec3 dsk = discs[i]; // current disk
+        float h = sdDisk(p, dsk); // disk distance
+        d = min(d, h);
+    }
+    
+    for (int i=0; i<NUM_BOXES; i++) {
+        vec4 box = boxes[i]; // current box
+        float h = sdBox(p, box); // box distance
+        d = min(d, h);
+    }
+    
+    return d;
+}
+
+// material function
+void getMaterial(float id, out vec3 matCol, out float emit, out float metal) {
+    emit = 0.;
+    metal = 0.;
+    if (id<.5) {
+        matCol = .7*vec3(.7,1,.2);
+    } else if (id<1.5) {
+        matCol = .8*vec3(.6,.3,1);
+    } else if (id<2.5) {
+        matCol = vec3(1,.6,.3);
+        metal = 1.;
+    } else if (id<3.5) {
+        matCol = 3.*vec3(1,.15,.04);
+        emit = 1.;
+    } else if (id<4.5) {
+        matCol = 3.*vec3(.2,.5,1);
+        emit = 1.;
+    } else if (id<5.5) {
+        matCol = vec3(1);
+    } else if (id<6.5) {
+        matCol = vec3(.7);
+        emit = 1.;
+    } else if (id<7.5) {
+        matCol = vec3(1);
+        metal = 1.;
+    } else if (id<8.5) {
+        matCol = vec3(1);
+    }
+}
+
+// rendering function
+vec3 render(vec2 p) {    
+    vec3 col = vec3(1);
+    
+    vec2 ro = p; // ray origin
+    vec2 rd = uniformVector(); // ray direction
+    
+    int i = 0; // bounces count
+    for (;i<GI_BOUNCES; i++) { // pathtracing loop
+        vec2 n; float id; // normal and object id
+        float t = intersect(ro, rd, 1e10, n, id); // distance
+        
+        if (t<0.) return vec3(0); // background
+        vec2 p = ro + rd*t; // hit point
+
+        // material
+        vec3 matCol; float emit, metal;
+        getMaterial(id, matCol, emit, metal);
+        
+        col *= matCol;
+        if (emit>.5) break; // emission
+        
+        ro = p+n*.001; // new ray origin
+        // new ray direction
+        rd = mix(normalize(n + randomVector()), // diffuse brdf
+                 reflect(rd, n), // glossy brdf
+                 metal);
+    }
+    
+    // wood texture
+    float h = map(p); // scene sdf
+    if (h>0.) col *= texture(tex01, p*2.).rgb;
+    
+    // output
+    return i == GI_BOUNCES ? vec3(0) : col;
+}
+
+void main()
+{   
+   	
+    createScene();
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    
+    vec3 tot = vec3(0); // accumulated color
+    
+    for (int i=0; i<SPP; i++) {
+        // init randoms seeds
+        seed = float(i)+sample + hash(fragCoord/viewPort.xy);
+        
+        vec2 off = vec2(hash(), hash()) - .5; // AA offset
+        // pixel coordinates centered at the origin
+        vec2 p = 1.5*(fragCoord+off - .5*viewPort.xy) / viewPort.y;
+
+        vec3 col = render(p); // render
+        tot += col;
+    }
+    tot /= float(SPP);
+    outColor = vec4(tot, 1);
+
+    // accumulation
+    
+    // vec4 data = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    
+    // #ifdef PROGRESSIVE
+    // fragColor = vec4(tot,1) + data;
+    // #else
+    // fragColor = mix(vec4(tot,1), data, 
+    //             iFrame==0 ? 0. : FRAME_BLEND);
+    // #endif
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,223 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			
+			
+		#define MAXDIST 150.
+		#define GIFLENGTH 1.570795
+
+		struct Ray {
+			vec3 ro;
+		    vec3 rd;
+		};
+		    
+		void pR(inout vec2 p, float a) {
+			p = cos(a)*p + sin(a)*vec2(p.y, -p.x);
+		}
+
+		float length6( vec3 p )
+		{
+			p = p*p*p; p = p*p;
+			return pow( p.x + p.y + p.z, 1.0/6.0 );
+		}
+
+		float fractal(vec3 p)
+		{
+		    p=p.yxz;
+		    p.x += 6.;
+
+		    float scale = 1.25;
+		   
+		    const int iterations = 30;
+
+		    float time = iTime;
+		    float a = time;
+		    
+			float l = 0.;
+			float len = length(p);
+		    //vec2 m = iMouse.xy / iResolution.xy;
+		    vec2 f = vec2(0.1,0.1);
+			vec2 m = vec2(.525,0.6);
+
+		    pR(p.yz,.5);
+		    
+		    pR(p.yz,m.y*3.14);
+		    
+		    for (int i=0; i<iterations; i++) {
+				p.xy = abs(p.xy);
+				p = p*scale + vec3(-3.,-1.5,-.5);
+		        
+				pR(p.yz,m.y*3.14 + sin(iTime*4. + len)*f.x);
+
+		        pR(p.xy,m.x*3.14 + cos(iTime*4. + len)*f.y);
+				
+		        l=length6(p);
+			}
+			return l*pow(scale, -float(iterations))-.25;
+		}
+
+		vec2 map(vec3 pos) {
+
+		    return vec2(fractal(pos), 0.);
+		}
+
+		vec2 march(Ray ray) 
+		{
+		    const int steps = 90;
+		    const float prec = 0.001;
+		    vec2 res = vec2(0.);
+		    
+		    for (int i = 0; i < steps; i++) 
+		    {        
+		        vec2 s = map(ray.ro + ray.rd * res.x);
+		        
+		        if (res.x > MAXDIST || s.x < prec) 
+		        {
+		        	break;    
+		        }
+		        
+		        res.x += s.x;
+		        res.y = s.y;
+		        
+		    }
+		   
+		    return res;
+		}
+
+		vec3 vmarch(Ray ray, float dist, vec3 normal)
+		{   
+		    vec3 p = ray.ro;
+		    vec2 r = vec2(0.);
+		    vec3 sum = vec3(0);
+		  	vec3 c = vec3(1.+dot(ray.rd,normal));
+		    for( int i=0; i<20; i++ )
+		    {
+		        r = map(p);
+		        if (r.x > .01) break;
+		        p += ray.rd*.005;
+		        vec3 col = c;
+		        col.rgb *= smoothstep(.0,0.1,-r.x);
+		        sum += abs(col);
+		    }
+		    return sum;
+		}
+
+
+		vec3 calcNormal(vec3 pos) 
+		{
+			const vec3 eps = vec3(0.005, 0.0, 0.0);
+		                          
+		    return normalize(
+		        vec3(map(pos + eps).x - map(pos - eps).x,
+		             map(pos + eps.yxz).x - map(pos - eps.yxz).x,
+		             map(pos + eps.yzx).x - map(pos - eps.yzx).x ) 
+		    );
+		}
+
+		vec3 render(Ray ray) 
+		{
+		    vec3 col = vec3(0.);
+			vec2 res = march(ray);
+		   
+		    if (res.x > MAXDIST) 
+		    {
+		        return col;
+		    }
+		    
+		    vec3 p = ray.ro+res.x*ray.rd;
+		    vec3 normal = calcNormal(p);
+		    vec3 pos = p;
+		    ray.ro = pos;
+		   	col = vec3(1.+dot(ray.rd,normal))*1.2;
+		    
+		    col = mix(col, vec3(0.), clamp((res.x*res.x)/80., 0., 1.));
+		   	return col;
+		}
+		mat3 camera(in vec3 ro, in vec3 rd, float rot) 
+		{
+			vec3 forward = normalize(rd - ro);
+		    vec3 worldUp = vec3(sin(rot), cos(rot), 0.0);
+		    vec3 x = normalize(cross(forward, worldUp));
+		    vec3 y = normalize(cross(x, forward));
+		    return mat3(x, y, forward);
+		}
+
+		void main()
+		{
+			vec2 fragCoord = jit_in.texcoord * iResolution;
+			vec2 uv = fragCoord.xy / iResolution.xy;
+		    uv = uv * 2.0 - 1.0;
+		    uv.x *= iResolution.x / iResolution.y;
+		    
+		    vec3 camPos = vec3(0. + sin(iTime*4.)*0.045, .5, 10.+ cos(iTime*4.)*0.055);
+		    vec3 camDir = camPos + vec3(-.1, .1 + cos(iTime*4.)*0.015, -1. );
+		    mat3 cam = camera(camPos, camDir, 0.);
+		    
+		        vec2 polarUv = (uv * 2.0 - 1.0);
+
+		    float angle = atan(polarUv.y, polarUv.x);
+		    
+		    vec3 rayDir = cam * normalize( vec3(uv, 1. + cos(iTime*4.)*0.05) );
+		    
+		    Ray ray;
+		    ray.ro = camPos;
+		    ray.rd = rayDir;
+		    
+		    vec3 col = render(ray);
+		    
+			fragColor = vec4(col,1.0);
+		}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

@@ -1,0 +1,82 @@
+<jittershader name="fill-flat-quads">
+	<description>Default Shader </description>
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="oldPos" type="vec3" state="NORMAL" />
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<language name="glsl" version="1.5">
+		<bind param="position" program="vp" />
+		<bind param="oldPos" program="vp" />
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<program name="vp" type="vertex">
+<![CDATA[
+#version 330 core
+uniform mat4 modelViewProjectionMatrix;
+in vec3 position;
+in vec4 oldPos;
+
+out jit_PerVertex {
+	flat vec4 color;
+	flat vec4 oldPos;	
+} jit_out;
+
+vec2 scale(vec2 pos)
+{
+	pos /= vec2(1919., 1079.);
+	pos *= vec2(2.945519, 1.656854);
+	pos -= vec2(1.472759, 0.828427);
+	return pos;
+}
+
+void main() {	
+	gl_Position = modelViewProjectionMatrix * vec4(scale(position.xy), 0., 1.);	
+	jit_out.oldPos = modelViewProjectionMatrix * vec4(scale(oldPos.xy), 0., 1.);
+	jit_out.color = vec4(1., 1., 1., 0.5);
+}
+]]>
+		</program>
+		<program name="gp" vertices_out="4" input_type="points" output_type="line_strip" type="geometry">
+<![CDATA[
+#version 330 core
+
+layout (points) in;
+layout (line_strip, max_vertices=4) out;
+
+in jit_PerVertex {
+	flat vec4 color;
+	flat vec4 oldPos;	
+} jit_in[];
+
+out jit_PerVertex {
+	flat vec4 color;	
+};
+
+void main() {
+	gl_Position = gl_in[0].gl_Position;
+	color = jit_in[0].color;
+	EmitVertex();
+
+	gl_Position = jit_in[0].oldPos;
+	color = jit_in[0].color;
+	EmitVertex();
+	
+	EndPrimitive();
+}
+]]>
+		</program>
+		<program name="fp" type="fragment">
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	flat vec4 color;
+} jit_in;
+
+out vec4 color;
+
+void main() {
+	color = jit_in.color;
+}	
+]]>
+		</program>
+	</language>
+</jittershader>

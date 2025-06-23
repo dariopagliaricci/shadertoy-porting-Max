@@ -1,0 +1,224 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+    <param name="iTime" type="float" default="0.0" />
+    <param name="iChannel0" type="int" default="0" />
+    <param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+#version 330 core
+
+in vec3 pos;
+in vec2 uv;
+
+out jit_PerVertex {
+	vec2 uv;
+
+} jit_out;
+uniform mat4 MVP;
+
+void main(void) {
+	gl_Position = MVP*vec4(pos, 1.);
+	jit_out.uv = uv;
+}
+]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+// thanks to @fizzer for the octahedron raycasting algorithm
+// https://www.shadertoy.com/view/4lcfDB
+
+#define AA 2 // antialiasing
+#define PI 3.141592
+#define TAU 6.283185
+#define MAX_DIST 24.
+
+// rotation function
+mat2 rot(float a) {
+    float s = sin(a), c = cos(a);
+    return mat2(c, -s, s, c);
+}
+
+// terrain
+float map(vec3 p) {
+    p += vec3(0,-.5,1);
+    return sin(p.x-cos(p.z))-sin(cos(p.z)-p.y)-sin(p.z+sin(p.x));
+}
+
+// intersect the scene
+float intersect(vec3 ro, vec3 rd, out vec3 n) {
+    vec3 p = ro;
+
+    for(int i=0; i<512; i++) {
+        vec3 q = fract(p)-.5; 
+        vec3 r = abs(q); 
+        vec3 s = step(r.yzx,r)*step(r.zxy,r) * sign(q); 
+        vec3 c = floor(p)+.5 + s*.5;
+        
+        if(map(c) > .65) break;
+
+        vec3 na = s + s.yzx;
+        vec3 nb = s - s.yzx;
+        vec3 nc = s + s.zxy;
+        vec3 nd = s - s.zxy;
+
+        float da = dot(rd,na);
+        float db = dot(rd,nb);
+        float dc = dot(rd,nc);
+        float dd = dot(rd,nd);
+
+        float ta = (sign(da)*.5 - dot(ro-c, na)) / da;
+        float tb = (sign(db)*.5 - dot(ro-c, nb)) / db;
+        float tc = (sign(dc)*.5 - dot(ro-c, nc)) / dc;
+        float td = (sign(dd)*.5 - dot(ro-c, nd)) / dd;
+
+        float t = min(ta, min(tb, min(tc, td)));
+        p = ro + rd * (t + 1e-3);
+        if(t > MAX_DIST) break;
+        
+        vec2 u = vec2(dot(p-c,s.yzx), dot(p-c,s.zxy));
+        vec2 v = abs(u);
+        u = step(v.yx, v) * sign(u);
+        n = -normalize(u.x*s.yzx + u.y*s.zxy + sign(dot(p-c,s))*s);
+    }
+    float t = length(p - ro);
+    return t;
+}
+
+vec3 background(vec3 rd) {
+    return mix(vec3(1), vec3(.6,.8,1), .5+.5*rd.y);
+}
+
+// rendering
+vec3 render(vec3 ro, vec3 rd, float time) {
+    vec3 col = background(rd);
+    vec3 n;
+    float t = intersect(ro, rd, n);
+    if (t < MAX_DIST) {
+        // color and lighting
+        vec3 p = ro + rd * t;
+        vec3 ref = reflect(rd, n);
+        
+        // get octahedron coordinates
+        vec3 q = fract(p)-.5; 
+        vec3 r = abs(q); 
+        vec3 s = step(r.yzx,r)*step(r.zxy,r) * sign(q); 
+        vec3 c = floor(p)+.5 + s*.5;
+        
+        // octahedron edges
+        vec3 b = vec3(abs(dot(p-c,s)), abs(dot(p-c,s.yzx + s.zxy)), abs(dot(p-c,s.yzx - s.zxy)));
+        
+        float edg = b.x*b.y*b.z;
+                      
+        float lin = smoothstep(.01,.02,b.x)*
+        			smoothstep(.01,.02,b.y)*
+        			smoothstep(.01,.02,b.z);
+                    
+        float focc = smoothstep(-.01,.02,edg); // fake occlusion
+        
+        // apply color
+        float f = .5+.5*sin(c.x*7. + 5. + c.y+c.z*3.);
+        vec3 mat = mix(vec3(1), mix(vec3(1,.6,.3), vec3(.5,.7,1), step(f,.25)), step(f,.75));
+        
+        if (f > .99) // lights
+            mat = smoothstep(0.,.05,edg)*200.*vec3(.2,.5,1);
+        
+        // apply texture
+        vec3 xy = texture(iChannel1, p.xy*2.).rgb;
+        vec3 xz = texture(iChannel1, p.xz*2.).rgb;
+        vec3 yz = texture(iChannel1, p.yz*2.).rgb;
+        vec3 m = abs(n);
+        vec3 tex = yz*m.x + xz*m.y + xy*m.z;
+        
+        vec3 lig = normalize(ro-p); // light direction
+        float dif = clamp(dot(n ,lig), 0., 1.); // diffuse lighting
+        float occ = .5+.5*n.y; // fake occlusion
+        float spe = clamp(dot(n, ref), 0., 1.); // specular light
+         
+        col = vec3(0);
+        col += mat*tex*.2*(dif*occ*focc+vec3(.05,.1,.15)*occ*focc); // base layer
+        col += 2.*focc*mat*tex*tex*vec3(1,.5,.3)*pow(spe, 8.); // orange reflection
+        col += tex*mat*pow(spe, 64.)*dif; // highlight
+        col *= mix(.2,1.,lin); // dark edges
+                
+        // fog
+        float fog = 1.-exp(-.005*t*t);
+        col = mix(col, background(rd), fog*vec3(.4,.6,1));
+    }
+
+    return col;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec3 tot = vec3(0);
+    for (int i = 0; i < AA; i++) {
+    for (int j = 0; j < AA; j++) {
+        vec2 o = vec2(i, j) / float(AA) - .5;
+        
+        // motion blur
+        float mb = float(i*AA+j) + texelFetch(iChannel0, ivec2(fragCoord)&1023, 0).x;
+        float time = iTime - .04*mb/float(AA*AA);
+        
+        // setup camera
+        vec3 ro = vec3(0,0,-.3);
+        
+        vec3 rd = vec3(2.*(fragCoord+o) - viewPort.xy, viewPort.y);
+        rd = normalize(vec3(rd.xy, sqrt(max(rd.z*rd.z - dot(rd.xy,rd.xy)*.2, 0.))));
+        
+        rd.yz *= rot(.5*sin(.3*PI*time));
+        rd.xz *= rot(.5*PI-.3*sin(PI*.6*time));
+        ro.x -= 4.*time;
+        
+        vec3 col = render(ro, rd, time); // render
+        
+        tot += clamp(col,0.,1.);
+    }
+    }
+    tot /= float(AA*AA);
+    
+    tot = pow(tot, vec3(.4545)); // gamma correction
+    // contrast
+    float f0 = .3;
+    tot = tot*(1.+f0)-.5*f0;
+    // vignetting
+    
+    vec2 p = fragCoord / viewPort.xy;
+    tot *= clamp(pow(80. * p.x*p.y*(1.-p.x)*(1.-p.y), .2), 0., 1.);    
+                    
+    outColor = vec4(tot,1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

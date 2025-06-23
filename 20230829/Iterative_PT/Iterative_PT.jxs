@@ -1,0 +1,475 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+	<param name="iFrame" type="int" default="1" />
+	<param name="iTime" type="float" default="0." />
+	<param name="iMouse" type="vec3" default="0.0, 0.0, 0.0" />
+	<param name="feedbackTex" type="int" default="1" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="feedbackTex" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec3 iMouse;
+
+uniform sampler2DRect feedbackTex;
+
+//https://www.shadertoy.com/view/Mltcz2
+
+#define EMISSIVE 0
+#define DIELECTRIC 1
+#define METALIC 2
+#define GLASS 3
+#define TEST 10
+
+
+float skyIntensity = 0.5;//night = 0.05 day = 2.0
+float aperture = 0.05;//controls the amount of defocusing by changing the radius of the "aperture" values above 0.2 are high and 0 disables the effect
+int pathsPerFrame = 8;//the number of paths traced per pixle per frame
+int maxDepth = 16;//max number of ray bounces per path
+float t_max = 4294967296.0;
+float t_min = 0.0039;
+
+struct Material
+{
+    vec3 albedo;
+    float roughness;
+    int type;
+};
+
+struct Ray{
+    vec3 origin;
+    vec3 direction;
+    vec3 attenuation;
+    vec3 radiance;
+    float rand;
+    float t;
+    bool done;
+};
+    
+
+struct Sphere{
+    vec3 center;
+    float radius;
+    Material mat;
+};
+    
+struct Hit
+{
+  vec3 normal;
+  float t;
+  bool hit;
+  Material mat;
+};
+    
+//the objects in the scene
+//Sphere sphere0 = Sphere(vec3(1000.0,1000.0,0.25),100.0,Material(vec3(1.0,0.8,0.7)*1000.0,0.0,0));//chnages sphere light ot be more sun like
+Sphere sphere0 = Sphere(vec3(0.0,-0.25,0.25),0.25,Material(vec3(1.0,0.8,0.7)*100.0,0.0,EMISSIVE));
+Sphere sphere1 = Sphere(vec3(1.0,0.0,0.40),0.5,Material(vec3(0.05),0.05,DIELECTRIC));
+Sphere sphere2 = Sphere(vec3(-1.0,0.0,0.4),0.5,Material(vec3(0.9,0.2,0.05),0.3,DIELECTRIC));
+Sphere sphere3 = Sphere(vec3(0.51,0.0,-0.5),0.5,Material(vec3(1.0,0.766,0.336),0.05,METALIC));
+Sphere sphere4 = Sphere(vec3(-0.51,0.0,-0.5),0.5,Material(vec3(0.913, 0.921, 0.925),0.7,METALIC));
+Sphere sphere5 = Sphere(vec3(0.0,-100.5,0.0),100.0,Material(vec3(0.5),1.0,DIELECTRIC));
+Sphere sphere6 = Sphere(vec3(0.55,-0.4,0.6),0.1,Material(vec3(0.0),0.0,GLASS));
+Sphere sphere7 = Sphere(vec3(-0.5,-0.3,0.8),0.2,Material(vec3(0.0),0.0,GLASS));
+
+Sphere sphereBounding0 = Sphere(vec3(0.0,0,0.0),2.0,Material(vec3(0.0),1.0,EMISSIVE));
+
+    
+//the randomization code was found on a forum about generating random numbers in glsl    
+// A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm.
+uint hash( uint x ) {
+    x += ( x << 10u );
+    x ^= ( x >>  6u );
+    x += ( x <<  3u );
+    x ^= ( x >> 11u );
+    x += ( x << 15u );
+    return x;
+}
+
+
+// Compound versions of the hashing algorithm I whipped together.
+uint hash( uvec2 v ) { return hash( v.x ^ hash(v.y)                         ); }
+uint hash( uvec3 v ) { return hash( v.x ^ hash(v.y) ^ hash(v.z)             ); }
+uint hash( uvec4 v ) { return hash( v.x ^ hash(v.y) ^ hash(v.z) ^ hash(v.w) ); }
+
+
+
+// Construct a float with half-open range [0:1] using low 23 bits.
+// All zeroes yields 0.0, all ones yields the next smallest representable value below 1.0.
+float floatConstruct( uint m ) {
+    const uint ieeeMantissa = 0x007FFFFFu; // binary32 mantissa bitmask
+    const uint ieeeOne      = 0x3F800000u; // 1.0 in IEEE binary32
+
+    m &= ieeeMantissa;                     // Keep only mantissa bits (fractional part)
+    m |= ieeeOne;                          // Add fractional part to 1.0
+
+    float  f = uintBitsToFloat( m );       // Range [1:2]
+    return f - 1.0;                        // Range [0:1]
+}
+
+
+// Pseudo-random value in half-open range [0:1].
+float random( float x ) { return floatConstruct(hash(floatBitsToUint(x))); }
+float random( vec2  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float random( vec3  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float random( vec4  v ) { return floatConstruct(hash(floatBitsToUint(v))); }    
+    
+//from raytracing in one weekend
+vec3 randv(float n)
+{
+	vec3 v = 2.0*vec3(random(n+1.0),random(n+2.0),random(n+3.0))-1.0;
+    
+    do{ 
+        v = 2.0*vec3(random(v.x),random(v.y),random(v.z))-1.0;     
+    }while(length(v) >= 1.0);
+    
+    return v;
+}
+
+
+vec3 backgroundColor(vec3 dir){
+    vec3 unit_dir = normalize(dir);
+    float t = 0.5*(unit_dir.y+1.0);
+    return ((1.0-t)*vec3(1.0)+t*vec3(0.5,0.7,1.0))*skyIntensity;
+}
+
+
+Hit traceSphere(Ray ray,Sphere sphere)
+{
+   	float a = dot(ray.direction,ray.direction);
+    float b = dot(ray.direction,ray.origin-sphere.center)*2.0;
+    float c = dot(ray.origin-sphere.center,ray.origin-sphere.center)-sphere.radius*sphere.radius;
+    float d = b*b-4.0*a*c;
+    Hit hit;
+    
+    if(d >= 0.0)
+    {
+        hit.t = (-b-sqrt(d))/(2.0*a);
+      	if(hit.t < t_max && hit.t > t_min)
+        {
+        	hit.normal = normalize((ray.origin+ray.direction*hit.t)-sphere.center);
+        	hit.mat = sphere.mat;
+        	hit.hit = true;
+        	return hit;
+       }
+        
+        hit.t = (-b+sqrt(d))/(2.0*a);
+        if(hit.t < t_max && hit.t > t_min)
+        {
+        	hit.normal = normalize((ray.origin+ray.direction*hit.t)-sphere.center);
+        	hit.mat = sphere.mat;
+        	hit.hit = true;
+        	return hit;
+        }
+    }
+    
+	hit.hit = false;
+	return hit;   
+}
+
+Hit compareHit(Hit hit, Hit newHit)
+{
+    if(newHit.hit)
+    	if(newHit.t < hit.t )return newHit;
+        
+   	return hit;
+}
+
+Hit traceScene(Ray ray)
+{
+    Hit hit;
+    hit.t = t_max;
+   
+   if(traceSphere(ray,sphereBounding0).hit == true)
+   {
+    	hit = compareHit(hit,traceSphere(ray,sphere0));
+    	hit = compareHit(hit,traceSphere(ray,sphere1));
+    	hit = compareHit(hit,traceSphere(ray,sphere2));
+    	hit = compareHit(hit,traceSphere(ray,sphere3));
+    	hit = compareHit(hit,traceSphere(ray,sphere4));
+   		hit = compareHit(hit,traceSphere(ray,sphere6));
+     	hit = compareHit(hit,traceSphere(ray,sphere7));
+   }
+    
+    hit = compareHit(hit,traceSphere(ray,sphere5));
+   
+
+    return hit;   
+}
+
+float schlick(float cosine,float ref_idx)
+{
+    float r0 = (1.0-ref_idx) / (1.0+ref_idx);
+    r0 = r0*r0;
+    return r0 + (1.0-r0)*pow((1.0-cosine),5.0);
+}
+
+struct Refracted{
+    bool did;
+    vec3 direction;
+};
+
+Refracted refract0(vec3 v,vec3 n, float ni_nt)
+{
+    Refracted ref;
+    v = normalize(v);
+    float dt = dot(v,n);
+    float disc = 1.0-ni_nt*ni_nt*(1.0-dt*dt);
+    if(disc > 0.0){
+        ref.direction = ni_nt*(v-n*dt)-n*sqrt(disc);
+        ref.did = true;
+    }
+    else ref.did = false;
+    
+    return ref;
+    	
+}
+
+Ray castRay(Ray ray)
+{
+    Hit hit = traceScene(ray);
+    ray.t = hit.t;
+    float roughness = hit.mat.roughness*hit.mat.roughness;
+    
+    if(hit.hit)
+    {     
+        ray.radiance = vec3(0.0);
+        ray.rand = random(ray.rand);   
+        
+        if(hit.mat.type == DIELECTRIC)
+        {     
+            float ref_idx = 1.45;
+            float cosine = -dot(ray.direction,mix(hit.normal,-ray.direction,roughness))/length(ray.direction);
+            float schlick = schlick(cosine,ref_idx);
+            
+            if(ray.rand > schlick)
+            {   		
+        		ray.attenuation = ray.attenuation*hit.mat.albedo;
+        		ray.origin = ray.t*ray.direction+ray.origin;
+				ray.direction = normalize(hit.normal+randv(ray.rand));  			    	
+            }
+            else
+            {
+                ray.attenuation = ray.attenuation*vec3(1.0);
+        		ray.origin = ray.t*ray.direction+ray.origin;
+				ray.direction = normalize(reflect(ray.direction,hit.normal)+randv(ray.rand)*roughness);
+                ray.done = dot(ray.direction,hit.normal)<=0.0;
+            }         
+            return ray;
+        }
+        
+        else if(hit.mat.type == METALIC)
+        {
+            //float ref_idx = 1.5;
+			//float cosine = -dot(ray.direction,mix(hit.normal,-ray.direction,roughness))/length(ray.direction);
+            //float schlick = schlick(cosine,ref_idx)-schlick(1.0,ref_idx);
+            
+            ray.attenuation = ray.attenuation*hit.mat.albedo;
+        	ray.origin = ray.t*ray.direction+ray.origin;
+			ray.direction = normalize(reflect(ray.direction,hit.normal)+randv(ray.rand)*roughness);
+            ray.done = dot(ray.direction,hit.normal)<=0.0;
+            
+            return ray;
+        }
+        
+        //The glass code is from raytracing in a weekend
+        //I still have trouble wrapping my head around the finer details of refraction
+        else if(hit.mat.type == GLASS)
+        {        
+            float ref_idx = 1.5;
+            float cosine;
+            
+            float ni_nt;
+            
+            vec3 normal;
+            
+            if(dot(ray.direction,hit.normal) > 0.0)
+            {
+				normal = -hit.normal;
+               	ni_nt = ref_idx;
+                cosine = ref_idx*dot(ray.direction,hit.normal)/length(ray.direction);
+            }
+            else
+            {
+                normal = hit.normal;
+                ni_nt = 1.0/ref_idx;
+                cosine = -dot(ray.direction,hit.normal)/length(ray.direction);
+            }
+            
+            float schlick0;
+            Refracted ref = refract0(ray.direction,normal,ni_nt);
+            
+            if(ref.did)
+            {
+                schlick0 = schlick(cosine,ref_idx);
+            }
+            else
+            {  
+                schlick0 = 1.0;
+            }
+            
+            
+           	if(ray.rand > schlick0)
+            {  
+                ray.origin = ray.t*ray.direction+ray.origin;
+                ray.direction = normalize(ref.direction);  		    	
+            }
+            else
+            {
+                ray.attenuation = ray.attenuation*vec3(1.0);
+        		ray.origin = ray.t*ray.direction+ray.origin;
+				ray.direction = normalize(reflect(ray.direction,hit.normal));  
+
+            }
+            
+            return ray;
+        }
+        
+        
+        else if(hit.mat.type == EMISSIVE)
+        {                        
+        	float ref_idx = 1.5;
+			float cosine = -dot(ray.direction,mix(hit.normal,-ray.direction,roughness))/length(ray.direction);
+            float schlick = schlick(cosine,ref_idx);
+            
+            if(ray.rand > schlick)
+            {   	
+                ray.radiance = hit.mat.albedo; 			    	
+            }
+            else
+            {
+                ray.attenuation = ray.attenuation*vec3(1.0);
+        		ray.origin = ray.t*ray.direction+ray.origin;
+				ray.direction = normalize(reflect(ray.direction,hit.normal)+randv(ray.rand)*hit.mat.roughness);
+                
+                //return ray;
+            }     
+        }
+        
+        else if(hit.mat.type == TEST)
+        {                        
+        	float ref_idx = 1.5;
+			float cosine = -dot(ray.direction,mix(hit.normal,-ray.direction,roughness))/length(ray.direction);
+            float schlick = schlick(cosine,ref_idx)-schlick(1.0,ref_idx);
+            
+ 	
+           	ray.radiance = vec3(schlick); 			    	   
+        }  
+    }
+    
+    else
+    {
+       ray.radiance = backgroundColor(ray.direction);
+    }
+    
+    ray.done = true;
+    return ray;   
+}  
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 uv = (vec2(-1.0)+2.0*(fragCoord.xy / viewPort.xy)) * vec2(viewPort.x/viewPort.y,1.0);
+    
+    vec2 mouse = (iMouse.xy/viewPort.xy*2.0-vec2(1.0))*vec2(viewPort.x/viewPort.y,1.0)*2.0;
+    mouse.y = max(mouse.y,-0.5);
+    
+    mat3 rot = mat3(vec3(sin(mouse.x+3.14159/2.0),0,sin(mouse.x)),
+                    vec3(0,1,0),
+                    vec3(sin(mouse.x+3.14159),0,sin(mouse.x+3.14159/2.0)));
+    
+    
+    vec4 previous_color =texture(feedbackTex,(fragCoord.xy / viewPort.xy));
+  
+    vec3 color = vec3(0.0); 
+    
+    
+    float focal = (iMouse.y/viewPort.y)*2.0+2.0;
+    
+    Ray ray;
+    
+    //int maxDepth = min(int(floor(iTime/2.0)),20);
+    
+    for(int path = 0; path < pathsPerFrame; path++)
+    {
+        vec2 offset0 =randv(random(vec4(uv,iFrame,path))).xy*aperture;
+        vec2 offset1 = (2.0*vec2(random(vec4(uv,path,iFrame)),random(vec4(uv,path+pathsPerFrame,iFrame)))-1.0)/viewPort.xy*vec2(viewPort.x/viewPort.y,1.0);
+              	
+        ray.direction = rot*normalize(vec3(uv-offset0+offset1,-focal));
+       // ray.direction = rot*normalize(vec3(uv*focal/2.5-offset0+offset1,-focal));//uncomment to changes focal plane without zoom
+    	ray.origin = rot*vec3(offset0+offset1,3);
+    	ray.attenuation = vec3(1.0);
+    	ray.rand = random(vec4(uv,path,iTime));
+   		ray.done = false;
+  	
+    	for(int depth = 0; depth < maxDepth && !ray.done ;depth++)
+    	{
+    	   ray = castRay(ray);
+    	}
+    	
+		color += ray.radiance*ray.attenuation;
+    }
+    
+    color/=float(pathsPerFrame);
+    
+             
+   	float temp = previous_color.w+1.0;
+    
+    if(iMouse.z > 0.0 )temp = 1.0;   
+    
+    float mixf = 1.0/temp;
+	
+	outColor =  vec4(mix(color,previous_color.rgb,1.0-mixf),temp) ;
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

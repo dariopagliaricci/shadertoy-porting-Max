@@ -1,0 +1,119 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+vec2 N22 (vec2 p) {
+	vec3 a = fract(p.xyx*vec3(123.34, 234.34, 345.65));
+	a += dot(a, a+34.45);
+	return fract(vec2(a.x*a.y, a.y*a.z));
+}
+
+void main(void) {
+
+vec2 uv = jit_in.uv * 2 - 1;
+float ratio = viewPort.x / viewPort.y;
+uv.x *= ratio;
+
+float m = 0.;
+float t = iTime * .2;
+
+float minDist = 100.;
+
+vec3 col = vec3(0.0); 
+
+if(false){
+for(float i=0.; i<50.; i++){
+	vec2 n = N22(vec2(i));
+	vec2 p = sin(n*t);
+
+	float dist = length(uv-p);
+	m += smoothstep(.02, .01, dist);
+
+	if(dist<minDist){
+		minDist = dist;
+	}
+}
+} else {
+	uv *= 3.;
+	vec2 gridUV = fract(uv) - .5;
+	vec2 id = floor(uv);
+	vec2 cellId = vec2(0.0);
+
+	for (float y=-1.; y<=1.; y++){
+		for (float x=-1.; x<=1.; x++){
+			vec2 offset = vec2(x, y);
+
+			vec2 n = N22(vec2(id+offset));
+			vec2 p = offset+sin(n*t)*.5;
+			p -= gridUV;	
+			float eucDist = length(p);//euclidean distance
+			float manDist = abs(p.x)+abs(p.y);//manhattan distance
+			float dist = mix(eucDist, manDist, sin(iTime*2.)*.5+.5);//interpolate
+
+			if(dist<minDist){
+			minDist = dist;
+			cellId = id+offset;
+			}		
+		}
+	}
+
+	col = vec3(minDist);
+	// col.rg = cellId*.1;
+}
+
+
+outColor = vec4(col, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

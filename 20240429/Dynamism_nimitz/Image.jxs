@@ -1,0 +1,147 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec2" default="0 0" />
+	<param name="iChannel1" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+	
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec2 iMouse;
+uniform sampler2D iChannel0;
+
+
+// Dynamism by nimitz (twitter: @stormoid)
+// https://www.shadertoy.com/view/MtKSWW
+// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
+// Contact the author for other licensing options
+
+/*
+	Mostly about showing divergence based procedural noise, the rest is just me
+	playing around to make it somewhat interesting to look at.
+
+	I stumbled upon this new form of noise while playing with noise gradients
+	and noise diverengence. First generate more or less standard fbm (with high decay)
+	then compute the gradient of that noise (either numerically or analytically) and 
+	then compute the divergence of the gradient and you get the noise you see here.
+
+	As you can see it has a very "DLA" look to it. It is also very easy to animate as
+	you can simply offset the noise fetches inside the initial fbm generation and produce
+	good looking animated noise. I did some	testing and the paremeters can be modified 
+	to result in a decent variety of output	noises, altough still somewhat similar than
+	what is seen here.
+
+	I have not tested it yet, but this method should extend to 3D without issues
+	and should result in interesting volumes.
+
+	This shader used to run at 60fps with webGL 1 but since webGL it seems
+	capped at 30fps on my test computer.
+*/
+
+const vec2 center = vec2(0,0);
+const int samples = 15;
+const float wCurveA = 1.;
+const float wCurveB = 1.;
+const float dspCurveA = 2.;
+const float dspCurveB = 1.;
+
+#define time iTime
+
+float wcurve(float x, float a, float b)
+{
+    float r = pow(a + b,a + b)/(pow(a, a)*pow(b, b));
+    return r*pow(x, a)*pow(1.0 - x, b);
+}
+
+float hash21(in vec2 n){ return fract(sin(dot(n, vec2(12.9898, 4.1414))) * 43758.5453); }
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 p = fragCoord/viewPort.xy;
+    vec2 mo = iMouse.xy/viewPort.xy;
+	
+    vec2 center= mo;
+    center = vec2(0.5,0.5);
+    
+    vec3  col = vec3(0.0);
+    vec2 tc = center - p;
+    
+    float w = 1.0;
+    float tw = 1.;
+    
+    float rnd = (hash21(p)-0.5)*0.75;
+    
+    //derivative of the "depth"
+    //time*2.1 + ((1.0+sin(time + sin(time*0.4+ cos(time*0.1)))))*1.5
+    float x = time;
+    float drvT = 1.5 * cos(x + sin(0.4*x + cos(0.1*x)))*(cos(0.4*x + cos(0.1*x)) * (0.4 - 0.1*sin(0.1*x)) + 1.0) + 2.1;
+    
+    
+    float strength = 0.01 + drvT*0.01;
+    
+    for(int i=0; i<samples; i++)
+    {
+        float sr = float(i)/float(samples);
+        float sr2 = (float(i) + rnd)/float(samples);
+        float weight = wcurve(sr2, wCurveA, wCurveB);
+        float displ = wcurve(sr2, dspCurveA, dspCurveB);
+        col += texture( iChannel0, p + (tc*sr2*strength*displ)).rgb*weight;
+        tw += .9*weight;
+    }
+    col /= tw;
+
+	outColor = vec4( col, 1.0 );
+}
+]]>
+</program>
+</language>
+</jittershader>

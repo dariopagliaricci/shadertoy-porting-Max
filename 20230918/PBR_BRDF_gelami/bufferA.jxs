@@ -1,0 +1,1696 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+
+	<param name="sample" type="float" default="0.0"/>
+    <param name="iFrame" type="int" default="0" />
+    
+    <param name="iChannelResolution0" type="vec2" state="TEXDIM1" />
+    <param name="iChannelResolution1" type="vec2" state="TEXDIM2" />
+    <param name="iChannelResolution2" type="vec2" state="TEXDIM3" />
+
+    <param name="tex01" type="int" default="0" />
+	<param name="envTex" type="int" default="1" />
+	<param name="tex02" type="int" default="2" />
+	<param name="iMouse" type="vec4"  default="0.0 0.0 0.0 0.0"  />
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+	
+
+		<bind param="iFrame" program="fp" />
+        <bind param="iChannelResolution0" program="fp" />
+        <bind param="iChannelResolution1" program="fp" />
+        <bind param="iChannelResolution2" program="fp" />
+
+		<bind param="tex01" program="fp" />
+        <bind param="envTex" program="fp" />
+		<bind param="tex02" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+// uniform float sample;
+uniform int iFrame;
+uniform sampler2D tex01;
+uniform vec2 iChannelResolution0;
+uniform vec2 iChannelResolution1;
+uniform vec2 iChannelResolution2;
+
+uniform samplerCube envTex;
+uniform sampler2D tex02;
+uniform vec4 iMouse;
+
+// Common // 
+
+// 0 : Grid of spheres
+// 1 : Single sphere
+#define SCENE 0
+
+// 0 : Fake iridescent-like color
+// 1 : Metallic colors
+// 2 : White
+#define COLOR 1
+
+// Shape type of depth of field
+// 0 : Circle
+// 1 : Square
+// 2 : Polygon
+// 3 : Star
+// 4 : Heart
+// 5 : Crescent
+// 6 : Cross + 4 Circles
+// 7 : Annulus / 2D Torus
+// 8 : E
+#define DOF_TYPE 3
+
+// Number of sides for Polygon and Star shapes
+#define DOF_SIDES 5
+
+#define DOF_STRENGTH 0.1
+
+#define DOF_AUTOFOCUS
+#define DOF_FOCUS_DISTANCE 0.75
+
+#define ENABLE_SKY_STARS
+#define SKYBOX_STRENGTH 1.0
+#define EXPOSURE 0.0
+
+#define BOUNCES 4
+
+// 0: No importance sampling
+// 1: D importance sampling
+// 2: VNDF importance sampling
+#define GGX_IMPORTANCE_SAMPLING 2
+
+// 0: No Multiscattering
+// 1: Approx
+// 2: Random walk // TODO: Brokey T_T
+#define GGX_MULTISCATTERING 1
+
+//#define WHITE_FURNACE_TEST
+//#define STATIC_CAM
+//#define NO_ACCUMULATE
+
+#define MIN_ROUGHNESS 0.045
+
+#define STEPS 256
+#define MAX_DIST 100.
+#define EPSILON 1e-3
+
+#define PI (acos(-1.))
+#define TAU (PI*2.)
+#define INV_PI (1.0 / PI)
+
+struct Ray
+{
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Material
+{
+    vec3 color;
+    vec3 emissive;
+    float roughness;
+    float metallic;
+    float transmission;
+    float clearcoat;
+    float ior;
+};
+
+struct HitInfo
+{
+    float t;
+    vec3 normal;
+    vec3 bumpNormal;
+    bool inside;
+};
+
+HitInfo NewHitInfo()
+{
+    return HitInfo(MAX_DIST, vec3(0), vec3(0), false);
+}
+
+Material DefaultMaterial()
+{
+    return Material(vec3(1), vec3(0), 1.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+bool noHit(HitInfo hit)
+{
+    return hit.t >= MAX_DIST;
+}
+
+vec3 reorientedNormalMapping(vec3 n1, vec3 n2)
+{
+    vec3 t = (n1*0.5+0.5) * vec3( 2,  2, 2) + vec3(-1, -1,  0);
+    vec3 u = (n2*0.5+0.5) * vec3(-2, -2, 2) + vec3( 1,  1, -1);
+    vec3 r = t*dot(t, u)/t.z - u;
+    return r*0.5 + 0.5;
+}
+
+bool sphereIntersect(Ray ray, vec3 center, float radius, inout HitInfo hit)
+{
+    vec3 oc = ray.origin - center;
+    float b = dot( oc, ray.direction );
+    float c = dot( oc, oc ) - radius * radius;
+    float h = b*b - c;
+    if( h < 0.0 || b > 0.0) return false;
+    h = sqrt( h );
+    vec2 t = vec2(-b-h, -b+h );
+    
+    bool inside = false;
+    if (t.x < 0.0)
+    {
+        t.x = t.y;
+        inside = true;
+    }
+    
+    if (t.x < hit.t)
+    {
+        hit.t = t.x;
+        hit.normal = normalize(ray.origin - center + ray.direction * hit.t);
+        if (inside) hit.normal = -hit.normal;
+        hit.inside = inside;
+        return true;
+    }
+    return false;
+}
+
+mat3 getCameraMatrix(vec3 ro, vec3 lo)
+{
+    vec3 cw = normalize(lo - ro);
+    vec3 cu = normalize(cross(cw, vec3(0, 1, 0)));
+    vec3 cv = cross(cu, cw);
+
+    return mat3(cu, cv, cw);
+}
+
+float saturate(float x) { return clamp(x, 0., 1.); }
+vec2 saturate(vec2 x) { return clamp(x, vec2(0), vec2(1)); }
+vec3 saturate(vec3 x) { return clamp(x, vec3(0), vec3(1)); }
+float sqr(float x) { return x*x; }
+vec2 sqr(vec2 x) { return x*x; }
+vec3 sqr(vec3 x) { return x*x; }
+
+float pow5(float x)
+{
+    float x2 = x * x;
+    return x2 * x2 * x;
+}
+
+float pow6(float x)
+{
+    float x2 = x * x;
+    return x2 * x2 * x2;
+}
+
+float luminance(vec3 col)
+{
+    return dot(col, vec3(0.2126, 0.7152, 0.0722));
+}
+
+mat2 rot2D(float a)
+{
+    float c = cos(a);
+    float s = sin(a);
+    return mat2(c, s, -s, c);
+}
+
+// https://iquilezles.org/articles/palettes/
+vec3 palette(float t)
+{
+    return .5 + .5 * cos(TAU * (vec3(1, 1, 1) * t + vec3(0, .33, .67)));
+}
+
+// Hash without Sine
+// https://www.shadertoy.com/view/4djSRW
+float hash12(vec2 p)
+{
+    vec3 p3  = fract(vec3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float hash13(vec3 p3)
+{
+    p3  = fract(p3 * .1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec2 hash22(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+vec2 hash23(vec3 p3)
+{
+    p3 = fract(p3 * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+
+vec3 hash33(vec3 p3)
+{
+    p3 = fract(p3 * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yxz+33.33);
+    return fract((p3.xxy + p3.yxx)*p3.zyx);
+
+}
+
+#define coprimes vec2(2,3)
+vec2 halton (vec2 s)
+{
+    vec4 a = vec4(1,1,0,0);
+    while (s.x > 0. && s.y > 0.)
+    {
+        a.xy = a.xy/coprimes;
+        a.zw += a.xy*mod(vec2(s),coprimes);
+        s = floor(s/coprimes);
+    }
+    return a.zw;
+}
+
+// RNG
+uint state;
+void initState(vec2 coord, int frame)
+{
+    state = uint(coord.x) * 1321u + uint(coord.y) * 4123u + uint(frame) * 4123u*4123u;
+}
+
+// From Chris Wellons Hash Prospector
+// https://nullprogram.com/blog/2018/07/31/
+// https://www.shadertoy.com/view/WttXWX
+uint hashi(inout uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+// Modified to work with 4 values at once
+uvec4 hash4i(inout uint y)
+{
+    uvec4 x = y * uvec4(213u, 2131u, 21313u, 213132u);
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    y = x.x;
+    return x;
+}
+
+// Modified to work with 4 values at once
+uvec3 hash3i(inout uint y)
+{
+    uvec3 x = y * uvec3(213u, 2131u, 21313u);
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    y = x.x;
+    return x;
+}
+
+float hash(inout uint x)
+{
+    return float( hashi(x) ) / float( 0xffffffffU );
+}
+
+vec2 hash2(inout uint x)
+{
+    return vec2(hash(x), hash(x));
+}
+
+vec3 hash3(inout uint x)
+{
+    return vec3( hash3i(x) ) / float( 0xffffffffU );
+    //return vec3(hash(x), hash(x), hash(x));
+}
+
+vec4 hash4(inout uint x)
+{
+    return vec4( hash4i(x) ) / float( 0xffffffffU );
+    //return vec4(hash(x), hash(x), hash(x), hash(x));
+}
+
+vec4 hash42(uvec2 p)
+{
+    uint x = p.x*2131u + p.y*2131u*2131u;
+    return vec4( hash4i(x) ) / float( 0xffffffffU );
+    //return vec4(hash(x), hash(x), hash(x), hash(x));
+}
+
+vec4 hash43(uvec3 p)
+{
+    uint x = p.x*461u + p.y*2131u + p.z*2131u*2131u;
+    return vec4( hash4i(x) ) / float( 0xffffffffU );
+    //return vec4(hash(x), hash(x), hash(x), hash(x));
+}
+
+
+// Random point in circle
+// Very straightforward, unit circle scaled by sqrt of the radius
+vec2 randomPointInCircle()
+{
+    vec2 rand = hash2(state);
+    
+    float a = rand.x * TAU;
+    float r = sqrt(rand.y);
+    return vec2(cos(a), sin(a)) * r;
+}
+
+// Random point in polygon
+// Pick a random side and
+// generate a point in a rhombus (equal quadrilateral),
+// and fold it if the point is outside the inner triangle
+vec2 randomPointInPolygon(float sides)
+{
+    vec3 rand = hash3(state);
+    float n = floor(rand.x * sides) / sides;
+    float a1 = n * TAU;
+    float a2 = a1 + TAU / sides;
+    vec2 s1 = vec2(cos(a1), sin(a1));
+    vec2 s2 = vec2(cos(a2), sin(a2));
+    vec2 p1 = s1 * rand.y + s2 * rand.z;
+    vec2 p2 = s1 * (1.0 - rand.y) + s2 * (1.0 - rand.z);
+    
+    return rand.y + rand.z > 1.0 ? p2 : p1;
+}
+
+// Random point in star
+// Same as the random point in polygon,
+// but without folding the rhombus into a triangle
+vec2 randomPointInStar(float sides)
+{
+    vec3 rand = hash3(state);
+    float n = floor(rand.x * sides) / sides;
+    float a1 = n * TAU;
+    float a2 = a1 + TAU / sides;
+    vec2 s1 = vec2(cos(a1), sin(a1));
+    vec2 s2 = vec2(cos(a2), sin(a2));
+    
+    return s1 * rand.y + s2 * rand.z;
+}
+
+vec2 randomPointInSquare()
+{
+    vec2 rand = hash2(state);
+    
+    return rand * 2.0 - 1.0;
+}
+
+vec2 randomPointInRectangle(vec2 a, vec2 b)
+{
+    vec2 rand = hash2(state);
+    
+    vec2 sq = rand * 2.0 - 1.0;
+    return a * sq.x + b * sq.y;
+}
+
+const mat2 ROT_45 = mat2(sqrt(2.0)/2.0, sqrt(2.0)/2.0, -sqrt(2.0) / 2.0, sqrt(2.0)/2.0);
+
+vec2 randomPointTest()
+{
+    vec3 r = hash3(state);
+    vec3 r2 = hash3(state);
+    
+    vec2 a = vec2(0, 2);
+    vec2 b = vec2(0.5, 0);
+    vec2 rc = randomPointInRectangle(a, b);
+    vec2 c = randomPointInCircle() + a;
+    c.y = r.x < 0.5 ? -c.y : c.y;
+    
+    vec2 rc2 = randomPointInRectangle(a, b).yx;
+    vec2 c2 = vec2(c.y, c.x);
+    
+    float a1 = (2.0 * a.y) * (2.0 * b.x);
+    float a2 = PI;
+    
+    vec2 v = length(rc - a) < 1.0 || length(rc + a) < 1.0 || r.y < a2 / (a2 + a1) ? c : rc;
+    vec2 v2 = length(rc2 - a.yx) < 1.0 || length(rc2 + a.yx) < 1.0 || r2.y < a2 / (a2 + a1) ? c2 : rc2;
+    
+    vec2 sq = abs(v) - b.x;
+    v = max(sq.x, sq.y) < 0.0 || r.z < 0.5 ? v2 : v;
+    
+    return ROT_45 * v / a.y;
+}
+
+vec2 randomPointInE()
+{
+    vec2 rc1 = randomPointInRectangle(vec2(0, 1), vec2(0.2, 0));
+    vec2 rc2 = randomPointInRectangle(vec2(0, 0.2), vec2(0.5, 0)) + vec2(0.5 + 0.2, 0);
+    
+    rc2.y += (floor(hash(state) * 3.0) - 1.0) * (1.0 - 0.2);
+    
+    float a1 = 2.0 * 0.4;
+    float a2 = 3.0 * (0.4 * 1.0);
+    
+    vec2 v = hash(state) < a1 / (a1 + a2) ? rc1 : rc2;
+    v.x += 0.2 - (1.4 * 0.5);
+    
+    return v;
+}
+
+vec2 randomPointInCresent(float o)
+{
+    vec2 pa, pb, v;
+    
+    vec2 a = vec2(0, 0);
+    vec2 b = vec2(o, 0);
+    float r = 1.0;
+    
+    #define COUNT 50
+    for (int i = 0; i < COUNT; i++)
+    {
+        v = randomPointInCircle();
+    
+        pa = v - a;
+        pb = pa - b;
+        
+        if (dot(pb, pb) >= r)
+            break;
+    }
+    
+    return v + (a + b) * 0.5;
+}
+
+vec2 randomPointInCrescentApprox(float o)
+{
+    float r1 = 1.0;
+    float r2 = 1.0;
+    
+    float xi = (r1*r1 - r2*r2 + o*o) / (2.0 * o);
+    float yi = sqrt(r1*r1 - xi*xi);
+    
+    float a0 = atan(yi, xi);
+    float a1 = -a0;
+    float at = a1 - a0;
+    
+    float b0 = PI - a0;
+    float b1 = -b0;
+    float bt = b1 - b0;
+    
+    vec2 rand = hash2(state);
+    
+    // Inverse CDF of sine distribution
+    float t = acos(1.0 - 2.0 * rand.x) * INV_PI;
+    
+    vec2 p0 = vec2(cos(a0 + t * at), sin(a0 + t * at));
+    vec2 p1 = vec2(cos(b0 + t * bt)+o, sin(b0 + t * bt));
+    
+    vec2 pi = p0 - (p0.y / (p1.y - p0.y)) * (p1 - p0);
+
+    float ar1 = length(p0 + pi);
+    float ar2 = length(p1 + pi);
+    
+    // TODO: Find a better sampling distribution for line segment
+    //float t2 = (sqrt(ar1*ar1 * (1.0 - rand.y) + ar2*ar2 * rand.y) - min(ar1, ar2)) / abs(ar2 - ar1);
+    float t2 = rand.y;
+    
+    vec2 v = mix(p0, p1, t2);
+
+    return v + vec2(o, 0) * 0.5;
+}
+
+vec2 randomPointInAnnulus(float r1, float r2)
+{
+    vec2 rand = hash2(state);
+    
+    float theta = rand.x * TAU;
+    float v = rand.y;
+    float r = sqrt((1.0 - v) * r1*r1 + v * r2*r2);
+    
+    return vec2(cos(theta) * r, sin(theta) * r);
+    
+}
+
+// Random point in heart
+// It is generated by combining a square rotated 45 degrees
+// and a circle with one half reflected on the x axis
+vec2 randomPointInHeart()
+{
+    vec3 rand = hash3(state);
+    
+    const vec2 a = vec2(sqrt(2.0) / 2.0);
+    const vec2 b = vec2(-a.y, a.x);
+    
+    vec2 sq = rand.xy * 2.0 - 1.0;
+    sq = a * sq.x + b * sq.y;
+    
+    float an = rand.x * TAU;
+    float r = sqrt(rand.y);
+    vec2 c = vec2(cos(an), sin(an)) * r;
+    
+    if (dot(c, b) < 0.0)
+    {
+        c = -c;
+        c = c - a;
+        c.x = -c.x;
+    } else {
+        c = c - a;
+    }
+    
+    c.y += a.x * 2.0;
+    float a1 = 4.0;
+    float a2 = PI;
+    
+    vec2 v = rand.z < a1 / (a1 + a2) ? sq : c;
+    v.y += sqrt(2.0) - (sqrt(2.0) + (1.0 + a.y)) * 0.5;
+    
+    return v / sqrt(2.0);
+}
+
+// Random unit vector
+// Generate a random unit circle and scaled the z with a circular mapping
+vec3 randomUnitVector()
+{
+    vec2 rand = hash2(state);
+    rand.y = rand.y*2.-1.;
+    rand.x *= PI*2.;
+    
+    float r = sqrt(1. - rand.y*rand.y);
+    vec2 xy = vec2(cos(rand.x), sin(rand.x)) * r;
+    
+    return vec3(xy, rand.y);
+}
+
+vec3 randomHemisphere(vec3 n)
+{
+    vec3 r = randomUnitVector();
+    return dot(r, n) < 0.0 ? -r : r;
+}
+
+// Random cosine-weighted unit vector on a hemisphere
+// Unit vector + random unit vector
+vec3 randomCosineHemisphere(vec3 n)
+{
+    return normalize(randomUnitVector() + n);
+}
+
+// Orthonormal Basis
+// https://www.shadertoy.com/view/tlVczh
+// MBR method 2a variant
+mat3 getBasis(in vec3 n)
+{
+    float sz = n.z >= 0.0 ? 1.0 : -1.0;
+    float a  =  n.y/(1.0+abs(n.z));
+    float b  =  n.y*a;
+    float c  = -n.x*a;
+
+    vec3 xp = vec3(n.z+sz*b, sz*c, -n.x);
+    vec3 yp = vec3(c, 1.0-b, -sz*n.y);
+    
+    return mat3(xp, yp, n);
+}
+
+void getBasis(in vec3 n, out vec3 xp, out vec3 yp)
+{
+    float sz = n.z >= 0.0 ? 1.0 : -1.0;
+    float a  =  n.y/(1.0+abs(n.z));
+    float b  =  n.y*a;
+    float c  = -n.x*a;
+
+    xp = vec3(n.z+sz*b, sz*c, -n.x);
+    yp = vec3(c, 1.0-b, -sz*n.y);
+}
+
+// PBR Stuff
+
+
+float F_Schlick(float u, float f0, float f90) {
+    return f0 + (f90 - f0) * pow5(1.0 - u);
+}
+
+float F_Schlick(float u, float f0) {
+    float f = pow5(1.0 - u);
+    return f + f0 * (1.0 - f);
+}
+
+vec3 F_Schlick(float u, vec3 f0) {
+    float f = pow5(1.0 - u);
+    return f + f0 * (1.0 - f);
+}
+
+float FresnelDielectric(float cosT, float eta)
+{
+    float scale = cosT > 0.0 ? 1.0 / eta : eta;
+    float cosTSq = 1.0 - (1.0 - cosT*cosT) * (scale*scale);
+    
+    if (cosTSq <= 0.0)
+    {
+        return 1.0;
+    }
+    
+    float cosTI = abs(cosT);
+    float cosTT = sqrt(cosTSq);
+
+    float Rs = (cosTI - eta * cosTT) / (cosTI + eta * cosTT);
+    float Rp = (eta * cosTI - cosTT) / (eta * cosTI + cosTT);
+    
+    return 0.5 * (Rs + Rp);
+}
+
+float pdfDiffuse()
+{
+    return INV_PI;
+}
+
+float Fd_Lambertian()
+{
+    return INV_PI;
+}
+
+float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
+    float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
+    float lightScatter = F_Schlick(NoL, 1.0, f90);
+    float viewScatter = F_Schlick(NoV, 1.0, f90);
+    return lightScatter * viewScatter * INV_PI;
+}
+
+vec3 sampleDiffuse(vec3 normal)
+{
+    return randomCosineHemisphere(normal);
+}
+
+// 
+float D_GGX(float NdotH, float roughness)
+{
+    float a = NdotH * roughness;
+    float k = roughness / (1.0 - NdotH * NdotH + a * a);
+    return k * k * INV_PI;
+}
+
+float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
+    float a2 = roughness * roughness;
+    float GGXV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+    float GGXL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+    return 0.5 * NoL * NoV / (GGXV + GGXL);
+}
+
+float V_SmithGGXMasking(float NoV, float NoL, float roughness) {
+    float a2 = roughness * roughness;
+    
+    float denom = sqrt(NoV * NoV * (1.0 - a2) + a2) + NoV;
+    
+    return 0.5 * NoV / denom;
+}
+
+float FresnelAvg(float ior)
+{
+    if (ior > 1.0)
+        return (ior - 1.0) / (4.08567 + 1.00071 * ior);
+    return 0.997118 + ior * (0.1014 + ior * (-0.965241 - 0.130607 * ior));
+}
+
+vec3 FresnelAvg(vec3 ior)
+{
+    return vec3(FresnelAvg(ior.x), FresnelAvg(ior.y), FresnelAvg(ior.z));
+}
+
+// https://patapom.com/blog/BRDF/MSBRDFEnergyCompensation/
+vec3 FresnelAvg2(vec3 f0)
+{
+    return f0 * (0.04 + f0 * (0.66 + 0.3 * f0));
+}
+
+// 1 - E
+float EnergyLoss(float cosT, float roughness)
+{
+    float u = cosT;
+    float r = roughness;
+    float S = -0.170718 * sqrt(u) + r * (4.07985 + r * (-11.5295 + r * (18.4961 - r * 9.23618)));
+    float t = 0.0632331 * u + r * (3.1434 + r * (-7.47567 + r * (13.0482 - r * 7.0401)));
+    return pow6(S) * pow(u, 3.0 / 4.0) / (pow6(t) + u * u);
+}
+
+// 1 - E
+float EnergyLossAvg(float roughness)
+{
+    float r = roughness;
+    return 0.592665 * r * r * r / (1.0 + r * (-1.47034 + r * 1.47196));
+}
+
+vec3 sampleSpecular(vec3 wo, float roughness, out vec3 wm)
+{
+#if GGX_IMPORTANCE_SAMPLING == 1
+    vec2 r = hash2(state);
+    float a2 = roughness * roughness;
+    
+    float cosTheta = sqrt((1.0 - r.x) / ((a2 - 1.0) * r.x + 1.0));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    float phi = TAU * r.y;
+    
+    wm = vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    
+    return -reflect(wo, wm);
+
+// VNDF Importance Sampling
+// https://hal.archives-ouvertes.fr/hal-01509746/document
+#elif GGX_IMPORTANCE_SAMPLING == 2
+    vec2 rand = hash2(state);
+    float U1 = rand.x;
+    float U2 = rand.y;
+    
+    float alpha_x = roughness;
+    float alpha_y = roughness;
+    vec3 V = normalize(vec3(alpha_x * wo.x, alpha_y * wo.y, wo.z));
+    // orthonormal basis
+    //vec3 T1, T2;
+    //getBasis(V, T1, T2);
+
+    vec3 T1 = (V.z < 0.9999) ? normalize(cross(V, vec3(0,0,1))) : vec3(1,0,0);
+    vec3 T2 = cross(T1, V);
+
+    // sample point with polar coordinates (r, phi)
+    float a = 1.0 / (1.0 + V.z);
+    float r = sqrt(U1);
+    float phi = (U2<a) ? U2/a * PI : PI + (U2-a)/(1.0-a) * PI;
+    float P1 = r*cos(phi);
+    float P2 = r*sin(phi)*((U2<a) ? 1.0 : V.z);
+    // compute normal
+    vec3 N = P1*T1 + P2*T2 + sqrt(max(0.0, 1.0 - P1*P1 - P2*P2))*V;
+    // unstretch
+    wm = normalize(vec3(alpha_x*N.x, alpha_y*N.y, max(0.0, N.z)));
+    
+    return -reflect(wo, wm);
+#else
+    return sampleHemisphere(vec3(0, 0, 1));
+#endif
+}
+
+float alpha_i(vec3 wi, float alpha)
+{
+    float m_alpha_x = alpha;
+    float m_alpha_y = alpha;
+    float invSinTheta2 = 1.0f / (1.0f - wi.z*wi.z);
+    float cosPhi2 = wi.x*wi.x*invSinTheta2;
+    float sinPhi2 = wi.y*wi.y*invSinTheta2;
+    float alpha_i = sqrt( cosPhi2*m_alpha_x*m_alpha_x + sinPhi2*m_alpha_y*m_alpha_y );
+    return alpha_i;
+
+}
+
+float SmithLambda(vec3 wi, float alpha)
+{
+    if (wi.z > 0.9999)
+        return 0.0;
+    if (wi.z < -0.9999)
+        return 1.0;
+    
+    #if 0
+    // a
+    float theta_i = acos(wi.z);
+    float a = 1.0f/tan(theta_i)/alpha_i(wi, alpha);
+    // value
+    return 0.5f*(-1.0 + sign(a) * sqrt(1.0 + 1.0/(a*a)));
+    
+    #else
+    
+    float inv_wz2 = 1.0 / max(wi.z * wi.z, EPSILON);
+    vec2 wa = vec2(wi.x, wi.y) * alpha;
+    float v = sqrt(1.0 + dot(wa, wa) * inv_wz2);
+    
+    if (wi.z <= 0.0)
+        v = -v;
+
+    return 0.5 * (v - 1.0);
+    #endif
+}
+
+float C1(float h)
+{
+    return saturate(0.5 * (h + 1.0));
+}
+
+float invC1(float h)
+{
+    return 2.0 * saturate(h) - 1.0;
+}
+
+float G1(vec3 w, float C1, float lambda)
+{
+    if (w.z > 0.9999)
+        return 1.0f;
+    if (w.z < EPSILON)
+        return 0.0f;
+    return pow(C1, lambda);
+}
+
+bool sampleHeight(vec3 wr, float U, float lambda, inout float h)
+{
+    if (wr.z > 0.9999)
+        return false;
+        
+    if (wr.z < -0.9999)
+    {
+        h = invC1(U * C1(h));
+        return true;
+    }
+    
+    if(abs(wr.z) < 0.0001)
+        return true;
+    
+    float G1_ = G1(wr, h, lambda);
+    
+    if (U > 1.0 - G1_)
+        return false;
+        
+    h = invC1(C1(h) / pow(1.0 - U, 1.0 / lambda));
+    return true;
+}
+
+float projectedArea(vec3 wi, float alpha)
+{
+    if(wi.z > 0.9999f)
+        return 1.0f;
+    if( wi.z < -0.9999f)
+        return 0.0f;
+    // a
+     float theta_i = acos(wi.z);
+     float sin_theta_i = sin(theta_i);
+     float alphai = alpha_i(wi, alpha);
+    // value
+     float value = 0.5f * (wi.z + sqrt(wi.z*wi.z + sin_theta_i*sin_theta_i*alphai*alphai));
+    return value;
+}
+
+float P22(float slope_x, float slope_y, float alpha)
+{
+    float m_alpha_x = alpha;
+    float m_alpha_y = alpha;
+    float tmp = 1.0f + slope_x*slope_x/(m_alpha_x*m_alpha_x) + slope_y*slope_y/(m_alpha_y*m_alpha_y);
+    float value = 1.0f / (PI * m_alpha_x * m_alpha_y) / (tmp * tmp);
+    return value;
+
+}
+
+float D(vec3 wm, float alpha)
+{
+    if( wm.z <= 0.0f)
+    return 0.0f;
+    // slope of wm
+    float slope_x = -wm.x/wm.z;
+    float slope_y = -wm.y/wm.z;
+    // value
+    float value = P22(slope_x, slope_y, alpha) / (wm.z*wm.z*wm.z*wm.z);
+    return value;
+}
+
+float D_wi(vec3 wi, vec3 wm, float alpha)
+{
+    if( wm.z <= 0.0f)
+    return 0.0f;
+    // normalization coefficient
+    float projectedarea = projectedArea(wi, alpha);
+    if(projectedarea == 0.0)
+    return 0.0;
+    float c = 1.0f / projectedarea;
+    // value
+    float value = c * max(0.0f, dot(wi, wm)) * D(wm, alpha);
+    return value;
+
+}
+
+float Fresnel(vec3 wi, vec3 wm, float eta)
+{
+    float cos_theta_i = dot(wi, wm);
+    float cos_theta_t2 = 1.0f - (1.0f-cos_theta_i*cos_theta_i) / (eta*eta);
+    // total internal reflection
+    if (cos_theta_t2 <= 0.0f) return 1.0f;
+    float cos_theta_t = sqrt(cos_theta_t2);
+    float Rs = (cos_theta_i - eta * cos_theta_t) / (cos_theta_i + eta * cos_theta_t);
+    float Rp = (eta * cos_theta_i - cos_theta_t) / (eta * cos_theta_i + cos_theta_t);
+    float F = 0.5f * (Rs * Rs + Rp * Rp);
+    return F;
+}
+
+float evalPhase(vec3 wi, vec3 wo, float lambda, float alpha, float eta)
+{
+#if 0
+    if (wi.z > 0.9999)
+        return 0.0;
+    
+    vec3 wh = normalize(wo - wi);
+    
+    if (wh.z < 0.0)
+        return 0.0;
+    
+    float pArea = (wi.z < -0.9999) ? 1.0 : lambda * wi.z;
+  
+    float dotW_WH = dot(-wi, wh);
+    
+    if (dotW_WH < 0.0)
+        return 0.0;
+        
+    return 0.25 * max(0.0f, dotW_WH) * D_GGX(wh.z, alpha) / max(pArea * dotW_WH, EPSILON);
+#else
+    
+    if (wi.z > 0.9999)
+        return 0.0;
+    
+    vec3 wh = normalize(wo + wi);
+
+    float res = float(wh.z > 0.0) * 0.25f * D_wi(wi, wh, alpha) / dot(wi, wh) * Fresnel(wi, wh, eta);
+    
+    eta = 1.0 / eta;
+    wh = -normalize(wi + wo * eta);
+    wh *= sign(wh.z);
+    if(dot(wh, wi) > 0.0)
+    {
+        res += eta*eta * (1.0-Fresnel(wi, wh, eta)) * D_wi(wi, wh, alpha) * max(0.0f, -dot(wo, wh)) *
+                1.0f / pow(dot(wi, wh)+eta*dot(wo,wh), 2.0f);
+    }
+    
+    return res;
+#endif
+}
+
+vec2 sampleP22_11(float cosI, float randx, float randy)
+{
+    if (cosI > 0.9999f || abs(cosI) < 1e-6f) {
+        float r = sqrt(randx / max(1.0f - randx, 1e-7f));
+        float phi = TAU * randy;
+        return vec2(r * cos(phi), r * sin(phi));
+    }
+
+    float sinI = sqrt(1.0f - cosI * cosI);
+    float tanI = sinI / cosI;
+    float projA = 0.5f * (cosI + 1.0f);
+    if (projA < 0.0001f)
+        return vec2(0.0f, 0.0f);
+    float A = 2.0f * randx * projA / cosI - 1.0f;
+    float tmp = A * A - 1.0f;
+    if (abs(tmp) < 1e-7f)
+        return vec2(0.0f, 0.0f);
+    tmp = 1.0f / tmp;
+    float D = sqrt(tanI * tanI * tmp * tmp - (A * A - tanI * tanI) * tmp);
+
+    float slopeX2 = tanI * tmp + D;
+    float slopeX = (A < 0.0f || slopeX2 > 1.0f / tanI) ? (tanI * tmp - D) : slopeX2;
+
+    float U2;
+    if (randy >= 0.5f)
+        U2 = 2.0f * (randy - 0.5f);
+    else
+        U2 = 2.0f * (0.5f - randy);
+    float z = (U2 * (U2 * (U2 * 0.27385f - 0.73369f) + 0.46341f)) /
+                  (U2 * (U2 * (U2 * 0.093073f + 0.309420f) - 1.0f) + 0.597999f);
+    float slopeY = z * sqrt(1.0f + slopeX * slopeX);
+
+    if (randy >= 0.5f)
+        return vec2(slopeX, slopeY);
+    
+    return vec2(slopeX, -slopeY);
+}
+
+vec3 samplePhase(vec3 wi, float alpha)
+{
+    vec2 rand = hash2(state);
+    vec3 wi_11 = normalize(vec3(alpha * wi.x, alpha * wi.y, wi.z));
+    vec2 slope_11 = sampleP22_11(wi_11.z, rand.x, rand.y);
+
+    vec3 cossin_phi = normalize(vec3(wi_11.x, wi_11.y, 0));
+    float slope_x = alpha * (cossin_phi.x * slope_11.x - cossin_phi.y * slope_11.y);
+    float slope_y = alpha * (cossin_phi.y * slope_11.x + cossin_phi.x * slope_11.y);
+
+    vec3 wm = normalize(vec3(-slope_x, -slope_y, 1));
+    
+    return -reflect(wi, wm);
+}
+
+vec3 MultiscatteringEval(vec3 wi, vec3 wo, float alpha)
+{
+    if (wo.z < 0.0)
+        return vec3(0);
+        
+    bool swapped = false;
+    if (wo.z < wi.z) {
+        vec3 tmp = wo;
+        //wo = wi;
+        //wi = tmp;
+        swapped = true;
+    }
+  
+    float eta = 1.45;
+    
+    vec3 wr = -wi;
+    
+    float lambda = SmithLambda(wr, alpha);
+    float shadowingLambda = SmithLambda(wo, alpha);
+    
+    //const float G2 = 1.0f / (1.0f - (lambda_r + 1.0f) + shadowing_lambda);
+    //float val = G2 * D_GGX(wh, alpha) * 0.25f / wi.z;
+    
+    float h = 1.0 + invC1(0.999);
+    vec3 throughput = vec3(1);
+    vec3 res = vec3(0);
+    
+    int order = 0;
+    
+    for (int i = 0; i < 10; i++)
+    {
+        if (!sampleHeight(wr, hash(state), lambda, h))
+            break;
+        
+        vec3 phase = evalPhase(wr, wo, lambda, alpha, eta) * throughput;
+        float shadowing = G1(wo, h, lambda);
+        
+        if (i == 0 || i+1 == 10)
+            res += throughput * phase * G1(wo, C1(h), shadowingLambda);
+        
+        wr = samplePhase(-wr, alpha);
+        //vec3 wm;
+        //wr = sampleSpecular(-wr, alpha, wm);
+        
+        lambda = SmithLambda(wr, alpha);
+    }
+    
+    //if (swapped)
+    //    res *= abs(wi.z / wo.z);
+        
+    return res;
+}
+
+vec3 MultiscatteringSample(vec3 wi, vec3 wo, float alpha)
+{
+    vec3 wr = -wi;
+    float h = 1.0 + invC1(0.999);
+    
+    float lambda = SmithLambda(wr, alpha);
+    vec3 throughput = vec3(1);
+    int order = 0;
+    
+    for (int i = 0; i < 10; i++)
+    {
+        if (!sampleHeight(wr, hash(state), lambda, h))
+            break;
+        
+        wr = samplePhase(-wr, alpha);
+        //vec3 wm;
+        //wr = sampleSpecular(-wr, alpha, wm);
+    
+        lambda = SmithLambda(wr, alpha);
+    }
+    
+    return wr;
+}
+
+float MultiscatteringGGXAlbedo(float r)
+{
+    float albedo = 0.806495f * exp(-1.98712f * r * r) + 0.199531f;
+    albedo -= ((((((1.76741f * r - 8.43891f) * r + 15.784f) * r - 14.398f) * r + 6.45221f) * r -
+              1.19722f) *
+                 r +
+             0.027803f) *
+                r +
+            0.00568739f;
+  return saturate(albedo);
+}
+
+
+vec3 sRGBToLinear(vec3 col)
+{
+    return mix(pow((col + 0.055) / 1.055, vec3(2.4)), col / 12.92, lessThan(col, vec3(0.04045)));
+}
+
+vec3 linearTosRGB(vec3 col)
+{
+    return mix(1.055 * pow(col, vec3(1.0 / 2.4)) - 0.055, col * 12.92, lessThan(col, vec3(0.0031308)));
+}
+
+// ACES tone mapping curve fit to go from HDR to LDR
+//https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+vec3 ACESFilm(vec3 x)
+{
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0f, 1.0f);
+}
+
+// Shader
+
+
+vec4 data = vec4(0);
+
+vec3 sampleTriplanarTexture(sampler2D channel, vec3 normal, vec3 position, float sharpness)
+{
+    vec3 n = pow(abs(normal), vec3(sharpness));
+    n /= n.x + n.y + n.z;
+    
+    vec3 tx = sRGBToLinear(texture(channel, position.zy).rgb);
+    vec3 ty = sRGBToLinear(texture(channel, position.xz).rgb);
+    vec3 tz = sRGBToLinear(texture(channel, position.yx).rgb);
+    
+    return tx * n.x + ty * n.y + tz * n.z;
+}
+
+vec3 sampleEquirectangularTexture(sampler2D channel, vec3 normal, vec2 scale, vec2 offset)
+{
+    float theta = atan(normal.z, normal.x) / TAU + 0.5;
+    float phi = acos(normal.y) / PI;
+    
+    return sRGBToLinear(texture(channel, (vec2(theta, phi) + offset) * scale).rgb);
+}
+
+vec3 sampleEquirectangularTexture(sampler2D channel, vec3 normal)
+{
+    return sampleEquirectangularTexture(channel, normal, vec2(1), vec2(0));
+}
+
+vec3 getSkybox(vec3 direction)
+{
+#ifdef WHITE_FURNACE_TEST
+    return vec3(1);
+#else
+    vec3 sky = sRGBToLinear(texture(envTex, direction).rgb);
+    vec3 stars = sampleEquirectangularTexture(tex02, direction, 5.0*vec2(1, 0.5), vec2(0.23, 0.285));
+#ifdef ENABLE_SKY_STARS
+    sky += 40.0*pow(stars, vec3(5.0));
+#endif
+    return SKYBOX_STRENGTH * sky;
+#endif
+}
+
+vec3 getColor(int i)
+{
+    vec3 color = vec3(1);
+    if (i == 0)
+        color = vec3(1.00, 0.85, 0.57); // Gold
+    else if (i == 1)
+        color = vec3(0.98, 0.90, 0.59); // Brass
+    else if (i == 2)
+        color = vec3(0.97, 0.74, 0.62); // Copper
+    else if (i == 3)
+        color = vec3(0.77, 0.78, 0.78); // Iron
+    else if (i == 4)
+        color = vec3(0.97, 0.96, 0.91); // Silver
+        
+    return sRGBToLinear(color);
+}
+
+void sceneIntersect(Ray ray, out HitInfo hit, out Material mat)
+{   
+    hit = NewHitInfo();
+    mat = DefaultMaterial();
+    
+#if SCENE == 0
+    #define NUM_SPHERES 5
+    for (int x = 0; x < NUM_SPHERES; x++)
+    for (int y = 0; y < NUM_SPHERES; y++)
+    {
+        float radius = 0.4;
+        float spacing = 0.05;
+        float xp = (float(x) - float(NUM_SPHERES - 1) / 2.0) * (2.0 * radius + spacing);
+        float yp = (float(y) - float(NUM_SPHERES - 1) / 2.0) * (2.0 * radius + spacing);
+        float roughness = float(x) / float(NUM_SPHERES - 1) * 0.8 + 0.2;//float(i) * 0.2;
+        float metallic = float(y) / float(NUM_SPHERES - 1) * 0.5 + 0.5;
+        
+        metallic = saturate(metallic);
+        roughness = saturate(roughness);
+        roughness *= roughness;
+        
+        if (sphereIntersect(ray, vec3(-xp, 0, -yp), radius, hit))
+        {
+            vec3 p = ray.origin + ray.direction * hit.t;
+            
+            float scale = 0.6;
+            float e = 2.0 / iChannelResolution2.x;
+            vec3 tex = sampleEquirectangularTexture(tex02, hit.normal, scale * vec2(1.0, 0.5), vec2(xp, yp));
+            vec3 texDx = sampleEquirectangularTexture(tex02, hit.normal, scale * vec2(1.0, 0.5), vec2(xp + e, yp));
+            vec3 texDy = sampleEquirectangularTexture(tex02, hit.normal, scale * vec2(1.0, 0.5), vec2(xp, yp + e * 0.5));
+            
+            vec3 N = hit.normal;
+            vec3 A = abs(N.z) > 0.9999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
+            vec3 T = normalize(cross(N, A));
+            vec3 B = cross(T, N);
+            
+            float h = luminance(tex);
+            float hx = luminance(texDx);
+            float hy = luminance(texDy);
+            vec3 tn = normalize(vec3(h - hx, (h - hy) * 2.0, e));
+            //vec3 tex = sampleTriplanarTexture(iChannel2, hit.normal, p * 0.3, 5.0);
+            float m = smoothstep(0.03, 0.1, luminance(tex));
+            
+            tn = normalize(mix(vec3(0, 0, 1), tn, 1.0 - m));
+            
+            hit.bumpNormal = normalize(T * tn.x + B * tn.y + N * tn.z);
+            
+            metallic = min(metallic, m);
+            roughness = max(roughness, 1.0 - m);
+            
+            uint r = uint(x+y*NUM_SPHERES)+23u;
+            uint r2 = r+123u;
+            
+            #if COLOR == 0
+            vec3 color = mix(palette(hash(r)), 1.0-palette(hash(r2)), pow(mix(abs(dot(hit.normal, ray.direction)), 1.0, roughness), 1.5));
+            #elif COLOR == 1
+            vec3 color = getColor(y);
+            #else
+            vec3 color = vec3(1);
+            #endif
+            
+            color = mix(saturate(tex * 5.0), color, m);
+            
+            mat = Material(color, vec3(0), roughness, metallic, 0.0, 1.0, 1.0);
+            
+            #ifdef WHITE_FURNACE_TEST
+            mat.color = vec3(1);
+            #endif
+        }
+    }
+#else
+    if (sphereIntersect(ray, vec3(0, 0, 0), 1.0, hit))
+    {
+        mat = DefaultMaterial();
+        //mat.color = vec3(1, 0.5, 0.5);
+        //mat.color = mix(vec3(1, 0.5, 0.5), vec3(0.3, 0.6, 1.0), pow(abs(dot(hit.normal, ray.direction)), 1.5));
+        mat.transmission = 0.0;
+        mat.roughness = 1.0;
+        mat.metallic = 0.0;
+        mat.ior = 1.33;
+        mat.clearcoat = 0.0;
+    }
+
+#endif
+    if (noHit(hit))
+    {
+        mat.emissive = getSkybox(ray.direction);
+    }
+}
+
+float pdfSpecular(float NdotV, float NdotL, float NdotWM, float WOdotWM, float roughness, vec3 wi)
+{
+#if GGX_MULTISCATTERING != 2
+
+#if GGX_IMPORTANCE_SAMPLING == 1
+    return NdotV * D_GGX(NdotWM, roughness) * NdotWM / (4.0 * WOdotWM);
+#elif GGX_IMPORTANCE_SAMPLING == 2
+    return V_SmithGGXMasking(NdotV, NdotL, roughness) * D_GGX(NdotWM, roughness);
+#else
+    return NdotV * INV_PI * 0.5;
+#endif
+
+#else
+    float D = D_GGX(NdotWM, roughness);
+    float lambda = SmithLambda(wi, roughness);
+    //float singlescatter = V_SmithGGXMasking(NdotV, NdotL, roughness) * D_GGX(NdotWM, roughness);
+    float singlescatter = 0.25 * D / max((1.0 + lambda), EPSILON);
+    
+    float multiscatter = NdotV * INV_PI;
+
+    float albedo = MultiscatteringGGXAlbedo(roughness);
+    
+    return (albedo * singlescatter + (1.0f - albedo) * multiscatter);
+#endif
+}
+
+vec3 Fr_GGX(float NdotV, float NdotL, float NdotH, float LdotH, float VdotH, vec3 f0, float roughness, vec3 wi, vec3 wo)
+{
+    float D = D_GGX(NdotH, roughness);
+    vec3  F = F_Schlick(LdotH, f0);
+    float V = V_SmithGGXCorrelated(NdotV, NdotL, roughness);
+
+#if GGX_MULTISCATTERING == 1
+    if (roughness <= MIN_ROUGHNESS)
+        return F * (D * V);
+
+    // https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
+    float Eavg = EnergyLossAvg(roughness);
+    float Ems = EnergyLoss(NdotV, roughness) * EnergyLoss(NdotL, roughness) * INV_PI / Eavg;
+    
+    #if 0
+    vec3 sqrtF0 = sqrt(f0);
+    vec3 fIor = (1.0 + sqrtF0) / (1.0 - sqrtF0);
+    vec3 Favg = FresnelAvg(1.0 / fIor);
+    vec3 Fms = (Favg * Favg * (1.0 - Eavg)) / (1.0 - Favg * Eavg);
+    #else
+    vec3 Fms = FresnelAvg2(f0);
+    #endif
+    
+    return F * (D * V) + Ems * Fms * NdotV / 2.0;
+#elif GGX_MULTISCATTERING == 2
+    
+    return MultiscatteringEval(wi, wo, roughness);
+#else
+    return F * (D * V);
+#endif
+}
+
+vec3 Fr_GGX_Transmission(float NdotV, float NdotL, float NdotH, float LdotH, float VdotH, vec3 f0, float iorV, float iorL, float roughness)
+{
+    float D = D_GGX(NdotH, roughness);
+    //vec3  F = F_Schlick(LdotH, f0);
+    float F = FresnelDielectric(LdotH, iorV);
+    float V = V_SmithGGXCorrelated(NdotV, NdotL, roughness);
+    float denom = iorL * LdotH +  iorV * VdotH;
+    
+    return 4.0 * f0 * (1.0 - F) * (D * V) * LdotH * VdotH * iorV * iorV / (denom * denom);
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    initState(fragCoord, iFrame);
+
+    vec2 o = halton(vec2(13, 23) * float(iFrame));
+    vec2 pv = (2. * (fragCoord + o - 0.5) - viewPort.xy) / viewPort.y;
+    vec2 uv = fragCoord / viewPort.xy;
+    
+    data.xy = uv;
+    
+    vec3 ro = vec3(0, 0, 5);
+    vec3 lo = vec3(0, 0, 0);
+    
+    vec4 m = texelFetch(tex01, ivec2(0, 0), 0);
+    if (iFrame < 2)
+        m = vec4(0.59, 0.46, 0, 0);
+    
+    #ifdef STATIC_CAM
+    //m.xy = vec2(0.5, 0.334);
+    //m.xy = vec2(0.67, 0.45);
+    //m.xy = vec2(0.59, 0.46);
+    //m.xy = vec2(0.88, 0.44);
+    //m.xy = vec2(0.415, 0.46);
+    //m.xy = vec2(0.56, 0.44);
+    m.xy = vec2(0.59, 0.46);
+    #endif
+    
+    if (int(fragCoord.x) == 0 && int(fragCoord.y) == 0)
+    {
+        if (iFrame < 2)
+        {
+            outColor = vec4(0.59, 0.46, 0, 0);
+        } else
+        {
+            vec2 mn = iMouse.xy / viewPort.xy;
+            outColor = vec4(m);
+            if (iMouse.z > 0.0)
+            {
+                if (outColor.zw != vec2(0))
+                    outColor.xy += (mn - m.zw);
+                outColor.zw = mn;
+            } else
+            {
+                outColor.zw = vec2(0);
+            }
+        }
+        return;
+    }
+    
+    float ax = -m.x * TAU + PI;
+    float ay = -m.y * PI + PI * 0.5;
+    
+    ro.yz *= rot2D(ay);
+    ro.xz *= rot2D(ax);
+    ro.xz *= rot2D(PI);
+    ro += lo;
+    
+    mat3 cmat = getCameraMatrix(ro, lo);
+    
+    float fovScale = 4.0;
+    
+    float dofStrength = DOF_STRENGTH;
+    float dofDist = DOF_FOCUS_DISTANCE;
+    
+    #ifdef DOF_AUTOFOCUS
+    Ray dofRay = Ray(ro, cmat[2]);
+    HitInfo dofHit;
+    Material dofMat;
+    
+    sceneIntersect(dofRay, dofHit, dofMat);
+    
+    dofDist = dofHit.t / fovScale;
+    #endif
+    
+    #if DOF_TYPE == 0
+    vec2 rc = randomPointInCircle();
+    #elif DOF_TYPE == 1
+    vec2 rc = randomPointInSquare();
+    #elif DOF_TYPE == 2
+    vec2 rc = randomPointInPolygon(float(DOF_SIDES));
+    #elif DOF_TYPE == 3
+    vec2 rc = randomPointInStar(float(DOF_SIDES));
+    #elif DOF_TYPE == 4
+    vec2 rc = randomPointInHeart();
+    #elif DOF_TYPE == 5
+    //vec2 rc = randomPointInCresent(-0.5);
+    vec2 rc = randomPointInCrescentApprox(-0.5);
+    #elif DOF_TYPE == 6
+    vec2 rc = randomPointTest();
+    #elif DOF_TYPE == 7
+    vec2 rc = randomPointInAnnulus(0.5, 1.0);
+    #else
+    vec2 rc = randomPointInE();
+    #endif
+    
+    rc *= dofStrength * dofDist;
+    
+    pv -= rc / dofDist;
+    ro += cmat * vec3(rc, 0);
+    
+    vec3 rd = normalize(cmat * vec3(pv, fovScale));
+    
+    vec3 color = vec3(0);
+    vec3 throughput = vec3(1);
+    
+    Ray ray = Ray(ro, rd);
+    HitInfo hit;
+    Material mat;
+    
+    Ray rayNext;
+    HitInfo hitNext;
+    Material matNext;
+
+    sceneIntersect(ray, hit, mat);
+    
+    color += mat.emissive;
+    
+    int i = 0;
+    for (; i < BOUNCES; i++)
+    {
+        if (noHit(hit))
+            break;
+            
+        // Default clearcoat roughness to 0
+        #define CLEARCOAT_ROUGHNESS 0.0
+        float clearcoatRoughness = max(CLEARCOAT_ROUGHNESS, MIN_ROUGHNESS);
+        clearcoatRoughness *= clearcoatRoughness;
+        float roughness = max(mat.roughness, MIN_ROUGHNESS);
+        roughness *= roughness;
+        
+        vec3 normal = hit.bumpNormal != vec3(0) ? hit.bumpNormal : hit.normal;
+        
+        float NdotV = max((dot(hit.normal, -ray.direction)), EPSILON);
+        float NBdotV = max((dot(normal, -ray.direction)), EPSILON);
+        
+        vec3 f0 = mix(vec3(0.04), mat.color, mat.metallic);
+        vec3 fresnel3 = F_Schlick(NBdotV, f0);
+        float fresnel = (fresnel3.x + fresnel3.y + fresnel3.z) / 3.0;
+        
+        float clearcoatFresnel = F_Schlick(NdotV, 0.04);
+        
+        float clearcoatRayPdf = clearcoatFresnel * mat.clearcoat;
+        
+        // This is wrong but idk yet, sorry devsh v_v
+        float specularRayPdf = mix(fresnel, 1.0, mat.metallic);
+        float diffuseRayPdf = (1.0 - mat.transmission) * (1.0 - specularRayPdf);
+        float transmissionRayPdf = mat.transmission * (1.0 - specularRayPdf);
+        
+        specularRayPdf *= (1.0 - clearcoatRayPdf);
+        diffuseRayPdf *= (1.0 - clearcoatRayPdf);
+        transmissionRayPdf *= (1.0 - clearcoatRayPdf);
+        
+        float totalRayPdf = clearcoatRayPdf + specularRayPdf + transmissionRayPdf + diffuseRayPdf;
+        
+        bool isClearcoatRay = hash(state) < clearcoatRayPdf / totalRayPdf;
+        bool isSpecularRay = !isClearcoatRay && hash(state) < specularRayPdf / totalRayPdf;
+        bool isTransmissionRay = !isClearcoatRay && !isSpecularRay && hash(state) < transmissionRayPdf / totalRayPdf;
+        
+        //isClearcoatRay = false; isSpecularRay = true; isTransmissionRay = false;
+        
+        if (isClearcoatRay)
+            normal = hit.normal;
+        
+        mat3 tbn = getBasis(normal);
+        
+        vec3 wo = inverse(tbn) * -ray.direction;
+        vec3 wi, wm;
+        
+        if (isClearcoatRay)
+        {
+            wi = sampleSpecular(wo, clearcoatRoughness, wm);
+            rayNext.direction = tbn * wi;
+        } else if (isSpecularRay)
+        {
+        #if GGX_MULTISCATTERING == 2
+            wi = MultiscatteringSample(-wi, wo, roughness);
+        #else
+            wi = sampleSpecular(wo, roughness, wm);
+        #endif
+            rayNext.direction = tbn * wi;
+        } else if (isTransmissionRay)
+        {
+            sampleSpecular(wo, roughness, wm);
+            wi = -refract(wo, -wm, hit.inside ? mat.ior : 1.0 / mat.ior);
+            if (dot(wi, wi) < EPSILON)
+                wi = -reflect(wo, wm);
+            rayNext.direction = tbn * wi;
+        } else {
+            rayNext.direction = sampleDiffuse(hit.normal);
+        }
+        
+        rayNext.origin = ray.origin + ray.direction * hit.t + rayNext.direction * 1e-3;
+        rayNext.origin += (isTransmissionRay ? -hit.normal : hit.normal) * 1e-3;
+        
+        sceneIntersect(rayNext, hitNext, matNext);
+        
+        vec3 halfVector = normalize(-ray.direction + rayNext.direction);
+        
+        float NdotL = max(dot(normal, rayNext.direction), EPSILON);
+        float NdotH = max(dot(normal, halfVector), EPSILON);
+        float LdotH = max(dot(rayNext.direction, halfVector), EPSILON);
+        float VdotH = max(dot(-ray.direction, halfVector), EPSILON);
+        float WOdotWM = max(dot(wo, wm), EPSILON);
+        float NdotWM = max(wm.z, EPSILON);
+        
+        vec3 diffuse, specular;
+        
+        vec3 reflectance = vec3(0);
+        
+        if (isClearcoatRay)
+        {
+            specular = Fr_GGX(NdotV, NdotL, NdotH, LdotH, VdotH, vec3(1), clearcoatRoughness, wi, wo);
+            
+            float specularPdf = pdfSpecular(NdotV, NdotL, NdotWM, WOdotWM, clearcoatRoughness, wi);
+            
+            reflectance = throughput * matNext.emissive * specular / specularPdf;
+            throughput *= specular / specularPdf;
+            
+        } else if (isSpecularRay)
+        {
+            specular = Fr_GGX(NdotV, NdotL, NdotH, LdotH, VdotH, mat.color, roughness, wi, wo);
+            
+            float specularPdf = pdfSpecular(NdotV, NdotL, NdotWM, WOdotWM, roughness, wi);
+            
+            reflectance = throughput * matNext.emissive * specular / specularPdf;
+            throughput *= specular / specularPdf;
+            
+        } else if (isTransmissionRay)
+        {
+            float eta = wi.z > 0.0 ? mat.ior : 1.0 / mat.ior;
+            halfVector = normalize(-ray.direction + rayNext.direction * eta);
+            NdotL = max(abs(dot(normal, -rayNext.direction)), EPSILON);
+            NdotH = max(abs(dot(normal, halfVector)), EPSILON);
+            LdotH = max(abs(dot(-rayNext.direction, halfVector)), EPSILON);
+            VdotH = max(abs(dot(-ray.direction, halfVector)), EPSILON);
+            
+            float iorV = hit.inside ? mat.ior : 1.0;
+            float iorL = !hit.inside ? mat.ior : 1.0;
+            
+            specular = Fr_GGX_Transmission(NdotV, NdotL, NdotH, LdotH, VdotH, mat.color, iorV, iorL, roughness);
+            
+            float specularPdf = pdfSpecular(NdotV, NdotL, NdotH, VdotH, roughness, wi);
+            
+            reflectance = throughput * matNext.emissive * specular / specularPdf;
+            throughput *= specular / specularPdf;
+            
+        } else {
+            vec3 diffuseColor = mat.color;
+            #if 0
+            diffuse = diffuseColor * Fd_Burley(NdotV, NdotL, LdotH, roughness);
+            #else
+            diffuse = diffuseColor * Fd_Lambertian();
+            #endif
+            
+            float diffusePdf = pdfDiffuse();
+            
+            reflectance = throughput * matNext.emissive * diffuse / diffusePdf;
+            throughput *= diffuse / diffusePdf;
+        }
+        
+        color += reflectance;
+        
+        if (luminance(throughput) < 1.0 / 256.0)
+            break;
+        
+        if (noHit(hitNext))
+            break;
+        
+        ray = rayNext;
+        hit = hitNext;
+        mat = matNext;
+    }
+    
+    vec3 finalColor = color;
+
+#ifndef NO_ACCUMULATE
+    vec4 prevColor = texelFetch(tex01, ivec2(fragCoord), 0);
+    
+    float blend = iFrame == 0 ? 1.0 : 1.0 / (1.0 + (1.0 / prevColor.a));
+    
+    #ifndef STATIC_CAM
+    if (m.zw != vec2(0))
+        blend = 1.0;
+    #endif
+    
+    outColor = vec4(mix(prevColor.rgb, finalColor, blend), blend);
+#else
+    outColor = vec4(finalColor, 1);
+#endif
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>
+

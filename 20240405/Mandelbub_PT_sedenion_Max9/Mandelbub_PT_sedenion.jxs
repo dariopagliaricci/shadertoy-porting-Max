@@ -1,0 +1,253 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+	
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel1;
+
+
+// Hash functions by Nimitz:
+// https://www.shadertoy.com/view/Xt3cDn
+
+float g_seed = 0.;
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+vec2 hash2(inout float seed) {
+    uint n = base_hash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 hash3(inout float seed) {
+    uint n = base_hash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec3 rz = uvec3(n, n*16807U, n*48271U);
+    return vec3(rz & uvec3(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 random_in_unit_sphere(inout float seed) {
+    vec3 h = hash3(seed) * vec3(2.,6.28318530718,1.)-vec3(1,0,0);
+    float phi = h.y;
+    float r = pow(h.z, 1./3.);
+	return r * vec3(sqrt(1.-h.x*h.x)*vec2(sin(phi),cos(phi)),h.x);
+}
+
+#define MAX_STEP 255
+#define MIN_DIST 0.001
+#define MAX_DIST 100.
+#define MAX_BOUNCE 5
+
+struct HitRecord{
+    vec3 position;
+    vec3 normal;
+};
+
+struct Ray{
+    vec3 origin;
+    vec3 direction;
+};
+
+mat3 rotateX(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(1, 0, 0),
+        vec3(0, c, -s),
+        vec3(0, s, c)
+    );
+}
+
+float sdMandelbulb(vec3 pos, int maxIterations, float bailout, float power) {
+	vec3 z = pos;
+	float dr = 1.0;
+	float r = 0.0;
+	for (int i = 0; i < maxIterations ; i++) {
+		r = length(z);
+		if (r>bailout) break;
+		
+		// convert to polar coordinates
+		float theta = acos(z.z/r);
+		float phi = atan(z.y,z.x);
+		dr =  pow( r, power-1.0)*power*dr + 1.0;
+		
+		// scale and rotate the point
+		float zr = pow( r,power);
+		theta = theta*power;
+		phi = phi*power;
+		
+		// convert back to cartesian coordinates
+		z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta));
+		z+=pos;
+	}
+	return 0.5*log(r)*r/dr;
+}
+
+
+float sdPlane(vec3 p, float h){
+    return p.y-h;
+}
+
+float sdScene(vec3 p){
+    int maxIterations = 50;
+    float bailout = 100.0;
+    float power = 8.0;
+    
+    return min(sdMandelbulb(p,  maxIterations, bailout, power),sdPlane(p, -1.));
+}
+
+vec3 calcNormal(in vec3 p) {
+    vec2 e = vec2(1.0, -1.0) * 0.00005;
+    return normalize(
+      e.xyy * sdScene(p + e.xyy) +
+      e.yyx * sdScene(p + e.yyx) +
+      e.yxy * sdScene(p + e.yxy) +
+      e.xxx * sdScene(p + e.xxx));
+}
+
+
+bool rayMarch(Ray ray, inout HitRecord hit){
+    float totalDistance = 0.;
+    
+    int i;
+    vec3 p;
+    for(i=0; i<MAX_STEP; i++){
+        p = ray.origin + totalDistance*ray.direction;
+        float currentDistance = sdScene(p);
+        totalDistance += currentDistance;
+        
+        if(currentDistance < MIN_DIST || totalDistance > MAX_DIST){
+            break;
+        }
+    }
+    
+    if(totalDistance>MAX_DIST){
+        return false;
+    }
+    p = ray.origin + totalDistance*ray.direction;
+    hit.position = ray.origin + 0.99*totalDistance*ray.direction;
+    hit.normal = calcNormal(p);
+    return true;
+}
+
+vec3 render(Ray ray){
+    vec3 backgroundColor = vec3(0.8,0.9,1.);
+    Ray currentRay = ray;
+    HitRecord hit;
+    vec3 attenuation  = vec3(1);
+    
+    for(int i = 0; i<MAX_BOUNCE; i++){
+        if(!rayMarch(currentRay, hit)){
+            return attenuation*backgroundColor; //texture(iChannel0, -currentRay.direction).rgb;
+        }
+        currentRay.origin = hit.position;
+        currentRay.direction = hit.normal+random_in_unit_sphere(g_seed);
+        attenuation *= 0.8;
+    }
+    return vec3(0);
+}
+
+vec3 getRayDirection(vec2 uv, vec3 origin, vec3 direction){
+    float focalLength = 1.;
+    float vfov = 90.; //vertical field of view
+    
+    float h = focalLength * tan(radians(vfov)/2.); // half of vertical sensor size
+    
+    vec3 fixedUp = vec3(0,1,0);
+    vec3 front = normalize(direction - origin);
+    vec3 right = -normalize(cross(front, fixedUp));
+    vec3 up = cross(front, right);  
+    
+    return normalize(h*uv.x*right + h*uv.y*up + front*focalLength);
+}
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = 2.*fragCoord/viewPort.xy - 1.;
+    uv.x *= viewPort.x/viewPort.y;
+    vec2 mouse = (iMouse.xy / viewPort.xy - 0.5)*5.5;
+    mouse.y*=-1.;
+    g_seed = float(base_hash(floatBitsToUint(fragCoord)))/float(0xffffffffU)+iTime;
+    
+    vec3 col = vec3(0,0,0);
+    
+    vec3 rayOrigin = vec3(sin(mouse.x)*cos(mouse.y),sin(mouse.y+0.5),cos(mouse.x)*cos(mouse.y))*1.3;
+    vec3 lookAtDirection = vec3(0,0,0);
+    
+    vec3 rayDirection = getRayDirection(uv, rayOrigin, lookAtDirection);
+    
+    Ray ray;
+    ray.origin = rayOrigin;
+    ray.direction = rayDirection;    
+    
+    col += render(ray); 
+    
+    vec4 lastFrame;
+    if (iMouse.z > 0.0){
+        lastFrame = vec4(0);
+    }else{
+        lastFrame = texture(iChannel1, fragCoord/viewPort.xy);
+    }
+    
+    
+    outColor = vec4(col,1.0)+lastFrame;
+}
+]]>
+</program>
+</language>
+</jittershader>

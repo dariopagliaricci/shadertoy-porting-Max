@@ -1,0 +1,552 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+    <param name="iFrame" type="int"  default="0"  />
+    <param name="iChannel0" type="int"  default="0"  />
+
+	<param name="iMouse" type="vec4"  default="0.0 0.0 0.0 0.0"  />
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+        <bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform vec4 iMouse;
+uniform sampler2D iChannel0;
+
+const float PI = 3.14159265359;
+const float middle_sphere_r = 1.0;
+const float satellite_sphere_r = middle_sphere_r / 2.5;
+const float sphere_offset = middle_sphere_r * 1.2 + satellite_sphere_r;
+const float distance_limit = 1000000.0;
+const float fov = 20.; // Horizontal field of view
+const float camera_distance = middle_sphere_r * 7.0;
+const vec2 camera_orientation_offset = PI * vec2(0.5, 0.0);
+const vec3 camera_pos_offset = vec3(0);
+const float camera_rotation_speed_coeff = 0.005;
+const float aperture_size = middle_sphere_r * 0.2; // The bigger the aperture, the bigger the DOF effect.
+const float init_focus_distance = camera_distance * 1.1;
+const float reinhard_const = 1.0;
+const float skybox_contrast = 4.;
+const float skybox_intensity = 100.0;
+const float skybox_saturation = 1.5;
+const float pos_offset = 0.00001; // New ray surface offset.
+const int num_passes_per_frame = 1;
+const int rays_stack_size = 20;
+const float ray_importance_threshold = 1e-5;
+// Noise added to rays to smooth out the result. Value in the range of [0:1] is within a pixel.
+// Setting the value to zero means that there is no smoothing and num_passes_per_frame should be 1.
+const float ray_noise_coeff = 1.0;
+const float noise_threshold = 0.001;
+const float noise_power = 5.0;
+const int noise_sample_size = 9;
+const float noise_mix_coeff = 0.8;
+const float dark_area_noise_coeff = 0.2;
+const float visible_range_min = 380.0;
+const float visible_range_max = 700.0;
+const vec3 spectrum_sum_inv = vec3(3.000060, 2.995908, 2.998867);
+const float air_ior = 1.0;
+const float glass_ior = 1.54;
+const float glass_ior_coeff = 0.005;
+
+const ivec2 frame_num_uv = ivec2(0, 0);
+const ivec2 mouse_uv = ivec2(1, 0);
+const ivec2 orientation_uv = ivec2(2, 0);
+const ivec2 resolution_uv = ivec2(3, 0);
+const ivec2 focus_distance_uv = ivec2(4, 0);
+
+struct sphere_t
+{
+    vec3 pos;
+    vec3 color;
+    float r;
+};
+
+const float pentagon_angle = 72.0 / 180.0 * PI;
+sphere_t spheres[] = sphere_t[](
+    //sphere_t(vec3(0), vec3(0.4, 0.7, 0.6), middle_sphere_r),
+    sphere_t(vec3(cos(pentagon_angle * 0.5), 0, sin(pentagon_angle * 0.5)) * sphere_offset, vec3(0.2, 0.05, 0.2), satellite_sphere_r), //purple
+    sphere_t(vec3(cos(pentagon_angle * 1.5), 0, sin(pentagon_angle * 1.5)) * sphere_offset, vec3(0.0, 0.05, 0.2), satellite_sphere_r), // blue
+    sphere_t(vec3(cos(pentagon_angle * 2.5), 0, sin(pentagon_angle * 2.5)) * sphere_offset, vec3(0.2, 0.05, 0.01), satellite_sphere_r), //red
+    sphere_t(vec3(cos(pentagon_angle * 3.5), 0, sin(pentagon_angle * 3.5)) * sphere_offset, vec3(0.05, 0.2, 0.05), satellite_sphere_r), // green
+    sphere_t(vec3(cos(pentagon_angle * 4.5), 0, sin(pentagon_angle * 4.5)) * sphere_offset, vec3(0.2, 0.13, 0.01), satellite_sphere_r) // orange
+);
+
+const sphere_t bounding_sphere = sphere_t(vec3(0), vec3(0), middle_sphere_r);
+const vec3 icosahedron_color = vec3(0.5, 0.55, 0.5);
+
+const vec3 ico_verts[12] = vec3[](
+    vec3(0.0, -1.0, 0.0) * middle_sphere_r,
+    vec3(0.7235999703407288, -0.4472149908542633, -0.5257200002670288) * middle_sphere_r,
+    vec3(-0.27638500928878784, -0.4472149908542633, -0.8506399989128113) * middle_sphere_r,
+    vec3(-0.8944249749183655, -0.4472149908542633, 0.0) * middle_sphere_r,
+    vec3(-0.27638500928878784, -0.4472149908542633, 0.8506399989128113) * middle_sphere_r,
+    vec3(0.7235999703407288, -0.4472149908542633, 0.5257200002670288) * middle_sphere_r,
+    vec3(0.27638500928878784, 0.4472149908542633, -0.8506399989128113) * middle_sphere_r,
+    vec3(-0.7235999703407288, 0.4472149908542633, -0.5257200002670288) * middle_sphere_r,
+    vec3(-0.7235999703407288, 0.4472149908542633, 0.5257200002670288) * middle_sphere_r,
+    vec3(0.27638500928878784, 0.4472149908542633, 0.8506399989128113) * middle_sphere_r,
+    vec3(0.8944249749183655, 0.4472149908542633, 0.0) * middle_sphere_r,
+    vec3(0.0, 1.0, 0.0) * middle_sphere_r
+);
+
+const uvec3 ico_ind[20] = uvec3[](
+    uvec3(0, 1, 2),
+    uvec3(1, 0, 5),
+    uvec3(0, 2, 3),
+    uvec3(0, 3, 4),
+    uvec3(0, 4, 5),
+    uvec3(1, 5, 10),
+    uvec3(2, 1, 6),
+    uvec3(3, 2, 7),
+    uvec3(4, 3, 8),
+    uvec3(5, 4, 9),
+    uvec3(1, 10, 6),
+    uvec3(2, 6, 7),
+    uvec3(3, 7, 8),
+    uvec3(4, 8, 9),
+    uvec3(5, 9, 10),
+    uvec3(6, 10, 11),
+    uvec3(7, 6, 11),
+    uvec3(8, 7, 11),
+    uvec3(9, 8, 11),
+    uvec3(10, 9, 11)
+);
+
+struct ray_t
+{
+    vec3 pos;
+    vec3 dir;
+    vec3 color;
+};
+
+struct intersection_t
+{
+    vec3 pos;
+    vec3 normal;
+    vec3 color;
+    bool inside;
+    bool sphere;
+};
+
+struct camera_t
+{
+    vec3 pos;
+    vec3 right;
+    vec3 up;
+    vec3 forward;
+    float fov_ctg;
+    float ratio;
+};
+
+const mat3 XYZ_RGB = mat3( 1.463355, -0.197212, -0.266143, -0.535260, 1.476829, 0.058431, 0.026246, -0.081495, 1.055249 );
+
+mat3 RGB_XYZ = mat3( 0.718869, 0.105678, 0.175454, 0.260457, 0.713352, 0.026190, 0.002235, 0.052462, 0.945303 );
+
+// A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm.
+uint hash( uint x ) {
+    x += ( x << 10u );
+    x ^= ( x >>  6u );
+    x += ( x <<  3u );
+    x ^= ( x >> 11u );
+    x += ( x << 15u );
+    return x;
+}
+
+// Compound versions of the hashing algorithm I whipped together.
+uint hash( uvec2 v ) { return hash( v.x ^ hash(v.y)                         ); }
+uint hash( uvec3 v ) { return hash( v.x ^ hash(v.y) ^ hash(v.z)             ); }
+uint hash( uvec4 v ) { return hash( v.x ^ hash(v.y) ^ hash(v.z) ^ hash(v.w) ); }
+
+// Construct a float with half-open range [0:1] using low 23 bits.
+// All zeroes yields 0.0, all ones yields the next smallest representable value below 1.0.
+float floatConstruct( uint m ) {
+    const uint ieeeMantissa = 0x007FFFFFu; // binary32 mantissa bitmask
+    const uint ieeeOne      = 0x3F800000u; // 1.0 in IEEE binary32
+
+    m &= ieeeMantissa;                     // Keep only mantissa bits (fractional part)
+    m |= ieeeOne;                          // Add fractional part to 1.0
+
+    float  f = uintBitsToFloat( m );       // Range [1:2]
+    return f - 1.0;                        // Range [0:1]
+}
+
+// Pseudo-random value in half-open range [0:1].
+float random( float x ) { return floatConstruct(hash(floatBitsToUint(x))); }
+float random( vec2  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float random( vec3  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float random( vec4  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+
+float noise(vec2 uv, int frame, inout int seed)
+{
+    return random(uv + vec2(frame, seed++));
+}
+
+vec2 noise2(vec2 uv, int frame, inout int seed)
+{
+    return vec2(noise(uv, frame, seed), noise(uv, frame, seed));
+}
+
+float erf_inv(float x) // https://en.wikipedia.org/wiki/Error_function
+{
+    const float a = 6.802721;
+    const float b = 4.330747;
+
+    float u = log(1.0 - x*x);
+    float c = u * 0.5 + b;
+    return sqrt(sqrt(c*c - u*a) - c) * sign(x);
+}
+
+float rgb2grayscale(vec3 rgb)
+{
+    const vec3 rgb_weights = vec3(0.3, 0.59, 0.11);
+    return dot(rgb, rgb_weights);
+}
+
+vec3 saturation(vec3 color, float a)
+{
+    float avg = rgb2grayscale(color);
+    color = mix(vec3(avg), color, a);
+    return max(color, 0.0);
+}
+
+float linear2gamma(const float x)
+{
+    return x > 0.0031308 ? 1.055 * pow(x, 1.0/2.4) - 0.055 : 12.92 * x;
+}
+
+vec3 linear2gamma(const vec3 x)
+{
+    return vec3(linear2gamma(x.r), linear2gamma(x.g), linear2gamma(x.b));
+}
+
+float gamma2linear(const float x)
+{
+    return x > 0.04045 ? pow((x + 0.055) / 1.055, 2.4) : x / 12.92;
+}
+
+vec3 gamma2linear(const vec3 x)
+{
+    return vec3(gamma2linear(x.r), gamma2linear(x.g), gamma2linear(x.b));
+}
+
+vec4 read_buffer(sampler2D buffer, ivec2 uv)
+{
+    return texelFetch(buffer, uv, 0);
+}
+
+int get_frame_index(int iframe, sampler2D buf_a)
+{
+    return iframe - int(read_buffer(buf_a, frame_num_uv).r);
+}
+
+bool sphere_hit(vec2 t)
+{
+    return t[1] > pos_offset; // The sphere is not behind
+}
+
+vec2 sphere_intersection(ray_t ray, sphere_t sphere)
+{
+    vec3 r_min_o = ray.pos - sphere.pos;
+    float b = 2.0 * dot(r_min_o, ray.dir);
+    float c = dot(r_min_o, ray.pos) - dot(r_min_o, sphere.pos) - sphere.r * sphere.r;
+    float d = b * b - 4.0 * c;
+    if(d <= 0.0)
+    {
+        // The ray missed the sphere.
+        return vec2(-1.0);
+    }
+
+    // First intersection
+    float t0 = (-b - sqrt(d)) * 0.5;
+    // Second intersection
+    float t1 = (-b + sqrt(d)) * 0.5;
+
+    return vec2(t0, t1);
+}
+
+intersection_t build_intersection_s(ray_t ray, sphere_t sphere, vec2 t)
+{
+    intersection_t intersection;
+    intersection.sphere = true;
+    intersection.inside = t[0] < pos_offset;
+
+    if(intersection.inside)
+    {
+        intersection.color = pow(sphere.color, vec3(t[1] - t[0]));
+        intersection.pos = ray.pos + ray.dir * t[1];
+        intersection.normal = normalize(sphere.pos - intersection.pos);
+    }
+    else
+    {
+        intersection.color = vec3(1.0);
+        intersection.pos = ray.pos + ray.dir * t[0];
+        intersection.normal = normalize(intersection.pos - sphere.pos);
+    }
+    return intersection;
+}
+
+bool triangle_hit(vec4 b)
+{
+    return b.x >= 0.0 &&
+           b.y >= 0.0 &&
+           b.z >= 0.0 &&
+           b.w > pos_offset;
+}
+vec4 triangle_intersection(ray_t ray, mat3 triangle)
+{
+    return inverse(mat4(vec4(triangle[0], 1.0),
+                        vec4(triangle[1], 1.0),
+                        vec4(triangle[2], 1.0),
+                        vec4(-ray.dir, 0))) * vec4(ray.pos, 1.0);
+}
+
+intersection_t build_intersection_t(ray_t ray, mat3 triangle, float d)
+{
+    intersection_t intersection;
+    intersection.sphere = false;
+    intersection.pos = ray.pos + ray.dir * d;
+    intersection.normal = normalize(cross(triangle[2] - triangle[0],
+                                          triangle[1] - triangle[0]));
+    intersection.inside = dot(intersection.normal, ray.dir) > 0.0;
+    if(intersection.inside)
+    {
+        intersection.normal *= -1.0;
+        intersection.color = pow(icosahedron_color, vec3(d));
+    }
+    else
+    {
+        intersection.color = vec3(1.0);
+    }
+
+    return intersection;
+}
+
+bool find_closest_intersection(ray_t ray, out intersection_t intersection)
+{
+    // Find the closest sphere the ray intersects by iterating through all spheres.
+    float sphere_distance = distance_limit;
+
+    int sphere_hit_index = -1;
+    vec2 t;
+    for(int i = 0; i < spheres.length(); ++i)
+    {
+        vec2 t_tmp = sphere_intersection(ray, spheres[i]);
+        if(sphere_hit(t_tmp))
+        {
+            if(sphere_distance > t_tmp[1])
+            {
+                // This sphere is closer to the ray origin.
+                sphere_hit_index = i;
+                sphere_distance = t_tmp[1];
+                t = t_tmp;
+            }
+        }
+    }
+    
+    float triangle_distance = sphere_distance;
+    vec2 bounding_sphere_t = sphere_intersection(ray, bounding_sphere);
+    int triangle_hit_index = -1;
+    if(sphere_hit(bounding_sphere_t) && bounding_sphere_t[0] < sphere_distance)
+    {
+        for(int i = 0; i < ico_ind.length(); ++i)
+        {
+            vec3 p0 = ico_verts[ico_ind[i][0]];
+            vec3 p1 = ico_verts[ico_ind[i][1]];
+            vec3 p2 = ico_verts[ico_ind[i][2]];
+            mat3 triangle = mat3(p0, p1, p2);
+            vec4 barycentric = triangle_intersection(ray, triangle);
+            if(triangle_hit(barycentric))
+            {
+                if(triangle_distance > barycentric.w)
+                {
+                    // This triangle is closer to the ray origin.
+                    triangle_hit_index = i;
+                    triangle_distance = barycentric.w;
+                }
+            }
+        }
+    }
+
+    bool ray_hit = triangle_hit_index > -1 || sphere_hit_index > -1;
+
+    if(ray_hit)
+    {
+        if(sphere_distance <= triangle_distance)
+        {
+            intersection = build_intersection_s(ray, spheres[sphere_hit_index], t);
+        }
+        else
+        {
+            vec3 p0 = ico_verts[ico_ind[triangle_hit_index][0]];
+            vec3 p1 = ico_verts[ico_ind[triangle_hit_index][1]];
+            vec3 p2 = ico_verts[ico_ind[triangle_hit_index][2]];
+            mat3 triangle = mat3(p0, p1, p2);
+            intersection = build_intersection_t(ray, triangle, triangle_distance);
+        }
+    }
+    return ray_hit;
+}
+
+camera_t get_camera(vec2 resolution, sampler2D data_channel)
+{
+    camera_t cam;
+    float fov_rad = PI / 180.0 * fov;
+    cam.fov_ctg = 1.0 / tan(fov_rad);
+    cam.ratio = resolution.x / resolution.y;
+
+    vec2 orientation = read_buffer(data_channel, orientation_uv).xy;
+
+    // Define and rotate basis vectors vertically.
+    cam.right = vec3(cos(orientation.x), 0, sin(orientation.x));
+    cam.forward = vec3(-sin(orientation.x), 0, cos(orientation.x));
+    cam.up = vec3(0, cos(orientation.y), 0) + cam.forward * sin(orientation.y);
+    cam.forward = cam.forward * cos(orientation.y) + vec3(0, -sin(orientation.y), 0);
+
+    // Camera is always looking at the first sphere.
+    cam.pos = camera_pos_offset - cam.forward * camera_distance;
+    return cam;
+}
+
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    ivec2 coord = ivec2(fragCoord);
+    bool mb = iMouse.z > 0.0;
+    vec4 prev_frame = read_buffer(iChannel0, coord);
+
+    if(coord == frame_num_uv)
+    {
+        vec2 prev_res = read_buffer(iChannel0, resolution_uv).xy;
+        if(mb || prev_res != viewPort.xy)
+        {
+            outColor = vec4(iFrame);
+        }
+        else
+        {
+            outColor = prev_frame;
+        }
+    }
+    else if(coord == mouse_uv)
+    {
+        outColor = iMouse;
+    }
+    else if(coord == orientation_uv)
+    {
+        if(iFrame == 0)
+        {
+            outColor = vec4(camera_orientation_offset, 0, 0);
+        }
+        else
+        {
+            vec2 pos_delta = vec2(0);
+            vec4 prev_mouse = read_buffer(iChannel0, mouse_uv);
+            if(prev_mouse.z > 0.0 && iMouse.z > 0.0)
+            {
+                pos_delta = iMouse.xy - prev_mouse.xy;
+            }
+            vec2 new_orientation = prev_frame.xy - pos_delta * camera_rotation_speed_coeff;
+            if(new_orientation.x > PI * 2.0)
+            {
+                new_orientation.x -= PI * 2.0;
+            }
+            else if(new_orientation.x < 0.0)
+            {
+                new_orientation.x += PI * 2.0;
+            }
+
+            new_orientation.y = clamp(new_orientation.y, -PI * 0.5, PI * 0.5);
+
+            outColor = vec4(new_orientation, 0, 0);
+        }
+    }
+    else if(coord == resolution_uv)
+    {
+        outColor = vec4(viewPort, 0, 0);
+    }
+    else if(coord == focus_distance_uv)
+    {
+        if(iFrame == 0)
+        {
+            outColor = vec4(init_focus_distance);
+        }
+        else
+        {
+            if(iMouse.z > 0.0)
+            {
+                camera_t cam = get_camera(viewPort.xy, iChannel0);
+
+                vec2 normalized_coords = iMouse.xy / viewPort.xy * 2.0 - 1.0;
+                vec3 ray_dir = cam.forward * cam.fov_ctg +
+                               cam.right * normalized_coords.x +
+                               cam.up * normalized_coords.y / cam.ratio;
+
+                ray_t ray = ray_t(cam.pos, normalize(ray_dir), vec3(1.0));
+                intersection_t intersection;
+                bool index = find_closest_intersection(ray, intersection);
+                if(index)
+                {
+                    float distance = dot(cam.forward, intersection.pos - cam.pos);
+                    outColor = vec4(distance);
+                }
+                else
+                {
+                    outColor = prev_frame;
+                }
+            }
+            else
+            {
+                outColor = prev_frame;
+            }
+        }
+    }
+    else
+    {
+        outColor = vec4(0);
+    }
+}
+
+		]]>
+		</program>
+	</language>
+</jittershader>

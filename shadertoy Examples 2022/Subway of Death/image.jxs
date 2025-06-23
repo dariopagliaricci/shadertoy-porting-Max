@@ -1,0 +1,97 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_A" type="int" default="0" />
+	<param name="buff_B" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<bind param="buff_A" program="fp" />
+		<bind param="buff_B" program="fp" />
+		<bind param="iChannel2" program="fp" />
+		
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="SOD_common.glsl" program="fp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform sampler2D buff_A;
+			uniform sampler2D buff_B;
+			uniform sampler2D iChannel2;
+			
+			void main()
+		{
+		    
+		    vec2 path = path(iTime*5.0 + 5.5, iTime);
+		    path.x *= -iResolution.x/iResolution.y;
+
+		    vec2 fragCoord = jit_in.texcoord * iResolution;
+		    
+			vec2 uv = fragCoord.xy/iResolution.xy;
+		    
+		    vec2 uvCenter = uv - vec2(0.5) - path*0.025;
+		    vec2 pc;
+		    pc.x = atan(uvCenter.x, uvCenter.y) / 3.14159265359;
+		    pc.y = length(uvCenter)*2.0;
+		    vec2 coords = pc * vec2(2.0, 0.025) + vec2(0.0, 1.0) * iTime;
+		    float n = smoothstep(0.2, 1.0, texture(iChannel2, coords).x) * clamp(pc.y - 0.75, 0.0, 1.0);
+		    
+		    uv -= normalize(uvCenter) * n;
+			vec4 tex = texture(buff_A, uv);
+			vec4 texblurred = texture(buff_B, uv);
+		    
+		    vec4 col1 = pow(tex, vec4(2.0)) * 1.5 + texblurred;
+		    vec4 col2 = texblurred*3.0;
+		    float vignet = smoothstep(0.5, 1.25, pc.y);
+		    
+			fragColor = mix(col1, col2, vignet);
+		}
+		]]>
+		</program>
+	</language>
+</jittershader>

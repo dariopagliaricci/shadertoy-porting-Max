@@ -1,0 +1,109 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_A" type="int" default="0" />
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<bind param="buff_A" program="fp" />
+		
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="Plastic_Cream_common.glsl" program="fp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform sampler2D buff_A;
+			
+			
+			// Plastic Cream
+
+			// i was playing with Conway's game of life cellular automaton
+			// thinking i had an intuition for a smooth fading version
+			// with a lifetime gradient and a neighbor ratio
+
+			// found by accident that it can make reaction diffusion patterns
+			// got overwhelmed but couldn't posted another turing pattern feedback
+			// so i went a bit too far and now it's weird enough as i like it
+
+			// iteration from Wasp Blanket https://www.shadertoy.com/view/NlVBz1
+
+			#define T(uv) abs(texture(buff_A,uv).b)
+			#define N(v) normalize(v)
+
+			void main()
+			{
+			    
+				vec2 fragCoord = jit_in.texcoord * iResolution;
+				
+			    vec2 uv = fragCoord/iResolution.xy;
+			    vec4 frame = texture(buff_A, uv);
+			    
+			    // tints
+			    vec3 tint = .5 + .5 * cos(vec3(1,2,3)*5. + length(uv-.5)*3.);
+			    fragColor = vec4(frame.r * tint, 1);
+			    tint = .5 + .5 * cos(vec3(1,2,3)*5. + length(uv-.5)*2. + 3.);
+			    fragColor.rgb += frame.g * tint;
+			    
+			    // normal
+			    float height = 1.;
+			    vec3 unit = vec3(20./iResolution.xy, 0);
+			    vec3 normal = normalize(vec3(T(uv+unit.xz)-T(uv-unit.xz),
+			                                 T(uv-unit.zy)-T(uv+unit.zy),
+			                                 T(uv) * height));
+			    
+			    // light
+			    fragColor += vec4(.5) * clamp(dot(normal, N(vec3(-1,4,1))), 0., 1.);
+			    fragColor += vec4(.5) * pow(clamp(dot(normal, N(vec3(-1,1,2))), 0., 1.), 20.);
+			    
+			    // shadows
+			    fragColor -= vec4(0.5) * clamp(dot(normal, N(vec3(0,-4,1))), 0., 1.);
+			    fragColor *= pow(max(abs(frame.b)-.02,.0), .5);
+			}
+		]]>
+		</program>
+	</language>
+</jittershader>

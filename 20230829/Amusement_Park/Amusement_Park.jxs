@@ -1,0 +1,932 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+	<param name="iTime" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />	
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+
+		<bind param="iTime" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+	#version 330 core
+	
+	in jit_PerVertex {
+		vec2 uv;
+	} jit_in;
+	layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+	
+//============================================================================
+// Constants.
+//============================================================================
+
+const float PI = 3.1415926536;
+
+const vec3 BACKGROUND_COLOR = vec3( 0.1, 0.2, 0.6 );
+
+// Position the camera.
+vec3 CAM_LOOKAT = vec3( 0.3, 1.1, 0.0 );
+vec3 CAM_UP_VEC = vec3( 0.0, 1.0, 0.0 );
+
+// Vertical field-of-view angle of camera. In radians.
+const float FOVY = 45.0 * PI / 180.0;
+
+// Use this for avoiding the "epsilon problem" or the shadow acne problem.
+const float DEFAULT_TMIN = 10.0e-4;
+
+// Use this for tmax for non-shadow ray intersection test.
+const float DEFAULT_TMAX = 10.0e6;
+
+// Equivalent to number of recursion levels (0 means ray-casting only).
+// We are using iterations to replace recursions.
+const int NUM_ITERATIONS = 2;
+
+// Constants for the scene objects.
+const int NUM_LIGHTS = 3;
+const int NUM_MATERIALS = 10;
+const int NUM_PLANES = 5;
+const int NUM_SPHERES = 11;
+const int NUM_STICKS = 37;
+const int NUM_ROLLING_BALLS = 30;
+
+// Constants for the spikey
+const float EDGLEN_SPIKEY = 0.8;
+const float EDGRAD_SPIKEY = 0.056;
+
+//============================================================================
+// Define new struct types.
+//============================================================================
+struct Ray_t {
+    vec3 o;  // Ray Origin.
+    vec3 d;  // Ray Direction. A unit vector.
+};
+
+struct Plane_t {
+    // The plane equation is Ax + By + Cz + D = 0.
+    float A, B, C, D;
+    int materialID;
+};
+
+struct Sphere_t {
+    vec3 center;
+    float radius;
+    int materialID;
+};
+
+struct Stick_t {
+    vec3 vertexA;
+    vec3 vertexB;
+    float radius;
+    int materialID;
+};
+
+struct Light_t {
+    vec3 position;  // Point light 3D position.
+    vec3 I_a;       // For Ambient.
+    vec3 I_source;  // For Diffuse and Specular.
+};
+
+struct Material_t {
+    vec3 k_a;   // Ambient coefficient.
+    vec3 k_d;   // Diffuse coefficient.
+    vec3 k_r;   // Reflected specular coefficient.
+    vec3 k_rg;  // Global reflection coefficient.
+    float n;    // The specular reflection exponent. Ranges from 0.0 to 128.0.
+};
+
+//----------------------------------------------------------------------------
+// The lighting model used here is similar to that shown in
+// Lecture Topic B08 (Basic Ray Tracing). Here it is computed as
+//
+//     I_local = SUM_OVER_ALL_LIGHTS {
+//                   I_a * k_a +
+//                   k_shadow * I_source * [ k_d * (N.L) + k_r * (R.V)^n ]
+//               }
+// and
+//     I = I_local  +  k_rg * I_reflected
+//----------------------------------------------------------------------------
+
+
+//============================================================================
+// Global scene data.
+//============================================================================
+Plane_t Plane[NUM_PLANES];
+Sphere_t Sphere[NUM_SPHERES];
+Stick_t Stick[NUM_STICKS];
+Light_t Light[NUM_LIGHTS];
+Material_t Material[NUM_MATERIALS];
+
+Sphere_t GetRollingBall( int i )
+{
+    Sphere_t ball;
+
+    // translate direction
+    const vec3 transDirec = vec3(1.0, -0.1, 0.8);
+
+    float sizeOfHeart = 1.42;
+    float zPos = -2.0;
+    float yOffset = sizeOfHeart + 1.0;
+
+    ball.center.x = sizeOfHeart * sin( float(100 * i + 1) * iTime);
+
+    float x = ball.center.x;
+    if (cos(float(100 * i + 1) * iTime) > 0.0)
+    {
+        ball.center.y = sqrt(sizeOfHeart * abs(x) - pow(x, 2.0)) + yOffset;
+    } else {
+        ball.center.y = (-sizeOfHeart - 0.5) * sqrt(sqrt(sizeOfHeart) - sqrt(abs(x))) + yOffset;
+    }
+    ball.center.z = zPos;
+
+    ball.center += transDirec;
+    ball.radius = 0.1;
+    ball.materialID = 8;
+
+    return ball;
+}
+
+//============================================================================
+// init spikey
+//============================================================================
+void InitSpikey(){
+
+    float size = EDGLEN_SPIKEY;
+
+    // translate direction
+    vec3 transDirec = vec3 (0.0, size * 1.1135 + EDGRAD_SPIKEY * 2.0, 1.2);
+
+    // Verteces
+
+    vec3 vtx00 = size * vec3( 0.0   , -1.1135,  0.8574) + transDirec;
+    vec3 vtx01 = size * vec3( 0.8090, -1.1135,  0.2629) + transDirec;
+    vec3 vtx02 = size * vec3( 0.5   , -1.1135, -0.6882) + transDirec;
+    vec3 vtx03 = size * vec3(-0.5   , -1.1135, -0.6882) + transDirec;
+    vec3 vtx04 = size * vec3(-0.8090, -1.1135,  0.2629) + transDirec;
+
+    vec3 vtx10 = size * vec3( 0.0   , -0.2629,  1.3764) + transDirec;
+    vec3 vtx11 = size * vec3( 1.3090, -0.2629,  0.4253) + transDirec;
+    vec3 vtx12 = size * vec3( 0.8090, -0.2629, -1.1135) + transDirec;
+    vec3 vtx13 = size * vec3(-0.8090, -0.2629, -1.1135) + transDirec;
+    vec3 vtx14 = size * vec3(-1.3090, -0.2629,  0.4253) + transDirec;
+
+    vec3 vtx20 = size * vec3( 0.0   ,  0.2629, -1.3764) + transDirec;
+    vec3 vtx21 = size * vec3(-1.3090,  0.2629, -0.4253) + transDirec;
+    vec3 vtx22 = size * vec3(-0.8090,  0.2629,  1.1135) + transDirec;
+    vec3 vtx23 = size * vec3( 0.8090,  0.2629,  1.1135) + transDirec;
+    vec3 vtx24 = size * vec3( 1.3090,  0.2629, -0.4253) + transDirec;
+
+    vec3 vtx30 = size * vec3( 0.0   ,  1.1135, -0.8574) + transDirec;
+    vec3 vtx31 = size * vec3(-0.8090,  1.1135, -0.2629) + transDirec;
+    vec3 vtx32 = size * vec3(-0.5   ,  1.1135,  0.6882) + transDirec;
+    vec3 vtx33 = size * vec3( 0.5   ,  1.1135,  0.6882) + transDirec;
+    vec3 vtx34 = size * vec3( 0.8090,  1.1135, -0.2629) + transDirec;
+
+    // edges (sticks)
+    vec3 a; vec3 b; vec3 c; vec3 d;
+    for (int i = 0; i < NUM_STICKS; i++){
+        Stick[i].radius = EDGRAD_SPIKEY;
+    }
+
+    // pyrimid0: 00 12 21 33
+    a = vtx00; b = vtx12; c = vtx21; d = vtx33;
+    Stick[ 0].vertexA = a; Stick[ 0].vertexB = b; Stick[ 0].materialID = 3;
+    Stick[ 1].vertexA = a; Stick[ 1].vertexB = c; Stick[ 1].materialID = 3;
+    Stick[ 2].vertexA = a; Stick[ 2].vertexB = d; Stick[ 2].materialID = 3;
+    Stick[ 3].vertexA = b; Stick[ 3].vertexB = c; Stick[ 3].materialID = 3;
+    Stick[ 4].vertexA = b; Stick[ 4].vertexB = d; Stick[ 4].materialID = 3;
+    Stick[ 5].vertexA = c; Stick[ 5].vertexB = d; Stick[ 5].materialID = 3;
+
+    // pyrimid1: 01 13 22 34
+    a = vtx01; b = vtx13; c = vtx22; d = vtx34;
+    Stick[ 6].vertexA = a; Stick[ 6].vertexB = b; Stick[ 6].materialID = 4;
+    Stick[ 7].vertexA = a; Stick[ 7].vertexB = c; Stick[ 7].materialID = 4;
+    Stick[ 8].vertexA = a; Stick[ 8].vertexB = d; Stick[ 8].materialID = 4;
+    Stick[ 9].vertexA = b; Stick[ 9].vertexB = c; Stick[ 9].materialID = 4;
+    Stick[10].vertexA = b; Stick[10].vertexB = d; Stick[10].materialID = 4;
+    Stick[11].vertexA = c; Stick[11].vertexB = d; Stick[11].materialID = 4;
+
+    // pyrimid2: 02 14 23 30
+    a = vtx02; b = vtx14; c = vtx23; d = vtx30;
+    Stick[12].vertexA = a; Stick[12].vertexB = b; Stick[12].materialID = 5;
+    Stick[13].vertexA = a; Stick[13].vertexB = c; Stick[13].materialID = 5;
+    Stick[14].vertexA = a; Stick[14].vertexB = d; Stick[14].materialID = 5;
+    Stick[15].vertexA = b; Stick[15].vertexB = c; Stick[15].materialID = 5;
+    Stick[16].vertexA = b; Stick[16].vertexB = d; Stick[16].materialID = 5;
+    Stick[17].vertexA = c; Stick[17].vertexB = d; Stick[17].materialID = 5;
+
+    // pyrimid3: 03 10 24 31
+    a = vtx03; b = vtx10; c = vtx24; d = vtx31;
+    Stick[18].vertexA = a; Stick[18].vertexB = b; Stick[18].materialID = 6;
+    Stick[19].vertexA = a; Stick[19].vertexB = c; Stick[19].materialID = 6;
+    Stick[20].vertexA = a; Stick[20].vertexB = d; Stick[20].materialID = 6;
+    Stick[21].vertexA = b; Stick[21].vertexB = c; Stick[21].materialID = 6;
+    Stick[22].vertexA = b; Stick[22].vertexB = d; Stick[22].materialID = 6;
+    Stick[23].vertexA = c; Stick[23].vertexB = d; Stick[23].materialID = 6;
+
+    // pyrimid4: 04 11 20 32
+    a = vtx04; b = vtx11; c = vtx20; d = vtx32;
+    Stick[24].vertexA = a; Stick[24].vertexB = b; Stick[24].materialID = 7;
+    Stick[25].vertexA = a; Stick[25].vertexB = c; Stick[25].materialID = 7;
+    Stick[26].vertexA = a; Stick[26].vertexB = d; Stick[26].materialID = 7;
+    Stick[27].vertexA = b; Stick[27].vertexB = c; Stick[27].materialID = 7;
+    Stick[28].vertexA = b; Stick[28].vertexB = d; Stick[28].materialID = 7;
+    Stick[29].vertexA = c; Stick[29].vertexB = d; Stick[29].materialID = 7;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// a box
+/////////////////////////////////////////////////////////////////////////////
+void InitBox(){
+    // size
+    float size = 0.55;
+    float ballRad = 0.1;
+
+    // translate direction
+    vec3 transDirec = vec3(1.5, ballRad, -0.1);
+
+    for (int i = 0; i < NUM_SPHERES; i++){
+        Sphere[i].radius = ballRad;
+        Sphere[i].materialID = 0;
+    }
+
+    Sphere[0].center = size * vec3(0.0, sqrt(6.0), 0.0) + transDirec;
+    Sphere[1].center = size * vec3(cos(iTime)         , 0.0, sin(iTime)         ) + transDirec;
+    Sphere[2].center = size * vec3(cos(iTime+PI*0.667), 0.0, sin(iTime+PI*0.667)) + transDirec;
+    Sphere[3].center = size * vec3(cos(iTime+PI*1.333), 0.0, sin(iTime+PI*1.333)) + transDirec;
+
+    Stick[30].vertexA = Sphere[0].center; Stick[30].vertexB = Sphere[1].center;
+    Stick[31].vertexA = Sphere[0].center; Stick[31].vertexB = Sphere[2].center;
+    Stick[32].vertexA = Sphere[0].center; Stick[32].vertexB = Sphere[3].center;
+    Stick[33].vertexA = Sphere[1].center; Stick[33].vertexB = Sphere[2].center;
+    Stick[34].vertexA = Sphere[1].center; Stick[34].vertexB = Sphere[3].center;
+    Stick[35].vertexA = Sphere[2].center; Stick[35].vertexB = Sphere[3].center;
+
+    Stick[30].radius = ballRad / 2.5; Stick[30].materialID = 1;
+    Stick[31].radius = ballRad / 2.5; Stick[31].materialID = 1;
+    Stick[32].radius = ballRad / 2.5; Stick[32].materialID = 1;
+    Stick[33].radius = ballRad / 2.5; Stick[33].materialID = 1;
+    Stick[34].radius = ballRad / 2.5; Stick[34].materialID = 1;
+    Stick[35].radius = ballRad / 2.5; Stick[35].materialID = 1;
+
+    ballRad = 0.14;
+    Sphere[4].center = vec3(-0.7, ballRad, 2.2);
+    Sphere[5].center = vec3( 0.5, ballRad, 2.5);
+    Sphere[4].radius = ballRad; Sphere[4].materialID = 0;
+    Sphere[5].radius = ballRad; Sphere[5].materialID = 0;
+    Stick[36].vertexA = Sphere[4].center; Stick[36].vertexB = Sphere[5].center;
+    Stick[36].radius = ballRad / 2.5; Stick[36].materialID = 8;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Initializes the scene.
+/////////////////////////////////////////////////////////////////////////////
+void InitScene()
+{
+    // Horizontal plane.
+    Plane[0].A = 0.0;
+    Plane[0].B = 1.0;
+    Plane[0].C = 0.0;
+    Plane[0].D = 0.0;
+    Plane[0].materialID = 0;
+
+    // Vertical plane.
+    Plane[1].A = 0.0;
+    Plane[1].B = 0.0;
+    Plane[1].C = 1.0;
+    Plane[1].D = 3.5;
+    Plane[1].materialID = 0;
+
+    Plane[2].A = 0.0;
+    Plane[2].B = 1.0;
+    Plane[2].C = 0.0;
+    Plane[2].D = 10.0;
+    Plane[2].materialID = 9;
+
+    Plane[3].A = 1.0;
+    Plane[3].B = 0.0;
+    Plane[3].C = 0.0;
+    Plane[3].D = -10.0;
+    Plane[3].materialID = 0;
+
+    Plane[4].A = 1.0;
+    Plane[4].B = 0.0;
+    Plane[4].C = 0.0;
+    Plane[4].D = 10.0;
+    Plane[4].materialID = 9;
+
+    // Spikey.
+    InitSpikey();
+
+    // Box.
+    InitBox();
+
+    // Spheres.
+    // rolling sphere
+    Sphere[6].center = vec3( -2.0 - sin(1.3*iTime), 0.3, 0.5 + 1.2 * cos(1.3*iTime) );
+    Sphere[6].radius = 0.24;
+    Sphere[6].materialID = 3;
+
+    // back sphere
+    Sphere[7].center = vec3( 0.2, 0.5, -1.0 );
+    Sphere[7].radius = 0.5;
+    Sphere[7].materialID = 2;
+
+    // frount sphere
+    Sphere[8].center = vec3( 1.45, 0.25, 1.55 );
+    Sphere[8].radius = 0.25;
+    Sphere[8].materialID = 4;
+
+    // slipping sphere
+    Sphere[9].center = vec3( abs(sin(2.0*iTime))+2.1, 0.15, 0.2*abs(sin(2.0*iTime))+0.5);
+    Sphere[9].radius = 0.15;
+    Sphere[9].materialID = 0;
+
+    // jumpping sphere
+    Sphere[10].center = vec3( -2.0, 2.0*abs(sin(2.0*iTime))+0.15, 0.5 );
+    Sphere[10].radius = 0.15;
+    Sphere[10].materialID = 5;
+
+    // Balls - Silver material.
+    Material[0].k_d = vec3( 0.5, 0.5, 0.5 );
+    Material[0].k_a = 0.2 * Material[0].k_d;
+    Material[0].k_r = 2.0 * Material[0].k_d;
+    Material[0].k_rg = 0.5 * Material[0].k_r;
+    Material[0].n = 64.0;
+
+    // Balls - Azure material.
+    Material[1].k_d = vec3( 63.0, 95.0, 132.0 ) / 255.0;
+    Material[1].k_a = 0.2 * Material[1].k_d;
+    Material[1].k_r = 2.0 * Material[1].k_d;
+    Material[1].k_rg = 0.5 * Material[1].k_r;
+    Material[1].n = 64.0;
+
+    // Balls - White material.
+    Material[2].k_d = vec3( 1.0, 1.0, 1.0 );
+    Material[2].k_a = 0.2 * Material[2].k_d;
+    Material[2].k_r = vec3( 1.0, 1.0, 1.0 );
+    Material[2].k_rg = 0.5 * Material[2].k_r;
+    Material[2].n = 128.0;
+
+    // Spikey - yellow.
+    Material[3].k_d = vec3( 255.0, 221.0, 169.0 )/255.0;
+    Material[3].k_a =  0.2 * Material[3].k_d;
+    Material[3].k_r =  2.0 * Material[3].k_d;
+    Material[3].k_rg = 0.5 * Material[3].k_r;
+    Material[3].n = 128.0;
+
+    // Spikey - blue.
+    Material[4].k_d = vec3( 207.0, 231.0, 245.0 )/255.0;
+    Material[4].k_a =  0.2 * Material[4].k_d;
+    Material[4].k_r =  2.0 * Material[4].k_d;
+    Material[4].k_rg = 0.5 * Material[4].k_r;
+    Material[4].n = 128.0;
+
+    // Spikey - violet.
+    Material[5].k_d = vec3( 201.0, 175.0, 195.0 )/255.0;
+    Material[5].k_a =  0.2 * Material[5].k_d;
+    Material[5].k_r =  2.0 * Material[5].k_d;
+    Material[5].k_rg = 0.5 * Material[5].k_r;
+    Material[5].n = 128.0;
+
+    // Spikey - crimson.
+    Material[6].k_d = vec3( 161.0, 72.0, 66.0 )/255.0;
+    Material[6].k_a =  0.2 * Material[6].k_d;
+    Material[6].k_r =  2.0 * Material[6].k_d;
+    Material[6].k_rg = 0.5 * Material[6].k_r;
+    Material[6].n = 128.0;
+
+    // Spikey - purple.
+    Material[7].k_d = vec3( 104.0, 84.0, 141.0 )/255.0;
+    Material[7].k_a =  0.2 * Material[7].k_d;
+    Material[7].k_r =  2.0 * Material[7].k_d;
+    Material[7].k_rg = 0.5 * Material[7].k_r;
+    Material[7].n = 128.0;
+
+    // Rolling Balls - red.
+    Material[8].k_d = vec3( 244.0, 128.0, 135.0) / 255.0;
+    Material[8].k_a =  0.2 * Material[8].k_d;
+    Material[8].k_r =  2.0 * Material[8].k_d;
+    Material[8].k_rg = 0.5 * Material[8].k_r;
+    Material[8].n = 128.0;
+
+    // Walls - white.
+    Material[9].k_d = vec3( 200.0,200.0, 200.0) / 255.0;
+    Material[9].k_a =  0.2 * Material[9].k_d;
+    Material[9].k_r =  vec3(0.0);;
+    Material[9].k_rg = vec3(0.0);
+    Material[9].n = 128.0;
+
+
+    // Lighting Coeffecient
+    float lightCoeff = 1.0 / 12.5;
+
+    // Light 1.
+    Light[0].position = vec3(2.0*cos(1.1*iTime)+0.5, 8.0, 2.0*sin(1.1*iTime)+2.0) * 1.2;
+    Light[0].I_a      = vec3(7.0, 1.0, 4.0) * lightCoeff;
+    Light[0].I_source = vec3(7.0, 1.0, 4.0) * lightCoeff;
+
+    // Light 2.
+    Light[1].position = vec3(2.0*cos(1.1*iTime+PI*0.667)+0.5, 8.0, 2.0*sin(1.1*iTime+PI*0.667)+2.0) * 1.2;
+    Light[1].I_a      = vec3(1.0, 4.0, 7.0) * lightCoeff;
+    Light[1].I_source = vec3(1.0, 4.0, 7.0) * lightCoeff;
+
+    // Light 3.
+    Light[2].position = vec3(2.0*cos(1.1*iTime+PI*1.333)+0.5, 8.0, 2.0*sin(1.1*iTime+PI*1.333)+2.0) * 1.2;
+    Light[2].I_a      = vec3(4.0, 7.0, 1.0) * lightCoeff;
+    Light[2].I_source = vec3(4.0, 7.0, 1.0) * lightCoeff;
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a plane and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+// If there is such an intersection, outputs the value of t, the position
+// of the intersection (hitPos) and the normal vector at the intersection
+// (hitNormal).
+/////////////////////////////////////////////////////////////////////////////
+bool IntersectPlane( in Plane_t pln, in Ray_t ray, in float tmin, in float tmax,
+                     out float t, out vec3 hitPos, out vec3 hitNormal )
+{
+    vec3 N = vec3( pln.A, pln.B, pln.C );
+    float NRd = dot( N, ray.d );
+    float NRo = dot( N, ray.o );
+    float t0 = (-pln.D - NRo) / NRd;
+    if ( t0 < tmin || t0 > tmax ) return false;
+
+    // We have a hit -- output results.
+    t = t0;
+    hitPos = ray.o + t0 * ray.d;
+    hitNormal = normalize( N );
+    return true;
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a plane and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+/////////////////////////////////////////////////////////////////////////////
+bool IntersectPlane( in Plane_t pln, in Ray_t ray, in float tmin, in float tmax )
+{
+    vec3 N = vec3( pln.A, pln.B, pln.C );
+    float NRd = dot( N, ray.d );
+    float NRo = dot( N, ray.o );
+    float t0 = (-pln.D - NRo) / NRd;
+    if ( t0 < tmin || t0 > tmax ) return false;
+    return true;
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a sphere and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+// If there is one or two such intersections, outputs the value of the
+// smaller t, the position of the intersection (hitPos) and the normal
+// vector at the intersection (hitNormal).
+/////////////////////////////////////////////////////////////////////////////
+bool IntersectSphere( in Sphere_t sph, in Ray_t ray, in float tmin, in float tmax,
+                      out float t, out vec3 hitPos, out vec3 hitNormal )
+{
+
+    vec3 v=ray.o - sph.center;
+    float b=dot(ray.d, v);
+    float c=dot(v, v)-sph.radius*sph.radius;
+    float d=b*b-c;
+    if( d > 0.0 )
+    {
+        d = sqrt(d);
+        t=-b-d;
+        if(t>=tmin && t<=tmax) {
+            hitPos = ray.o + t * ray.d;
+            hitNormal = normalize( hitPos-sph.center );
+            return true;
+        }
+        t = -b + d;
+        if(t>=tmin && t<=tmax) {
+            hitPos = ray.o + t * ray.d;
+            hitNormal = normalize( hitPos-sph.center );
+            return true;
+        }
+    }
+    return false;
+
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a sphere and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+/////////////////////////////////////////////////////////////////////////////
+bool IntersectSphere( in Sphere_t sph, in Ray_t ray, in float tmin, in float tmax )
+{
+
+    vec3 v=ray.o - sph.center;
+    float b=dot(ray.d, v);
+    float c=dot(v, v)-sph.radius*sph.radius;
+    float d=b*b-c;
+    if( d> 0.0 )
+    {
+        d = sqrt(d);
+        float t= -b - d;
+        if(t>=tmin && t<=tmax) return true;
+        t = -b + d;
+        if(t>=tmin && t<=tmax) return true;
+    }
+    return false;
+
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a stick and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+// If there is one or two such intersections, outputs the value of the
+// smaller t, the position of the intersection (hitPos) and the normal
+// vector at the intersection (hitNormal).
+/////////////////////////////////////////////////////////////////////////////
+
+// copied from https://www.shadertoy.com/view/Xt3SzX
+float capIntersect( in vec3 ro, in vec3 rd, in vec3 pa, in vec3 pb, in float r )
+{
+    vec3  ba = pb - pa;
+    vec3  oa = ro - pa;
+
+    float baba = dot(ba,ba);
+    float bard = dot(ba,rd);
+    float baoa = dot(ba,oa);
+    float rdoa = dot(rd,oa);
+    float oaoa = dot(oa,oa);
+
+    float a = baba      - bard*bard;
+    float b = baba*rdoa - baoa*bard;
+    float c = baba*oaoa - baoa*baoa - r*r*baba;
+    float h = b*b - a*c;
+    if( h>=0.0 )
+    {
+        float t = (-b-sqrt(h))/a;
+        float y = baoa + t*bard;
+        // body
+        if( y>0.0 && y<baba ) return t;
+        // caps
+        vec3 oc = (y<=0.0) ? oa : ro - pb;
+        b = dot(rd,oc);
+        c = dot(oc,oc) - r*r;
+        h = b*b - c;
+        if( h>0.0 ) return -b - sqrt(h);
+    }
+    return -1.0;
+}
+
+vec3 capNormal( in vec3 pos, in vec3 a, in vec3 b, in float r )
+{
+    vec3  ba = b - a;
+    vec3  pa = pos - a;
+    float h = clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
+    return (pa - h*ba)/r;
+}
+
+bool IntersectStick( in Stick_t stk, in Ray_t ray, in float tmin, in float tmax,
+                      out float t, out vec3 hitPos, out vec3 hitNormal )
+{
+    t = capIntersect( ray.o, ray.d, stk.vertexA, stk.vertexB, stk.radius );
+
+    if (t >= 0.0 && t <= tmax){
+        hitPos = ray.o + t * ray.d;
+        hitNormal = capNormal(hitPos, stk.vertexA, stk.vertexB, stk.radius);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes intersection between a stick and a ray.
+// Returns true if there is an intersection where the ray parameter t is
+// between tmin and tmax, otherwise returns false.
+/////////////////////////////////////////////////////////////////////////////
+bool IntersectStick( in Stick_t stk, in Ray_t ray, in float tmin, in float tmax)
+{
+    float t = capIntersect( ray.o, ray.d, stk.vertexA, stk.vertexB, stk.radius );
+    if (t >= 0.0 && t >= tmin && t <= tmax){
+        return true;
+    } else {
+        return false;
+    }
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Computes (I_a * k_a) + k_shadow * I_source * [ k_d * (N.L) + k_r * (R.V)^n ].
+// Input vectors L, N and V are pointing AWAY from surface point.
+// Assume all vectors L, N and V are unit vectors.
+/////////////////////////////////////////////////////////////////////////////
+vec3 PhongLighting( in vec3 L, in vec3 N, in vec3 V, in bool inShadow,
+                    in Material_t mat, in Light_t light )
+{
+    if ( inShadow ) {
+        return light.I_a * mat.k_a;
+    }
+    else {
+        vec3 R = reflect( -L, N );
+        float N_dot_L = max( 0.0, dot( N, L ) );
+        float R_dot_V = max( 0.0, dot( R, V ) );
+        float R_dot_V_pow_n = ( R_dot_V == 0.0 )? 0.0 : pow( R_dot_V, mat.n );
+
+        return light.I_a * mat.k_a +
+               light.I_source * (mat.k_d * N_dot_L + mat.k_r * R_dot_V_pow_n);
+    }
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Casts a ray into the scene and returns color computed at the nearest
+// intersection point. The color is the sum of light from all light sources,
+// each computed using Phong Lighting Model, with consideration of
+// whether the interesection point is being shadowed from the light.
+// If there is no interesection, returns the background color, and outputs
+// hasHit as false.
+// If there is intersection, returns the computed color, and outputs
+// hasHit as true, the 3D position of the intersection (hitPos), the
+// normal vector at the intersection (hitNormal), and the k_rg value
+// of the material of the intersected object.
+/////////////////////////////////////////////////////////////////////////////
+vec3 CastRay( in Ray_t ray,
+              out bool hasHit, out vec3 hitPos, out vec3 hitNormal, out vec3 k_rg )
+{
+    // Find whether and where the ray hits some object.
+    // Take the nearest hit point.
+
+    bool hasHitSomething = false;
+    float nearest_t = DEFAULT_TMAX;   // The ray parameter t at the nearest hit point.
+    vec3 nearest_hitPos;              // 3D position of the nearest hit point.
+    vec3 nearest_hitNormal;           // Normal vector at the nearest hit point.
+    int nearest_hitMatID;             // MaterialID of the object at the nearest hit point.
+
+    float temp_t;
+    vec3 temp_hitPos;
+    vec3 temp_hitNormal;
+    bool temp_hasHit;
+    
+    for (int i=0; i<NUM_PLANES; i++){
+        if (IntersectPlane(Plane[i], ray,DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=Plane[i].materialID;
+        }
+    }
+    for (int i=0; i<NUM_SPHERES; i++){
+        if (IntersectSphere(Sphere[i], ray,DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=Sphere[i].materialID;
+        }
+    }
+        //Sphere_t kk = Sphere_t(vec3(-0.15,1.0,1.0),1.5,1);
+        /*
+        if (IntersectSphere(kk, ray,DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=kk.materialID;
+        }*/
+    
+    if( IntersectSphere( Sphere_t(vec3(-0.15,1.0,1.0),1.5,0),ray, 0.01, 1000.0 ) )
+    {
+        for (int i=0; i<30; i++){
+        if (IntersectStick(Stick[i], ray, DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=Stick[i].materialID;
+        }
+    }    }
+
+
+    for (int i=30; i<NUM_STICKS; i++){
+        if (IntersectStick(Stick[i], ray, DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=Stick[i].materialID;
+        }
+    }
+    for (int i=0; i<NUM_ROLLING_BALLS; i++){
+        Sphere_t ball = GetRollingBall(i);
+        if (IntersectSphere(ball, ray, DEFAULT_TMIN,nearest_t,temp_t,temp_hitPos,temp_hitNormal))
+        {
+            hasHitSomething=true;
+            nearest_t=temp_t;
+            nearest_hitNormal=temp_hitNormal;
+            nearest_hitPos=temp_hitPos;
+            nearest_hitMatID=ball.materialID;
+        }
+    }
+
+    // One of the output results.
+    hasHit = hasHitSomething;
+    if ( !hasHitSomething ) return BACKGROUND_COLOR;
+
+    vec3 I_local = vec3( 0.0 );  // Result color will be accumulated here.
+
+    for (int i = 0; i < NUM_LIGHTS; i++)
+    {
+        Light_t light = Light[i];
+        Ray_t shadowRay;
+        shadowRay.o = nearest_hitPos;
+        shadowRay.d = normalize(light.position - nearest_hitPos);
+        float maxTime = (light.position - nearest_hitPos).x / shadowRay.d.x;
+        hasHitSomething = false;
+        if (dot(shadowRay.d, nearest_hitNormal) > 0.0)
+        {
+        for (int i = 0; i < NUM_PLANES; i++)
+        {
+            hasHitSomething = IntersectPlane(Plane[i], shadowRay, DEFAULT_TMIN, maxTime);
+            if (hasHitSomething)
+            {
+                break;
+            }
+        }
+        if (!hasHitSomething)
+        {
+            for (int i = 0; i < NUM_SPHERES; i++)
+            {
+                hasHitSomething = IntersectSphere(Sphere[i], shadowRay, DEFAULT_TMIN, maxTime);
+                if (hasHitSomething)
+                {
+                    break;
+                }
+            }
+        }
+        if (!hasHitSomething)
+        {
+            if( IntersectSphere( Sphere_t(vec3(-0.15,1.0,1.0),1.5,0),ray, 0.0, 1000.0 ) )
+            {
+            for (int i = 0; i < 30; i++)
+            {
+                hasHitSomething = IntersectStick(Stick[i], shadowRay, DEFAULT_TMIN, maxTime);
+                if (hasHitSomething)
+                {
+                    break;
+                }
+            }
+            }
+            }
+        if (!hasHitSomething)
+        {
+
+            for (int i = 30; i < NUM_STICKS; i++)
+            {
+                hasHitSomething = IntersectStick(Stick[i], shadowRay, DEFAULT_TMIN, maxTime);
+                if (hasHitSomething)
+                {
+                    break;
+                }
+            }
+        }
+        if (!hasHitSomething)
+        {
+            for (int i = 0; i < NUM_ROLLING_BALLS; i++)
+            {
+                Sphere_t ball = GetRollingBall(i);
+                hasHitSomething = IntersectSphere(ball, shadowRay, DEFAULT_TMIN, maxTime);
+                if (hasHitSomething)
+                {
+                    break;
+                }
+            }
+        }
+        }
+        I_local += PhongLighting(normalize(light.position - nearest_hitPos), normalize(nearest_hitNormal), normalize(ray.o - nearest_hitPos), hasHitSomething, Material[nearest_hitMatID], light);
+
+    }
+
+    // Populate output results.
+    hitPos = nearest_hitPos;
+    hitNormal = nearest_hitNormal;
+    k_rg = Material[nearest_hitMatID].k_rg;
+
+    return I_local;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Execution of fragment shader starts here.
+// 1. Initializes the scene.
+// 2. Compute a primary ray for the current pixel (fragment).
+// 3. Trace ray into the scene with NUM_ITERATIONS recursion levels.
+/////////////////////////////////////////////////////////////////////////////
+void main()
+{
+    InitScene();
+
+    // Scale pixel 2D position such that its y coordinate is in [-1.0, 1.0].
+
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 pixel_pos = (2.0 * fragCoord.xy - viewPort.xy) / viewPort.y;
+    vec4 initCamPos = vec4( -1.0, 1.1, 5.0, 1.0 );
+    float rotateRadian = -60.0 * abs(sin(0.1 * iTime-5.25)) * PI / 180.0;
+    mat4 rotateMat = mat4(
+                        vec4(cos(rotateRadian), 0.0, -sin(rotateRadian), 0.0),
+                        vec4(0.0, 1.0, 0.0, 0.0),
+                        vec4(sin(rotateRadian), 0.0, cos(rotateRadian), 0.0),
+                        vec4(0.0, 0.0, 0.0, 1.0)
+                        );
+
+    vec3 CAM_POS    = (initCamPos * rotateMat).xyz + vec3(0.0, 0.0, 0.5);
+
+    // Set up camera coordinate frame in world space.
+    vec3 cam_z_axis = normalize( CAM_POS - CAM_LOOKAT );
+    vec3 cam_x_axis = normalize( cross(CAM_UP_VEC, cam_z_axis) );
+    vec3 cam_y_axis = normalize( cross(cam_z_axis, cam_x_axis));
+
+    // Create primary ray.
+    float pixel_pos_z = -1.0 / tan(FOVY / 2.0);
+    Ray_t pRay;
+    pRay.o = CAM_POS;
+    pRay.d = normalize( pixel_pos.x * cam_x_axis  +  pixel_pos.y * cam_y_axis  +  pixel_pos_z * cam_z_axis );
+
+
+    // Start Ray Tracing.
+    // Use iterations to emulate the recursion.
+
+    vec3 I_result = vec3( 0.0 );
+    vec3 compounded_k_rg = vec3( 1.0 );
+    Ray_t nextRay = pRay;
+
+    for ( int level = 0; level <= NUM_ITERATIONS; level++ )
+    {
+        bool hasHit;
+        vec3 hitPos, hitNormal, k_rg;
+
+        vec3 I_local = CastRay( nextRay, hasHit, hitPos, hitNormal, k_rg );
+
+        I_result += compounded_k_rg * I_local;
+
+        if ( !hasHit ) break;
+
+        compounded_k_rg *= k_rg;
+
+        nextRay = Ray_t( hitPos, normalize( reflect(nextRay.d, hitNormal) ) );
+    }
+
+    outColor = vec4( I_result, 1.0 );
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

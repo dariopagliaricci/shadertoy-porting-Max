@@ -1,0 +1,380 @@
+<jittershader name="Path tracing">
+    <description>Default Slab </description>
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="pos" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+    <param name="viewPort" type="vec2" state ="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+    <param name="sphereTex" type="int" default="1" />
+    <param name="sample" type="float" default="0.0" />
+
+    <language name="glsl" version="1.5">
+
+        <bind param="MVP" program="vp" />
+        <bind param="pos" program="vp" />
+        <bind param="uv" program="vp" />
+        <bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+        <bind param="sphereTex" program="fp" />
+        <bind param="sample" program="fp" />
+
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 pos;
+            in vec2 uv;
+
+            out jit_PerVertex {
+                vec2 uv;
+            } jit_out;
+            uniform mat4 MVP;
+            uniform mat4 textureMatrix0;
+            
+            void main(void) {
+                gl_Position = MVP*vec4(pos, 1.);
+                jit_out.uv = uv;
+            }
+        ]]>
+        </program>
+        
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+// Raytracing in one weekend, chapter 9: Dielectrics. Created by Reinder Nijhoff 2018
+// @reindernijhoff
+//
+// https://www.shadertoy.com/view/MlVcDz
+//
+// These shaders are my implementation of the raytracer described in the (excellent) 
+// book "Raytracing in one weekend" [1] by Peter Shirley (@Peter_shirley). I have tried 
+// to follow the code from his book as much as possible.
+//
+// [1] http://in1weekend.blogspot.com/2016/01/ray-tracing-in-one-weekend.html
+//
+
+
+#define VERY_FAR 100000000
+#define BOUNCES 8
+#define LAMBERTIAN 0
+#define METAL 1
+#define DIELECTRIC 2
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform sampler2DRect sphereTex;
+uniform float sample;
+
+struct rayInfo {
+    vec3 origin;
+    vec3 dir;
+};
+
+// struct material {
+//     int type;
+//     vec3 albedo;
+//     float v;
+// };
+struct matInfo {
+    int type;
+    vec3 alb;
+    vec3 albedo;
+    float v;
+    vec3 emi;
+};
+
+struct hitInfo {
+    float t0;
+    vec3 nor;
+    vec3 p;
+    matInfo material;
+};
+
+struct searchInfo {
+    float rngState;
+    vec3 finalColor;
+    vec3 through;
+};
+
+//
+// Hash functions by Nimitz:
+// https://www.shadertoy.com/view/Xt3cDn
+//
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+float g_seed = 0.;
+
+float hash1(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    return float(n)*(1.0/float(0xffffffffU));
+}
+
+vec2 hash2(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 hash3(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec3 rz = uvec3(n, n*16807U, n*48271U);
+    return vec3(rz & uvec3(0x7fffffffU))/float(0x7fffffff);
+}
+
+//
+// Ray trace helper functions
+//
+
+float schlick(float cosine, float ior) {
+    float r0 = (1.-ior)/(1.+ior);
+    r0 = r0*r0;
+    return r0 + (1.-r0)*pow((1.-cosine),5.);
+}
+
+bool modified_refract(const in vec3 v, const in vec3 n, const in float ni_over_nt, 
+                      out vec3 refracted) {
+    float dt = dot(v, n);
+    float discriminant = 1. - ni_over_nt*ni_over_nt*(1.-dt*dt);
+    if (discriminant > 0.) {
+        refracted = ni_over_nt*(v - n*dt) - n*sqrt(discriminant);
+        return true;
+    } else { 
+        return false;
+    }
+}
+
+vec3 random_in_unit_sphere(inout searchInfo search) {
+    vec3 h = hash3(search) * vec3(2.,6.28318530718,1.)-vec3(1,0,0);
+    float phi = h.y;
+    float r = pow(h.z, 1./3.);
+	return r * vec3(sqrt(1.-h.x*h.x)*vec2(sin(phi),cos(phi)),h.x);
+}
+
+void material_scatter(const in rayInfo r_in, inout matInfo mat, inout hitInfo hit, inout searchInfo search, inout vec3 attenuation, out rayInfo scattered) {
+    if(hit.material.type == LAMBERTIAN) {
+        vec3 rd = normalize(hit.nor + random_in_unit_sphere(search));
+        scattered = rayInfo(hit.p, rd);
+        attenuation = hit.material.albedo;
+        return;
+    
+    } else if (hit.material.type == METAL) {
+        vec3 rd = reflect(r_in.dir, hit.nor);
+        scattered = rayInfo(hit.p, normalize(rd + hit.material.v*random_in_unit_sphere(search)));
+        attenuation = hit.material.albedo;
+        return;
+    
+    } else if (hit.material.type == DIELECTRIC) {
+        vec3 outward_normal, refracted, 
+             reflected = reflect(r_in.dir, hit.nor);
+        float ni_over_nt, reflect_prob, cosine;
+        
+        attenuation = vec3(1);
+        if (dot(r_in.dir, hit.nor) > 0.) {
+            outward_normal = -hit.nor;
+            ni_over_nt = hit.material.v;
+            cosine = dot(r_in.dir, hit.nor);
+            cosine = sqrt(1. - hit.material.v*hit.material.v*(1.-cosine*cosine));
+        } else {
+            outward_normal = hit.nor;
+            ni_over_nt = 1. / hit.material.v;
+            cosine = -dot(r_in.dir, hit.nor);
+        }
+        
+        if (modified_refract(r_in.dir, outward_normal, ni_over_nt, refracted)) {
+            reflect_prob = schlick(cosine, hit.material.v);
+        } else {
+            reflect_prob = 1.;
+        }
+        
+        if (hash1(search) < reflect_prob) {
+            scattered = rayInfo(hit.p, reflected);
+        } else {
+            scattered = rayInfo(hit.p, refracted);
+        }
+        return;
+    }
+    return;
+}
+
+void TestSphereTrace(in rayInfo ray, inout hitInfo hit, inout matInfo mat, inout hitInfo material, in vec4 sphere, 
+                        vec3 color, vec3 emissive, int type, float v, vec3 albedo)
+{
+    //get the vector from the center of this sphere to where the ray begins.
+    vec3 m = ray.origin - sphere.xyz;
+
+    //get the dot product of the above vector and the ray's vector
+    float b = dot(m, ray.dir);
+
+    float c = dot(m, m) - sphere.w * sphere.w;
+
+    //exit if r's origin outside s (c > 0) and r pointing away from s (b > 0)
+    if(c > 0.0 && b > 0.0)
+        return;
+
+    //calculate discriminant
+    float discr = b * b - c;
+
+    //a negative discriminant corresponds to ray missing sphere
+    if(discr < 0.0)
+        return;
+    
+    //ray now found to intersect sphere, compute smallest t value of intersection
+    bool fromInside = false;
+    float dist = -b - sqrt(discr);
+    if (dist < 0.0f)
+    {
+        fromInside = true;
+        dist = -b + sqrt(discr);
+    }
+    
+    if (dist < hit.t0)//if (dist > c_minimumRayHitTime && dist < hit.t0)
+    {
+        hit.t0 = dist;        
+        hit.nor = normalize((ray.origin+ray.dir*dist) - sphere.xyz) * (fromInside ? -1.0f : 1.0f);
+        hit.material.type = type;
+        hit.material.v = v;
+        hit.material.albedo = albedo;
+        mat.alb = color;
+        mat.emi = emissive;
+        return;
+    }
+    
+    return;
+}
+
+//
+// Color & Scene
+//
+
+void computeFirstRay(out rayInfo ray, inout searchInfo search) {
+    vec2 screenPos = jit_in.uv*2-1;
+    float aspectRatio = viewPort.x / viewPort.y;
+    screenPos.x *= aspectRatio;
+    //Antialiasing
+    vec2 jittering = hash2(search)-0.5;
+    jittering /= viewPort;// stay in the subpixel area
+    screenPos += jittering*3;
+
+    ray.origin = eye;
+
+    vec3 target = vec3(0.);
+    vec3 front = normalize(target - ray.origin);
+    vec3 right = cross(vec3(0., 1., 0.), front);
+    vec3 up = cross(front, right);
+
+    vec3 pixPos = vec3(screenPos, 4);
+    ray.dir = normalize(pixPos.x*right + pixPos.y*up + pixPos.z*front);
+}
+
+void rayTrace(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, inout hitInfo material, inout searchInfo search)
+{
+    hit.t0 = VERY_FAR;  
+    float t = .5*ray.dir.y + .5;
+    vec3 center01 = vec3(0,0,-1);
+    float radius01 = (.5);
+    vec3 center02 = vec3(0,-100.5,-1);
+    float radius02 = (100.);
+    vec3 center03 = vec3(1,0,-1);
+    float radius03 = (.5);
+    vec3 center04 = vec3(-1,0,-1);
+    float radius04 = (.5);
+    vec3 center05 = vec3(-1,0,-1);
+    float radius05 = (.45);
+    int type01 = LAMBERTIAN;
+    vec3 albedo01 = vec3(.1,.2,.5);
+    float v01 = 0.;
+    int type02 = LAMBERTIAN;
+    vec3 albedo02 = vec3(.8,.8,0);
+    float v02 = 0.;
+    int type03 = METAL;
+    vec3 albedo03 = vec3(.8,.6,.2);
+    float v03 = .2;
+    int type04 = DIELECTRIC;
+    vec3 albedo04 = vec3(0);
+    float v04 = 1.5;
+    int type05 = DIELECTRIC;
+    vec3 albedo05 = vec3(0);
+    float v05 = 1.5;
+
+
+    TestSphereTrace(ray, hit, mat, material, vec4(center01, radius01), mix(vec3(1),vec3(.5,.7,1), t), vec3(1, 1, 1), type01, v01, albedo01);
+	TestSphereTrace(ray, hit, mat, material, vec4(center02, radius02), mix(vec3(1),vec3(.5,.7,1), t), vec3(0, 0, 0), type02, v02, albedo02);
+    TestSphereTrace(ray, hit, mat, material, vec4(center03, radius03), mix(vec3(1),vec3(.5,.7,1), t), vec3(0, 0, 0), type03, v03, albedo03);
+    TestSphereTrace(ray, hit, mat, material, vec4(center04, radius04), mix(vec3(1),vec3(.5,.7,1), t), vec3(0, 0, 0), type04, v04, albedo04);
+    TestSphereTrace(ray, hit, mat, material, vec4(center05, radius05), mix(vec3(1),vec3(.5,.7,1), t), vec3(1, 1, 1), type05, v05, albedo05);
+    
+    return;
+}
+
+void miss(inout searchInfo search, in rayInfo ray){
+    search.finalColor += texture(sphereTex, vec2(jit_in.uv)).rgb * search.through;
+}
+
+void updateColor(inout matInfo mat, inout searchInfo search){
+    search.finalColor += mat.emi*search.through;
+    search.through *= mat.alb;
+}
+
+void createNewRay(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, inout searchInfo search){
+    vec3 hitPos = ray.origin + ray.dir*hit.t0;
+    ray.origin = hitPos;
+    ray.origin += 0.0001*hit.nor;
+    rayInfo scattered;
+    vec3 attenuation;
+    material_scatter(ray, mat, hit, search, attenuation, scattered);
+    search.through *= attenuation;
+    ray = scattered; 
+}
+
+void getRayColor(inout rayInfo ray, inout hitInfo hit, inout matInfo mat, inout hitInfo material, inout searchInfo search){
+    search.through = vec3(1);  
+    search.finalColor = vec3(0.);
+    for(int i = 0; i < BOUNCES; i++){
+        rayTrace(ray, hit, mat, material, search);    
+        if(hit.t0 == VERY_FAR){
+            miss(search, ray); 
+            return;
+            } 
+        updateColor(mat, search);
+        createNewRay(ray, hit, mat, search);
+    }
+    return;
+}
+
+void initializeRngState(out searchInfo search){
+
+    search.rngState = float(base_hash(floatBitsToUint(jit_in.uv)))/float(0xffffffffU)+sample;
+}
+
+void main() {
+
+    rayInfo ray;
+    hitInfo hit;
+    hitInfo material;
+    searchInfo search;
+    matInfo mat;
+
+
+    initializeRngState(search);
+    computeFirstRay(ray, search);
+    getRayColor(ray, hit, mat, material, search);
+    outColor.rgb = search.finalColor;
+    outColor.a = 1;
+    }
+
+]]>
+    </program>
+    </language>
+</jittershader>

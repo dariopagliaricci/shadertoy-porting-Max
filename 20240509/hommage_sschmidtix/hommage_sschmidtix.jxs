@@ -1,0 +1,531 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTimeDelta" type="float" default="0.0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTimeDelta" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform float iTimeDelta;
+uniform vec4 iMouse;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+
+// License: Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
+// Copyright © 2019 Stefan Schmidt
+//
+// Hommage à Le Parc II
+// Tribute to Julio Le Parc's "Continuel mobile".
+//
+// Watch in full screen. Take your time and enjoy.
+// ---------------------------------------------------------------------
+
+// Parameters
+#define NUM_SAMPLES         10              // Number of samples per pixel
+#define MAX_RAY_DEPTH       5               // Max ray depth
+#define MAX_SHADOW_DEPTH    2               // Max shadow depth
+#define MAX_REFLECT_DEPTH   2               // Max reflection depth
+
+#define LIGHT_POSITION      vec3(1.8, 3.5, .5)
+#define LIGHT_DIRECTION     getDirection(-128., 10.)
+#define LIGHT_BEAMWIDTH     25.             // In degrees
+#define LIGHT_RADIUS        0.03
+
+#define MIRRORS_POSITION    vec3(0., 1.8, 0.)
+#define MIRRORS_SIZE        2.
+#define MIRRORS_N           10.
+#define MIRRORS_REFLECTANCE 0.7
+#define MIRRORS_SPEED       0.002
+// #define MIRRORS_ALIGN
+// #define MIRRORS_SELFOCCLUSION
+
+#define CAMERA_POS          vec3(0., 1.8, -2.5)
+#define CAMERA_LOOKAT       vec3(0., 0.9, 0.)
+#define CAMERA_FOCALLENGTH  0.019           // Camera focal length (f/2.8)
+#define CAMERA_FRAMEWIDTH   0.036           // Camera sensor width (35 mm sensor)
+
+// #define SHOW_ACCELSTRUCT
+
+
+// Constants
+#define M_PI                radians(180.)
+#define SHADOW_EPSILON      1e-5
+#define FAR_PLANE           1e3
+
+#define MIRRORS_CELLSIZE    (MIRRORS_SIZE / MIRRORS_N)
+#define MIRRORS_CELLMIN     (MIRRORS_POSITION - 0.5 * vec3(0., MIRRORS_SIZE - MIRRORS_CELLSIZE, MIRRORS_SIZE - MIRRORS_CELLSIZE))
+#define MIRRORS_CELLMAX     (MIRRORS_POSITION + 0.5 * vec3(0., MIRRORS_SIZE - MIRRORS_CELLSIZE, MIRRORS_SIZE - MIRRORS_CELLSIZE))
+#define MIRRORS_MIN         (MIRRORS_POSITION - 0.5 * vec3(MIRRORS_CELLSIZE, MIRRORS_SIZE, MIRRORS_SIZE))
+#define MIRRORS_MAX         (MIRRORS_POSITION + 0.5 * vec3(MIRRORS_CELLSIZE, MIRRORS_SIZE, MIRRORS_SIZE))
+#define MIRROR_SIZE         (0.9 * MIRRORS_CELLSIZE)
+
+#define getDirection(inc, az) normalize(vec3(\
+    sin(radians(inc)) * cos(radians(az)),\
+    cos(radians(inc)),\
+    sin(radians(inc)) * sin(radians(az))))
+
+
+// Rays
+struct Ray {
+    vec3 o;
+    vec3 d;
+};
+
+
+// PRNG
+vec3 seed;
+
+void initRandom(vec2 fragCoord) {
+    seed = vec3(fragCoord, iFrame);
+}
+
+float getRandom() {
+    seed = clamp(fract(sin(cross(seed, vec3(12.9898, 78.233, 43.1931))) * 43758.5453), 0., 1.);
+    
+    return seed.x;
+}
+
+
+// Sampling
+vec3 getHemisphereCosineSample(vec3 n, out float weight) {
+    float cosTheta2 = getRandom();
+    float cosTheta = sqrt(cosTheta2);
+    float sinTheta = sqrt(1. - cosTheta2);
+    
+    float phi = 2. * M_PI * getRandom();
+    
+    vec3 t = normalize(cross(n.yzx, n));
+    vec3 b = cross(n, t);
+    
+    vec3 l = n * cosTheta + (t * cos(phi) + b * sin(phi)) * sinTheta;
+    
+    float pdf = (1. / M_PI) * cosTheta;
+    weight = (.5 / M_PI) / (pdf + 1e-6);
+    
+    return l;
+}
+
+vec3 getDiskSample(vec3 p, vec3 n, float r) {
+    float rho = r * sqrt(getRandom());
+    float theta = 2. * M_PI * getRandom();
+    
+    vec3 t = normalize(cross(n.yzx, n));
+    vec3 b = cross(n, t);
+    
+	return p + rho * (t * cos(theta) + b * sin(theta));
+}
+
+
+// Intersections
+struct RayIntersection {
+    float t;
+    vec3 p;
+    vec3 n;
+    bool isMirror;
+};
+
+void intersectPlane(vec3 o, vec3 n, Ray ray, inout RayIntersection ri) {
+    // Plane
+    float den = dot(ray.d, n);
+    if (den > -1e-5)
+        return;
+    
+    float t = dot(o - ray.o, n) / den;
+    if ((t < SHADOW_EPSILON) || (t > ri.t))
+    	return;
+    
+    ri = RayIntersection(t, ray.o + t * ray.d, n, false);
+}
+
+vec3 getMirrorNormal(vec3 o) {
+#ifdef MIRRORS_ALIGN
+    return getDirection(90., 180. / 60. * iTime);
+#else
+    float p = 51.55 * sin(cross(o, vec3(12.9898, 78.233, 43.1931)).x);
+    
+    return getDirection(90., 180. * cos(2. * M_PI * (MIRRORS_SPEED * iTime + p)));
+#endif
+}
+
+bool intersectMirror(vec3 o, Ray ray, inout RayIntersection ri) {
+    mat3 m;
+    m[0] = getMirrorNormal(o);
+    m[1] = normalize(cross(vec3(0., 1., 0.), m[0]));
+    m[2] = cross(m[0], m[1]);
+    
+    // Plane
+    float den = dot(ray.d, m[0]);
+    if (abs(den) < 1e-5)
+        return false;
+    
+    float t = dot(o - ray.o, m[0]) / den;
+    if ((t < SHADOW_EPSILON) || (t > ri.t))
+    	return false;
+    
+    // Border
+    vec3 p = ray.o + t * ray.d;
+    vec3 d = abs((p - o) * m);
+    
+    if (any(greaterThan(d, vec3(0.5 * MIRROR_SIZE))))
+        return false;
+    
+    ri = RayIntersection(t, p, (den < 0.) ? m[0] : -m[0], true);
+    
+    return true;
+}
+
+
+// Grid acceleration structure for mirrors
+struct GridIntersection {
+    bool hit;
+    vec3 deltaT;
+    vec3 nextT;
+    vec3 o;
+};
+
+void gridInit(Ray ray, out GridIntersection gi) {
+    // AABB test
+    vec3 di = 1. / ray.d;
+    vec3 v1 = (MIRRORS_MIN - ray.o) * di;
+    vec3 v2 = (MIRRORS_MAX - ray.o) * di;
+    vec3 near = min(v1, v2);
+    vec3 far = max(v1, v2);
+    float tNear = max(near.x, max(near.y, near.z));
+    float tFar = min(far.x, min(far.y, far.z));
+    
+    gi.hit = (tFar > 0.) && (tNear < tFar);
+    if (gi.hit) {
+        // Setup grid traversal
+        float t = max(tNear, 0.);
+        
+        vec3 p = ray.o + t * ray.d - MIRRORS_MIN;
+        
+        vec3 index = clamp(floor(p / MIRRORS_CELLSIZE),
+                           vec3(0.),
+                           vec3(0., MIRRORS_N - 1., MIRRORS_N - 1.));
+        
+        gi.deltaT = MIRRORS_CELLSIZE * di;
+        gi.nextT = t + ((index + step(0., di)) * MIRRORS_CELLSIZE - p) * di;
+        gi.o = MIRRORS_MIN + MIRRORS_CELLSIZE * (index + 0.5);
+    }
+}
+
+bool gridHit(GridIntersection gi) {
+    return gi.hit;
+}
+
+void gridNext(inout GridIntersection gi) {
+    // Traverse grid
+    if ((gi.nextT.x < gi.nextT.y) && (gi.nextT.x < gi.nextT.z))
+        gi.hit = false;
+    else if ((gi.nextT.y < gi.nextT.x) && (gi.nextT.y < gi.nextT.z)) {
+        gi.o.y += MIRRORS_CELLSIZE * sign(gi.deltaT.y);
+        if ((gi.o.y >= MIRRORS_MIN.y) && (gi.o.y < MIRRORS_MAX.y))
+            gi.nextT.y += abs(gi.deltaT.y);
+        else
+            gi.hit = false;
+    } else {
+        gi.o.z += MIRRORS_CELLSIZE * sign(gi.deltaT.z);
+        if ((gi.o.z >= MIRRORS_MIN.z) && (gi.o.z < MIRRORS_MAX.z))
+            gi.nextT.z += abs(gi.deltaT.z);
+        else
+            gi.hit = false;
+    }
+}
+
+
+// Analytical light
+float light(float cosTheta) {
+    float b = acos(cosTheta) / radians(LIGHT_BEAMWIDTH);
+    
+    if (b >= 1.)
+        return 0.;
+    
+    // Circle/circle
+    // return (2. / M_PI) * (acos(b) - b * sqrt(1. - b * b));
+    
+    // Circle/circle approximation
+    return pow(1. - b, 1.39);
+    
+    // Linear
+    // return 1. - b;
+}
+
+
+// Render scene
+vec3 render(Ray ray) {
+    vec3 acc = vec3(0.);    // Cumulative radiance
+    vec3 att = vec3(1.);    // Attenuation
+    
+    // Path tracing
+    for (int depth = 0; depth < MAX_RAY_DEPTH; depth++) {
+        RayIntersection ri;
+	    ri.t = FAR_PLANE;
+        
+        // Scene
+        intersectPlane(vec3(0., 0., 0.), getDirection(0., 0.), ray, ri);
+        intersectPlane(vec3(0., 0., 3.), getDirection(90., -90.), ray, ri);
+        intersectPlane(vec3(0., 0., -3.), getDirection(90., 90.), ray, ri);
+        
+        GridIntersection gi;
+        for (gridInit(ray, gi); gridHit(gi); gridNext(gi)) {
+#ifdef SHOW_ACCELSTRUCT
+            if (depth == 0)
+                acc += vec3(0.02, 0., 0.);
+#endif
+            if (intersectMirror(gi.o, ray, ri))
+                break;
+        }
+        
+        if (ri.t == FAR_PLANE)
+            break;
+        
+        // Lambert material
+        if (!ri.isMirror) {
+            Ray lRay = Ray(ri.p, normalize(getDiskSample(LIGHT_POSITION,
+                                                         LIGHT_DIRECTION,
+                                                         LIGHT_RADIUS) - ri.p));
+            
+            // Analytical Light
+            float l = light(dot(lRay.d, -LIGHT_DIRECTION)) * dot(ri.n, lRay.d);
+            
+            // Monte Carlo shadows
+            if (l > 0.) {
+                if (depth < MAX_SHADOW_DEPTH) {
+                    RayIntersection li;
+                    li.t = FAR_PLANE;
+                    
+                    GridIntersection gi;
+                    for (gridInit(lRay, gi); gridHit(gi); gridNext(gi)) {
+#ifdef SHOW_ACCELSTRUCT
+                        if (depth == 0)
+                            acc += vec3(0., 0.02, 0.);
+#endif
+                        if (intersectMirror(gi.o, lRay, li)) {
+                            l = 0.;
+                            
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Monte Carlo direct reflections
+            if (depth < MAX_REFLECT_DEPTH) {
+                float lRefl = 0.;
+                
+                vec3 ls = getDiskSample(LIGHT_POSITION,
+                                        LIGHT_DIRECTION,
+                                        LIGHT_RADIUS);
+                
+                for (float z = MIRRORS_CELLMIN.z; z < MIRRORS_MAX.z; z += MIRRORS_CELLSIZE) {
+                    vec2 o_xz = vec2(MIRRORS_POSITION.x, z);
+                    
+                    float dpo = distance(ri.p.xz, o_xz);
+                    float dpl = dpo + distance(o_xz, ls.xz);                    
+                    float oy = (ls.y - ri.p.y) * dpo / dpl + ri.p.y;
+                    
+                    float yy = (oy - MIRRORS_MIN.y) / MIRRORS_CELLSIZE;
+                    
+                    float y0 = MIRRORS_CELLMIN.y + MIRRORS_CELLSIZE * clamp(floor(yy - .5), 0., MIRRORS_N);
+                    float y1 = MIRRORS_CELLMIN.y + MIRRORS_CELLSIZE * clamp(ceil(yy + .5), 0., MIRRORS_N);
+                    
+                    for (float y = y0; y < y1; y += MIRRORS_CELLSIZE) {
+#ifdef SHOW_ACCELSTRUCT
+                        if (depth == 0)
+                            acc += vec3(0., 0., 0.001);
+#endif
+                        vec3 o = vec3(MIRRORS_POSITION.x, y, z);
+                        vec3 n = getMirrorNormal(o);
+                        
+                        vec3 lr = reflect(ls - o, n) + o;
+                        
+                        RayIntersection li;
+                        li.t = FAR_PLANE;
+                        
+                        Ray lRay = Ray(ri.p, normalize(lr - ri.p));
+#ifdef MIRRORS_SELFOCCLUSION
+                        float lReflCurr = 0.;
+                        
+                        // Point-to-mirror occlusion
+                        GridIntersection gi;
+                        for (gridInit(lRay, gi); gridHit(gi); gridNext(gi)) {
+                            if (intersectMirror(gi.o, lRay, li)) {
+                                if (distance(gi.o, o) < 0.01) {
+                                    vec3 nr = reflect(LIGHT_DIRECTION, n);
+                                    
+                                    lReflCurr = light(dot(lRay.d, -nr)) * dot(ri.n, lRay.d);
+                                    
+                                    // Mirror-to-light occlusion
+                                    RayIntersection li2;
+                                    li2.t = FAR_PLANE;
+                                    
+                                    Ray lRay2 = Ray(li.p, normalize(ls - li.p));
+                                    
+                                    GridIntersection gi2;
+                                    for (gridInit(lRay2, gi2); gridHit(gi2); gridNext(gi2)) {
+                                        if (intersectMirror(gi2.o, lRay2, li2)) {
+                                            lReflCurr = 0.;
+                                            
+                                        	break;
+                                        }
+                                    }
+                                }
+                                
+                                break;
+                            }
+                        }
+                                
+                        lRefl += lReflCurr;
+#else
+                        if (intersectMirror(o, lRay, li)) {
+	                        vec3 nr = reflect(LIGHT_DIRECTION, n);
+                            
+                            lRefl += light(dot(lRay.d, -nr)) * dot(ri.n, lRay.d);
+                        }
+#endif
+                    }
+                }
+                
+                l += MIRRORS_REFLECTANCE * lRefl;
+            }
+            
+            // Emission
+            vec3 emissive = vec3(1., 0.65, 0.4);
+            
+            acc += att * l * emissive;
+            
+            // Sampled ambiance
+            float weight;
+            vec3 reflected = getHemisphereCosineSample(ri.n, weight);
+            
+            vec3 albedo = vec3(.9);
+            
+            att *= weight * albedo * dot(ri.n, reflected);
+            
+            ray = Ray(ri.p, reflected);
+        }
+        // Specular material
+        else {
+            vec3 reflected = reflect(ray.d, ri.n);
+            
+            vec3 albedo = vec3(MIRRORS_REFLECTANCE);
+            
+            att *= albedo;
+            
+            ray = Ray(ri.p, reflected);
+        }
+    }
+    
+    return acc;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    initRandom(fragCoord);
+    
+    // Camera
+    vec2 mousePos = all(equal(iMouse.zw, vec2(0.))) ? vec2(0.85, 0.2) : 
+        clamp(2. * iMouse.xy / viewPort.xy - vec2(1.), vec2(-1.), vec2(1.));
+    
+    vec3 cameraPos = CAMERA_POS + vec3(mousePos, 0.) * vec3(3.8, 0.99, 0.);
+    vec3 cameraLookAt = CAMERA_LOOKAT;
+    
+    vec3 cz = normalize(cameraLookAt - cameraPos);
+    vec3 cx = normalize(cross(vec3(0., 1., 0.), cz));
+    vec3 cy = cross(cz, cx);
+    
+    mat3 cameraTransform = mat3(cx, cy, cz);
+    
+    // Render frame
+    vec3 col = vec3(0.);
+    
+    for (int i = 0; i < NUM_SAMPLES; ++i) {
+        vec2 ssaa = vec2(getRandom(), getRandom());
+        vec2 screenCoord = vec2(2. / viewPort.x) * (fragCoord + ssaa) -
+            vec2(1., viewPort.y / viewPort.x);
+        
+        vec3 projCoord = vec3(vec2(.5 * CAMERA_FRAMEWIDTH) * screenCoord, CAMERA_FOCALLENGTH);
+        
+        vec3 rayDirection = cameraTransform * normalize(projCoord);
+        
+        Ray ray = Ray(cameraPos, rayDirection);
+        col += render(ray);
+    }
+    col /= vec3(NUM_SAMPLES);
+    
+    // Frame average
+    float timeDelta = 60. * iTimeDelta;
+    float beta = (iMouse.z > 0.) ? 0.2 : 0.1;
+    float alpha = 1. / (1. + ((1. - beta) / beta) / timeDelta);
+    // col = mix(texture(iChannel0, fragCoord / viewPort.xy).rgb, col, alpha);
+
+    vec3 direction = normalize(vec3(fragCoord.xy / viewPort.xy * 2.0 - 1.0, 1.0));
+    vec4 texColor = texture(iChannel0, direction);
+    vec3 sampledColor = texColor.rgb;
+
+    // Your blending logic goes here
+
+    col = mix(sampledColor, col, alpha);
+    
+    outColor = vec4(col, 1.);
+}
+]]>
+</program>
+</language>
+</jittershader>

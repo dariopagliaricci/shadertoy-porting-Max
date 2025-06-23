@@ -1,0 +1,826 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+   <param name="Time" type="float" state="TIME" />
+   <param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+	<param name="iChannel3" type="int" default="3" />
+
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+		<bind param="iChannel3" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+	
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+uniform samplerCube iChannel3;
+
+
+
+#define M_PI 3.1415926535897932384626433832795
+
+
+float rand(float co) { return fract(sin(co*(91.3458)) * 47453.5453); }
+float rand(vec2 co){ return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453); }
+float rand(vec3 co){ return rand(co.xy+rand(co.z)); }
+
+vec3 linear_2_sRGB(vec3 v)
+{
+    bvec3 cutoff = lessThan(v, vec3(0.0031308));
+    vec3 higher = vec3(1.055)*pow(v, vec3(1.0/2.4)) - vec3(0.055);
+    vec3 lower = v * vec3(12.92);
+
+    return mix(higher, lower, cutoff);
+}
+
+
+
+float DistributionGGX(vec3 N, vec3 H, float roughness)
+{
+    float a      = roughness*roughness;
+    float a2     = a*a;
+    float NdotH  = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH*NdotH;
+
+    float nom   = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = M_PI * denom * denom;
+
+    return nom / denom;
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    float r = (roughness + 1.0);
+    float k = (r*r) / 8.0;
+
+    float nom   = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+
+    return nom / denom;
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
+{
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2  = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1  = GeometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0)
+{
+    return F0 + (1.0 - F0)*pow((1.0 + 0.000001/*avoid negative approximation when cosTheta = 1*/) - cosTheta, 5.0);
+}
+
+vec3 computeReflectance(vec3 N, vec3 Ve, vec3 F0, vec3 albedo, vec3 L, vec3 H, vec3 light_col, float intensity, float metallic, float roughness)
+{
+    vec3 radiance =  light_col * intensity; //Incoming Radiance
+
+    // cook-torrance brdf
+    float NDF = DistributionGGX(N, H, roughness);
+    float G   = GeometrySmith(N, Ve, L,roughness);
+    vec3 F    = fresnelSchlick(max(dot(H, Ve), 0.0), F0);
+
+    vec3 kS = F;
+    vec3 kD = vec3(1.0) - kS;
+    kD *= 1.0 - metallic;
+
+    vec3 nominator    = NDF * G * F;
+    float denominator = 4.0 * max(dot(N, Ve), 0.0) * max(dot(N, L), 0.0) + 0.00001/* avoid divide by zero*/;
+    vec3 specular     = nominator / denominator;
+
+
+    // add to outgoing radiance Lo
+    float NdotL = max(dot(N, L), 0.0);
+    vec3 diffuse_radiance = kD * (albedo)/ M_PI;
+
+    return (diffuse_radiance + specular) * radiance * NdotL;
+}
+
+//--------------------------------------------------------------------
+
+// This project is from the Master module "Computergraphics" of the Hochschule Darmstadt
+// It's based on these Tutorials:
+// - https://typhomnt.github.io/teaching/ray_tracing/pbr_intro/
+// - https://www.youtube.com/watch?v=gfW1Fhd9u9Q&list=PLlrATfBNZ98edc5GshdBtREv5asFW3yXl
+// - https://gamedev.stackexchange.com/questions/92015/optimized-linear-to-srgb-glsl
+// - scratchapixel.com/lessons/3d-basic-rendering/introduction-to-ray-tracing/ray-tracing-practical-example.html
+
+#define FLT_MAX 3.402823466e+38
+#define M_PI 3.1415926535897932384626433832795
+
+#define COLORED    0x00000001u
+#define TEXTURED   0x00000002u
+
+
+const int spheresCount = 7;
+const int materialsCount = 6;
+const int lightCount = 2;
+const int bounces = 4;
+const float fov = 150.0f;
+const float gamma = 2.2f;
+const bool sRGB = true;
+const float ambientvalue = 0.01f;
+const float glassior = 1.3f;
+
+
+
+struct Ray {
+
+vec3 origin;
+vec3 direction;
+
+};
+
+struct HitPayload
+	{
+		float HitDistance;
+		vec3 WorldPosition;
+		vec3 WorldNormal;
+		int ObjectIndex;
+	};
+    
+struct Material
+{
+	vec3 Albedo;
+    float Roughness;
+    float Metallic;
+    //float AO; // if AO is used
+    uint IsTextured;
+    int channel;
+    float transparent;
+};
+    
+struct Sphere
+{
+	vec3 Position;
+	float Radius;
+    float spin;
+    
+    int MaterialIndex;
+}; 
+
+struct Light 
+{
+    int type; // 0 dir light, 1 point light
+    vec3 dir; // directionnal light
+    vec3 center; // point light
+    float intensity; // 1 default
+    vec3 color; // light color
+};
+
+struct Scene
+{
+	Sphere[spheresCount] Spheres;
+    Material[materialsCount] Materials;
+    Light[lightCount] Lights;
+};
+
+HitPayload ClosestHit(const Ray ray, float hitDistance, int objectIndex, const Scene scene){
+
+    HitPayload payload;
+    payload.HitDistance = hitDistance;
+    payload.ObjectIndex = objectIndex;
+
+    Sphere closestSphere = scene.Spheres[objectIndex];
+
+    vec3 origin = ray.origin - closestSphere.Position;  // Kugel zum Ursprung verschieben
+
+    payload.WorldPosition = origin + ray.direction * hitDistance; // Treffpunkt zwischen Primärstrahl und Kugel
+    payload.WorldNormal = normalize(payload.WorldPosition); // Normale der Kugel
+
+    payload.WorldPosition += closestSphere.Position; // Verschieben der Kugel auf eigentliche Position
+  
+    return payload;
+    
+}
+
+HitPayload Miss(const Ray ray){
+
+    HitPayload payload;
+    payload.HitDistance = -1.0f;
+
+    return payload;
+
+}
+
+
+HitPayload TraceRay(const Ray ray, const Scene scene) {
+
+
+
+    // (bx^2 + by^2 + bz^2)t^2 + (2(axbx + ayby))t + (ax^2 + ay^2 - r^2) = 0
+
+    // a = ray origin
+    // b = ray direction
+    // r = radius
+    // t = hit distance
+
+
+    int closestSphere = -1;
+    float hitDistance = FLT_MAX;
+
+    for (int i = 0; i < spheresCount; i++) {
+
+        Sphere sphere = scene.Spheres[i];
+
+        vec3 origin = ray.origin - sphere.Position;
+
+        float a = dot(ray.direction, ray.direction);
+        float b = 2.0f * dot(origin, ray.direction);
+        float c = dot(origin, origin) - sphere.Radius * sphere.Radius;
+
+        // Quadratic formula discriminant:
+        // b^2 - 4ac
+
+
+
+
+        float discriminant = b * b - 4.0f * a * c; // Prüfen, ob es Treffer gibt
+
+        if (discriminant < 0.0f)                 // Wenn es keinen Treffer gibt
+            continue;
+
+        // (-b +- sqrt(discriminant)) / 2a
+
+        float t0 = -b + sqrt(discriminant) / (2.0f * a);
+        float t1 = (-b - sqrt(discriminant)) / (2.0f * a); // Treffpunkt berechnen
+        
+        if (t1 < 0.0f) t1 = t0;
+
+        if (t1 > 0.0f && t1 < hitDistance) {          // Prüfen, ob Treffpunkt der näheste ist
+            hitDistance = t1;
+            closestSphere = i;
+
+        }
+
+    }
+
+    if (closestSphere < 0)                                        // Wenn es keinen Treffer gibt
+        return Miss(ray);
+
+    return ClosestHit(ray, hitDistance, closestSphere, scene);
+
+
+}
+
+Ray lightRay(vec3 rayorigin, Light l) //computes ro to light source ray
+{
+    if(l.type == 0)
+        return Ray(rayorigin,normalize(l.dir));
+    else if(l.type == 1)
+        return Ray(rayorigin,normalize(l.center - rayorigin));
+
+    return Ray(rayorigin,vec3(1));
+ }
+
+float lightDist(vec3 rayorigin, Light l) //computes distance to light
+{ 
+    if(l.type == 0)
+         return FLT_MAX;
+    else if(l.type == 1)
+        return length(l.center - rayorigin);
+
+    return FLT_MAX;
+}
+
+
+
+vec3 PBR(HitPayload payload, Ray r, Material material, Light l, vec3 sphereColor)
+{
+    //vec3 ambient = vec3(ambientvalue) * sphereColor * (1.0 - material.AO); // if AO is used
+    vec3 ambient = vec3(ambientvalue) * sphereColor;
+    //Average F0 for dielectric materials
+    vec3 F0 = vec3(0.04);
+    // Get Proper F0 if material is not dielectric
+    F0 = mix(F0, sphereColor, material.Metallic);
+    vec3 N = normalize(payload.WorldNormal);
+    vec3 Ve = normalize(r.origin - payload.WorldPosition);
+
+    float intensity = l.intensity;
+    if(l.type == 1)
+    {
+        float l_dist = lightDist(payload.WorldPosition,l);
+        intensity /= (l_dist*l_dist);
+    }
+    vec3 l_dir = lightRay(payload.WorldPosition,l).direction;
+    vec3 H = normalize(Ve + l_dir);
+    return ambient + computeReflectance(N,Ve,F0,sphereColor,l_dir,H,l.color,intensity,material.Metallic,material.Roughness);
+}
+
+
+vec3 directIllumination(HitPayload payload, Ray r, Material material, const Scene scene, vec3 sphereColor, inout float refl)
+{
+
+    vec3 color = vec3(0);
+
+    for(int i = 0 ; i < lightCount ; i++)
+    {
+        Ray l_ray = lightRay(payload.WorldPosition,scene.Lights[i]);
+        l_ray.origin = payload.WorldPosition + 0.001*payload.WorldNormal;
+        HitPayload io = TraceRay(l_ray, scene);
+        float d_light = lightDist(payload.WorldPosition,scene.Lights[i]);
+
+        if(io.HitDistance < 0.0f)
+        {
+            color += PBR(payload,r, material,scene.Lights[i],sphereColor);
+        }
+        else
+        {
+            color +=  vec3(ambientvalue) * sphereColor;
+            //color +=  vec3(ambientvalue) * sphereColor * material.AO; // if AO is used
+        }
+
+
+        vec3 Ve = normalize(r.origin - payload.WorldPosition);
+        vec3 H = normalize(Ve + l_ray.direction);
+        
+        refl = length(fresnelSchlick(max(dot(H, Ve), 0.0),  mix(vec3(0.04), sphereColor, material.Metallic)));
+        
+        //refl = length(fresnelSchlick(max(dot(H, Ve), 0.0),  mix(vec3(0.04), sphereColor, material.Metallic)))*material.AO; // if AO is used
+    }
+
+    return color;
+}
+
+
+vec4 PerPixel(Ray ray, const Scene scene){
+ 
+    vec3 color = vec3(0.0f);
+    vec3 mask = vec3(1.0f);
+
+    float multiplier = 1.0f;
+    
+    
+    for (int i = 0; i < bounces; i++) {
+
+        HitPayload payload = TraceRay(ray, scene);
+        if (payload.HitDistance < 0.0f)
+        {
+           
+            vec3 rayuv = ray.direction;
+            vec4 missColorTemp = texture(iChannel3, rayuv);
+            vec3 missColor = vec3(missColorTemp.x,missColorTemp.y,missColorTemp.z);
+            color = color + mask * missColor;
+            
+            //color = color + missColor * multiplier;
+            
+            break;
+        }
+           
+
+        Sphere sphere = scene.Spheres[payload.ObjectIndex];
+        Material material = scene.Materials[sphere.MaterialIndex];
+        vec3 sphereColor;
+        
+        if(material.IsTextured == COLORED){
+        sphereColor = material.Albedo;
+        } 
+        
+        else if (material.IsTextured == TEXTURED){
+        
+        vec4 sphereColorTemp;
+        
+        
+        vec3 translateuv = payload.WorldPosition - sphere.Position;
+        
+        if(ray.direction.z < 0.0f)
+            translateuv.x = -translateuv.x;
+            
+        vec2 hituv = vec2(translateuv.x,translateuv.y);
+        hituv += 1.0f;
+        hituv /= 2.0f;
+        hituv *= 3.0f;
+               
+        switch (material.channel) {
+            case 0:        
+                   hituv.x *= 0.20;
+                   if(sphere.spin != 0.0f){
+                        hituv.x -= iTime * sphere.spin;
+                    }
+                    sphereColorTemp = texture(iChannel0, hituv);
+                    sphereColor = vec3(sphereColorTemp.x,sphereColorTemp.y,sphereColorTemp.z);
+                break;
+            case 1:
+
+                    if(sphere.spin != 0.0f){
+                        hituv.x -= iTime * sphere.spin;
+                    }
+                    sphereColorTemp = texture(iChannel1, hituv);
+                    sphereColor = vec3(sphereColorTemp.x,sphereColorTemp.y,sphereColorTemp.z);
+                break;
+            case 2:
+                    hituv = vec2(translateuv.x,translateuv.z);
+                    hituv += 1.0f;
+                    hituv /= 2.0f;
+                    if(sphere.spin != 0.0f){
+                        hituv.x -= iTime * sphere.spin;
+                    }
+                    sphereColorTemp = texture(iChannel2, hituv);
+                    sphereColor = vec3(sphereColorTemp.x,sphereColorTemp.y,sphereColorTemp.z);
+                break;    
+            }
+            
+            
+        }
+        
+        
+        vec3 tempColor = directIllumination(payload,ray,material,scene, sphereColor,multiplier);
+        
+      if(material.transparent <= 0.0f){
+        color = color + mask * tempColor;
+        mask = mask * multiplier;
+        
+        // HDR
+        color = color / (color + vec3(1.0f));
+        
+        if(sRGB)
+            //OETF
+            color = linear_2_sRGB(color);
+        else
+            // GAMMA        
+            color = pow(color, vec3(1.0f/gamma));
+        
+        if(material.Roughness >= 1.0)
+        break;
+        
+
+        ray.origin = payload.WorldPosition + payload.WorldNormal * 0.0001f; //reflektionsstrahl Ursprung
+        ray.direction = reflect(ray.direction,payload.WorldNormal); //reflektionsstrahl Richtung
+        
+       }
+       
+       else{
+       
+           vec3 refractcolor = vec3(0.0f);
+           vec3 refractmask = vec3(1.0f);
+           float refractmultiplier = 1.0f;
+           bool inside = false;
+           Ray refractray;
+           refractray.origin = payload.WorldPosition + payload.WorldNormal * -0.0001f;
+           refractray.direction = refract(ray.direction,payload.WorldNormal, 1.0f / glassior);
+           
+           
+        for (int j = 0; j < bounces; j++) {
+
+        HitPayload refractpayload = TraceRay(refractray, scene);
+        if (refractpayload.HitDistance < 0.0f)
+        {
+           
+            vec3 refractrayuv = refractray.direction;
+            vec4 refractmissColorTemp = texture(iChannel3, refractrayuv);
+            vec3 refractmissColor = vec3(refractmissColorTemp.x,refractmissColorTemp.y,refractmissColorTemp.z);
+            refractcolor = refractcolor + refractmask * refractmissColor;
+            
+            //color = color + missColor * multiplier;
+            
+            break;
+        }
+           
+
+        Sphere refractsphere = scene.Spheres[refractpayload.ObjectIndex];
+        Material refractmaterial = scene.Materials[refractsphere.MaterialIndex];
+        vec3 refractsphereColor;
+        
+        if(refractmaterial.IsTextured == COLORED){
+        refractsphereColor = material.Albedo;
+        } 
+        
+        else if (refractmaterial.IsTextured == TEXTURED){
+        
+        vec4 refractsphereColorTemp;
+        
+        
+        vec3 refracttranslateuv = refractpayload.WorldPosition - refractsphere.Position;
+        
+        if(refractray.direction.z < 0.0f)
+            refracttranslateuv.x = -refracttranslateuv.x;
+            
+        vec2 refracthituv = vec2(refracttranslateuv.x,refracttranslateuv.y);
+        refracthituv += 1.0f;
+        refracthituv /= 2.0f;
+               
+        switch (refractmaterial.channel) {
+            case 0:        
+                   refracthituv *= 3.0f;
+                   refracthituv.x *= 0.20;
+                   if(refractsphere.spin != 0.0f){
+                        refracthituv.x -= iTime * refractsphere.spin;
+                    }
+                    refractsphereColorTemp = texture(iChannel0, refracthituv);
+                    refractsphereColor = vec3(refractsphereColorTemp.x,refractsphereColorTemp.y,refractsphereColorTemp.z);
+                break;
+            case 1:
+                    if(refractsphere.spin != 0.0f){
+                        refracthituv.x -= iTime * refractsphere.spin;
+                    }
+                    refractsphereColorTemp = texture(iChannel1, refracthituv);
+                    refractsphereColor = vec3(refractsphereColorTemp.x,refractsphereColorTemp.y,refractsphereColorTemp.z);
+                break;
+            case 2:
+                    refracthituv = vec2(refracttranslateuv.x,refracttranslateuv.z);
+                    refracthituv += 1.0f;
+                    refracthituv /= 2.0f;
+                    if(refractsphere.spin != 0.0f){
+                        refracthituv.x -= iTime * refractsphere.spin;
+                    }
+                    refractsphereColorTemp = texture(iChannel2, refracthituv);
+                    refractsphereColor = vec3(refractsphereColorTemp.x,refractsphereColorTemp.y,refractsphereColorTemp.z);
+                break;    
+            }
+            
+            
+        }
+        
+        
+        vec3 refracttempColor = directIllumination(refractpayload,refractray,refractmaterial,scene, refractsphereColor,refractmultiplier);
+        
+        refractcolor = refractcolor + refractmask * refracttempColor;
+        refractmask = refractmask * refractmultiplier;
+        
+        
+        if(refractmaterial.Roughness >= 1.0)
+        break;
+        
+
+     
+      
+      
+        if(refractmaterial.transparent > 0.0f){
+            refractray.origin = refractpayload.WorldPosition + refractpayload.WorldNormal;
+            float eta = inside ? 1.0f / glassior : glassior;
+            inside = !inside;
+            
+            refractray.direction = refract(refractray.direction,refractpayload.WorldNormal, eta);
+        }
+        
+        else{
+               
+           refractray.origin = refractpayload.WorldPosition + refractpayload.WorldNormal * 0.0001f;  
+           refractray.direction = reflect(refractray.direction,refractpayload.WorldNormal);
+        }
+       
+    }
+    
+        float facingratio = dot(-ray.direction, payload.WorldNormal);
+        float fresneleffect = mix(pow(1.0f - facingratio, 3.0f), 1.0f, 0.1f);
+           
+        color = color + mask * (((1.0f - material.transparent) * tempColor * (1.0f - fresneleffect)) + (refractcolor * material.transparent * fresneleffect));  
+        
+        //color = color + mask * (((1.0f - material.transparent) * tempColor) + (refractcolor * material.transparent));  //without fresnel
+       
+        
+        mask = mask * multiplier;
+        
+        // HDR
+        color = color / (color + vec3(1.0f));
+        
+        if(sRGB)
+            //OETF
+            color = linear_2_sRGB(color);
+        else
+            // GAMMA        
+            color = pow(color, vec3(1.0f/gamma));
+        
+        if(material.Roughness >= 1.0)
+        break;
+        
+
+        ray.origin = payload.WorldPosition + payload.WorldNormal * 0.0001f; //reflektionsstrahl Ursprung
+        ray.direction = reflect(ray.direction,payload.WorldNormal); //reflektionsstrahl Richtung
+       
+       }
+
+    }
+    
+
+
+    return vec4(color, 1.0f);
+}
+
+
+
+
+void main()
+{
+    
+		vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = 2.0f * fragCoord/viewPort.xy - 1.0f;
+    vec2 mousepos = 2.0f * iMouse.xy/viewPort.xy - 1.0f;
+    float aspectRatio = viewPort.x / viewPort.y;
+    float cameraDistance  = 1.0f / tan(fov * 0.5f * M_PI/ 180.0f);
+    
+     
+    
+    // Light and Ray
+    vec3 rayorigin = vec3(0,0, -1);
+    vec3 raytarget= vec3(uv, cameraDistance);
+    raytarget.y /= aspectRatio;
+    vec3 lightpos = vec3(mousepos, -1.0f);    
+    vec3 raydirection = normalize(raytarget - rayorigin);
+    
+
+
+    
+    
+    // Colors
+    // Time varying pixel color
+    vec3 col = 0.5 + 0.5*cos(iTime+uv.xyx+vec3(0,2,4));
+      
+    Scene mainScene;
+    
+    // Lights initialization
+    Light light0;
+    light0.type = 0; // 0 dir light, 1 point light
+    light0.dir = lightpos; // directionnal light
+    light0.center = lightpos; // point light
+    light0.intensity = 1.0f; // 1 default
+    light0.color = vec3(1.0f); // light color
+    
+    Light light1;
+    light1.type = 1; // 0 dir light, 1 point light
+    light1.dir = vec3(0.0f, 1.0f, 0.0f); // directionnal light
+    light1.center = vec3(0.0f, 5.0f, 0.0f); // point light
+    light1.intensity = 20.0f; // 1 default
+    light1.color = vec3(1.0f, 0.8f, 0.5f); // light color
+    
+    mainScene.Lights[0] = light0;
+    mainScene.Lights[1] = light1;
+    
+    // Materials initialization
+    
+    Material material0;
+    material0.Albedo = vec3(1.0f,1.0f,1.0f);
+    material0.IsTextured = COLORED;
+    material0.Roughness = 0.1f;
+    material0.Metallic = 1.0f - material0.Roughness;
+    material0.transparent = 0.0f;
+    
+    //material0.AO = 1.0f; // if AO is used
+    
+    Material material1;   
+    material1.Albedo = vec3(0.2f,0.3f,1.0f);
+    material1.IsTextured = TEXTURED;
+    material1.channel = 1;
+    material1.Roughness = 0.7f;
+    material1.Metallic = 1.0f - material1.Roughness;
+    material1.transparent = 0.0f;
+    //material1.AO = 0.2f; // if AO is used
+    
+    Material material2;
+    material2.Albedo = col;
+    material2.IsTextured = COLORED;
+    material2.Roughness = 0.5f;
+    material2.Metallic = 1.0f - material2.Roughness;
+    material2.transparent = 0.0f;
+    //material2.AO = 0.5f; // if AO is used
+    
+    Material material3;
+    material3.Albedo = vec3(1.0f);
+    material3.IsTextured = TEXTURED;
+    material3.channel = 0;
+    material3.Roughness = 1.0f;
+    material3.Metallic = 1.0f - material3.Roughness;
+    material3.transparent = 0.0f;
+    //material3.AO = 0.1f; // if AO is used
+    
+    Material material4;
+    material4.Albedo = vec3(0.5f);
+    material4.IsTextured = TEXTURED;
+    material4.channel = 2;
+    material4.Roughness = 0.9f;
+    material4.Metallic = 1.0f - material4.Roughness;
+    material4.transparent = 0.0f;
+    //material4.AO = 1.0f; // if AO is used
+    
+    Material material5;
+    material5.Albedo = vec3(0.2f, 0.2f, 1.0f);
+    material5.IsTextured = COLORED;
+    material5.Roughness = 0.3f;
+    material5.Metallic = 1.0f - material5.Roughness;
+    material5.transparent = 0.8f;
+    //material4.AO = 1.0f; // if AO is used
+   
+    
+    mainScene.Materials[0] = material0;
+    mainScene.Materials[1] = material1;
+    mainScene.Materials[2] = material2;
+    mainScene.Materials[3] = material3;
+    mainScene.Materials[4] = material4;
+    mainScene.Materials[5] = material5;
+    
+    // Sphere initialization
+    
+    Sphere sphere0;
+    sphere0.Position = vec3(0.0f,0.6f,2.0f);
+	sphere0.Radius = 0.3f;
+    sphere0.MaterialIndex = 0;
+    
+    Sphere sphere1;
+    sphere1.Position = vec3(-0.4f,-0.1f,0.2f);
+	sphere1.Radius = 0.3f;
+    sphere1.spin = -0.05f;
+    sphere1.MaterialIndex = 1;
+
+    Sphere sphere2;
+    sphere2.Position = vec3(0.0f, 0.0f,1.0f);
+	sphere2.Radius = 0.3f;
+    sphere2.MaterialIndex = 2;
+    
+    Sphere sphere3;
+    sphere3.Position = vec3(0.7f,sin(iTime) * 0.34f,1.2f);
+	sphere3.Radius = 0.3f;
+    sphere3.spin = 0.05f;
+    sphere3.MaterialIndex = 3;
+    
+    Sphere sphere4;
+    sphere4.Position = vec3(0.0f,-180.6f,3.0f);
+	sphere4.Radius = 180.0f;
+    sphere4.MaterialIndex = 4;
+    
+    Sphere sphere5;
+    sphere5.Position = vec3(1.4f,0.0f,0.7f);
+	sphere5.Radius = 0.5f;
+    sphere5.MaterialIndex = 0;
+    
+    Sphere sphere6;
+    sphere6.Position = vec3(0.2f,0.0f,-0.1f);
+	sphere6.Radius = 0.15f;
+    sphere6.MaterialIndex = 5;
+    
+
+    
+    mainScene.Spheres[0] = sphere0;
+    mainScene.Spheres[1] = sphere1;
+    mainScene.Spheres[2] = sphere2;
+    mainScene.Spheres[3] = sphere3;
+    mainScene.Spheres[4] = sphere4;
+    mainScene.Spheres[5] = sphere5;
+    mainScene.Spheres[6] = sphere6;
+    
+    Ray ray = Ray(rayorigin, raydirection);
+
+    // Output to screen
+    outColor = PerPixel(ray, mainScene);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

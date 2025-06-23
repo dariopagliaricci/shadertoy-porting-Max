@@ -1,0 +1,484 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+    <param name="iMouse" type="vec3" default="0 0 0" />
+    <param name="iChannel0" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+        <bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+	
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;
+
+
+const float globalTempo=130.0; // global, song tempo dancing
+
+
+vec2 oldRand(inout vec2 seed,float time) 
+{
+    seed+=vec2(-0.001,0.001);
+    return vec2(fract(cos(dot(seed.xy ,vec2(123.4+sin(time),234.5))) * 43758.5453),
+        fract(cos(dot(seed.xy ,vec2(4.898,7.23))) * 133421.631));
+}
+
+vec2 rand2n(vec2 co,float time){
+    return vec2(
+        fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453),
+        fract(cos(dot(co.xy ,vec2(32.9898,78.233))) * 13758.5453)
+    );
+}
+
+float hash21(vec2 p) {
+  return fract(sin(dot(p, vec2(425.215, 714.388)))*45758.5453);
+}
+
+//-----
+
+const int samplesPerPixel=32; // in 2025, you'll be able to raise this to 256
+const int maxRayReflections=3;
+
+#define INFINITY 999999.0
+
+struct rtIntersection 
+{
+    float dist;
+    vec3 position;
+    vec3 normal;
+    int material;
+};
+    
+bool intersectSphere( float radius, vec3 center, vec3 ro,vec3 rd, out rtIntersection hit ) 
+{
+    vec3 oc = center - ro;
+    float l = dot(rd, oc);
+    float det = pow(l, 2.0) - dot(oc, oc) + pow(radius, 2.0);
+    if (det < 0.0) return false;
+
+             float len = l - sqrt(det);
+    if (len < 0.0) len = l + sqrt(det);
+    if (len < 0.0) return false;
+
+    vec3 pos = ro + len * rd;
+    hit = rtIntersection(len, pos, (pos - center) / radius,-1);
+    return true;
+}
+
+
+bool intersectPlane( vec3 normal,vec3 ro,vec3 rd, out rtIntersection hit ) 
+{
+    float len = -dot(ro, normal) / dot(rd, normal);
+    if (len < 0.0) return false;
+    hit = rtIntersection(len, ro + len * rd, normal, -1);
+    return true;
+}
+
+struct AABB
+{
+    vec3 min_, max_;
+};
+    
+bool intersect_aabb(vec3 ro,vec3 rd, in AABB aabb, inout float t_min, inout float t_max)
+{
+    vec3 div = 1.0 / rd;
+    vec3 t_1 = (aabb.min_ - ro) * div;
+    vec3 t_2 = (aabb.max_ - ro) * div;
+
+    vec3 t_min2 = min(t_1, t_2);
+    vec3 t_max2 = max(t_1, t_2);
+
+    t_min = max(max(t_min2.x, t_min2.y), max(t_min2.z, t_min));
+    t_max = min(min(t_max2.x, t_max2.y), min(t_max2.z, t_max));
+
+    return t_min < t_max;
+}
+
+vec3 ray_at(vec3 ro,vec3 rd, float t)
+{
+    return ro + t * rd;
+}
+
+float intersect_box(vec3 ro,vec3 rd, out vec3 normal, vec3 size)
+{
+    float t_min = 0.0;
+    float t_max = 999999999.0;
+    if(intersect_aabb(ro,rd, AABB(-size, size), t_min, t_max)) {
+        vec3 p = ray_at(ro,rd,t_min);
+        p /= size;
+        if(abs(p.x) > abs(p.y)) {
+            if(abs(p.x) > abs(p.z)) {
+                normal = vec3(p.x > 0.0 ? 1.0 : -1.0, 0, 0);
+            }
+            else {
+                normal = vec3(0, 0, p.z > 0.0 ? 1.0 : -1.0);
+            }
+        }
+        else if(abs(p.y) > abs(p.z)) {
+            normal = vec3(0, p.y > 0.0 ? 1.0 : -1.0, 0);
+        }
+        else {
+            normal = vec3(0, 0, p.z > 0.0 ? 1.0 : -1.0);
+        }
+
+        return t_min;
+    }
+
+    return INFINITY;
+}
+
+rtIntersection rayTraceScene(vec3 ro,vec3 rd)
+{
+    float maxt=10000.0;
+    rtIntersection noResult=rtIntersection(-1.0,vec3(0.0),vec3(0.0),0);
+
+    rtIntersection resultSphere;
+    if (intersectSphere(.3,vec3(0.0,.3,4.5+5.0*sin(iTime/2.0)),ro,rd,resultSphere))
+    {
+        maxt=resultSphere.dist;
+        resultSphere.material=0;
+    }
+
+    rtIntersection resultSphere2;
+    if (intersectSphere(0.23,vec3(.8*sin(iTime),.2,-1.*cos(iTime)),ro,rd,resultSphere2))
+    {
+        maxt=min(maxt,resultSphere2.dist);
+        resultSphere2.material=3;
+    }
+
+    rtIntersection resultSphere3;
+    if (intersectSphere(.2,vec3(cos(iTime),.2,-0.25),ro,rd,resultSphere3))
+    {
+        maxt=min(maxt,resultSphere3.dist);
+        resultSphere3.material=1;
+    }
+    
+    rtIntersection resultPlane;
+    if (intersectPlane(vec3(0.0,1.0,0.0),ro,rd,resultPlane))
+    {
+        maxt=min(maxt,resultPlane.dist);
+        resultPlane.material=2;
+    }
+
+    rtIntersection resultPlane2; // Up
+    if (intersectPlane(vec3(0.0,-1.0,0.0),ro-vec3(0.0,2.0,0.0),rd,resultPlane2))
+    {
+        maxt=min(maxt,resultPlane2.dist);
+        resultPlane2.material=2;
+    }
+
+    rtIntersection resultPlane3;
+    if (intersectPlane(vec3(1.0,0.0,0.0),ro-vec3(-1.2,0.0,0.0),rd,resultPlane3))
+    {
+        maxt=min(maxt,resultPlane3.dist);
+        resultPlane3.material=2;
+    }
+
+    rtIntersection resultPlane4;
+    if (intersectPlane(vec3(-1.0,0.0,0.0),ro-vec3(1.2,0.0,0.0),rd,resultPlane4))
+    {
+        maxt=min(maxt,resultPlane4.dist);
+        resultPlane4.material=2;
+    }
+
+    const int numBoxes=4;
+    rtIntersection resultBoxes[numBoxes];
+    float boxDist[numBoxes];
+    if (iTime>=(60.0/globalTempo)*32.)
+    {
+        for (int b=0;b<numBoxes;b++)
+        {
+            float x=0.2;//float(b)*0.1;
+            float y=1.9;//mod(float(b)*234.0,4.0);
+            vec3 dimensions=vec3(1.5,.1,2.2);
+
+            if (b==2)
+            {
+                x=.5;
+                dimensions=vec3(0.2,2.1,2.2);
+            }
+
+            if (b==0)
+            {
+                x=-0.1;
+                dimensions=vec3(0.2,2.1,2.2);
+            }
+
+            vec3 resNormal;
+            boxDist[b]=intersect_box(ro-vec3(-.7+x*4.0,y,-64.0+mod(32.0*iTime+float(b)*32.0,128.0)),rd,resNormal,
+                                     dimensions);
+            if (boxDist[b]!=INFINITY)
+            {
+                maxt=min(maxt,boxDist[b]);
+                resultBoxes[b].material=b+4;
+                resultBoxes[b].dist=boxDist[b];
+                resultBoxes[b].normal=resNormal;
+            }
+        }
+    }
+    
+    if (maxt==resultSphere.dist) return resultSphere;
+    if (maxt==resultSphere2.dist) return resultSphere2;
+    if (maxt==resultSphere3.dist) return resultSphere3;
+    if (maxt==resultPlane.dist) return resultPlane;
+    if (maxt==resultPlane2.dist) return resultPlane2;
+    if (maxt==resultPlane3.dist) return resultPlane3;
+    if (maxt==resultPlane4.dist) return resultPlane4;
+    
+    if (iTime>=(60.0/globalTempo)*32.)
+    {
+        for (int b=0;b<numBoxes;b++)
+        {
+            if (maxt==boxDist[b]) return resultBoxes[b];
+        }
+    }
+        
+    return noResult;
+}
+
+
+//
+//
+//
+
+vec3 ortho(vec3 v) {
+    //  See : http://lolengine.net/blog/2013/09/21/picking-orthogonal-vector-combing-coconuts
+    return abs(v.x) > abs(v.z) ? vec3(-v.y, v.x, 0.0)  : vec3(0.0, -v.z, v.y);
+}
+
+vec3 getCosineDistribution(vec3 dir)
+{
+    //dir = normalize(dir);
+    vec3 o1 = normalize(ortho(dir));
+    vec3 o2 = normalize(cross(dir, o1));
+    vec2 r = rand2n(dir.xy,iTime);
+    r.x=r.x*2.*3.141592;
+    float oneminus = sqrt(1.0-r.y*r.y);
+    return cos(r.x)*oneminus*o1+sin(r.x)*oneminus*o2+r.y*dir;
+}
+
+vec3 fog(vec3 c, float dist, vec3 fxcol)
+{
+    float fogAmount = 1.0 - exp(-dist * 0.035);
+    return mix(c, fxcol, fogAmount);
+}
+
+vec3 pathTrace(vec3 ro, vec3 rd, in vec2 fragCoord,in vec2 uv,out float firstDistance)
+{
+    vec3 fogColor=vec3(0.008,0.08,0.08);
+    //vec3 lightPos=vec3(1.2,4.0,-2.0);
+
+    vec3 rayOrigin=ro;
+    vec3 rayDir=rd;
+    
+    vec3 accumulatedCol=vec3(0.0);
+    vec3 firstRayHit=vec3(-1.0);
+    
+    for (int ref=0;ref<maxRayReflections;ref++)
+    {
+        rtIntersection rayHit=rayTraceScene(rayOrigin,rayDir);
+        if (rayHit.dist==-1.0)
+        {
+            if (ref==0) accumulatedCol=vec3(fogColor);
+            return accumulatedCol;
+        }
+        
+        int mat=rayHit.material;
+        vec3 pHit=rayOrigin+rayDir*rayHit.dist;
+        if (ref==0) firstDistance=rayHit.dist;
+        vec3 N=rayHit.normal;
+        //float dotprod=max(dot(lightPos,N),0.0);
+
+        if (mat==0)
+        {
+            accumulatedCol+=vec3(0.71,0.2,.1712)*9.52;
+        }
+        else if (mat==1)
+        {
+            accumulatedCol+=vec3(0.31,0.52,.962)*2.52;
+        }
+        else if (mat==2) // walls
+        {
+            vec3 pHit2=vec3(pHit.x,pHit.y,pHit.z-iTime*8.0);
+            vec2 tuv = pHit2.yz + vec2(N.x, 0);
+            if (abs(N.y)>0.2) tuv = pHit2.xz + vec2(0, N.y);
+
+            vec3 sampleCol;
+            tuv*=4.;
+
+            if (abs(N.y)>0.2) tuv*=.8;
+            vec2 id = floor(tuv);
+            tuv -= id + .5;
+
+            vec3 pointcol=vec3(hash21(id));
+            sampleCol = pointcol;
+
+            float k=1.0;
+            // sync with snare entry
+            if ((iTime>=(60.0/globalTempo)*64.) && (mod(hash21(id+floor(iTime/(60.0/globalTempo))),8.0)>0.96)) k=128.0;
+            if (ref==0) 
+            {
+                accumulatedCol=sampleCol*vec3(.11,.14,.28)*k;
+            }
+            else
+            {
+                if (k==1.0) accumulatedCol*=sampleCol;
+                else accumulatedCol+=sampleCol;
+            }
+            if (ref==0) accumulatedCol=fog(accumulatedCol,distance(rayOrigin,firstRayHit),fogColor);
+            
+            if (mod(hash21(id - .2),8.0)<0.06) mat=3;
+        }
+        else if (mat==3)
+        {
+            accumulatedCol += 0.1;
+        }
+        else if ((mat==4)||(mat==5)||(mat==6)||(mat==7))
+        {
+            if (mat==4) accumulatedCol+=vec3(0.31,0.52,.962)*12.52;
+            if (mat==5) accumulatedCol+=vec3(0.61,0.2,.1712)*2.52;
+            if (mat==6) accumulatedCol+=vec3(0.71,0.12,.1712)*12.52;
+            if (mat==7) accumulatedCol+=vec3(0.271,0.52,.712)*12.52;
+            //accumulatedCol+=vec3(0.92)*3.0;
+        }
+
+        // bounce ray
+        rayOrigin=pHit+N*.004;
+        if (mat==3) { vec3 randRay=normalize(getCosineDistribution(reflect(rayDir,N))); rayDir=mix(normalize(reflect(rayDir,N)),randRay,0.1); }
+        else rayDir=normalize(getCosineDistribution(reflect(rayDir,N)));
+    }    
+
+    /*rtIntersection rayHit=rayTraceScene(rayOrigin,rayDir);
+    if (rayHit.dist==-1.0)
+    {
+        return accumulatedCol;
+    }
+
+    int mat=rayHit.material;
+    vec3 pHit=rayOrigin+rayDir*rayHit.dist;
+    //if (ref==0) firstDistance=rayHit.dist;
+    vec3 N=rayHit.normal;
+    float dotprod=max(dot(lightPos,N),0.0);
+    if (mat==0)
+    {
+        accumulatedCol+=vec3(0.71,0.2,.1712)*dotprod;
+    }
+    else if (mat==2) // walls
+    {
+        accumulatedCol+=vec3(0.11,0.12,.12)*dotprod;
+    }*/
+    
+    //accumulatedCol=fog(accumulatedCol,distance(rayOrigin,firstRayHit),fogColor);
+    return accumulatedCol;
+}
+
+vec3 getCameraRayDir(vec2 uv, vec3 camPos, vec3 camTarget)
+{
+    vec3 camForward = normalize(camTarget - camPos);
+    vec3 camRight = normalize(cross(vec3(0.,1.,0.), camForward));
+    vec3 camUp = normalize(cross(camForward, camRight));
+    return normalize(uv.x * camRight + uv.y * camUp + camForward * 2.0);
+}
+
+vec2 normalizeScreenCoords(vec2 screenCoord)
+{
+    vec2 result = 2.0*(screenCoord/viewPort.xy - 0.5);
+    result.x *= viewPort.x/viewPort.y;
+    return result;
+}
+
+void main()
+{
+    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = normalizeScreenCoords(fragCoord);
+
+    vec3 camPos,camTarget;
+
+    float camadderx=0.0; float camaddery=0.0;
+    if (iMouse.z>0.0)
+    {
+        vec2 mousepos=(iMouse.xy-0.5*viewPort.xy)/viewPort.x;
+        camadderx=(mousepos.x)*1.5;
+        camaddery=(-mousepos.y)*2.0;
+    }    
+    
+    camPos=vec3(camadderx+0.5*sin(iTime)*cos(iTime),camaddery+0.8+.2*sin(iTime),-2.);
+    //camPos=vec3(0.0,0.8,-2.);
+    camTarget=vec3(0.0,0.32,0.0);
+    
+    vec3 finalCol=vec3(0.0);
+
+    float fd=0.0;
+    float totalfd=0.0;
+    for (int s=0;s<samplesPerPixel;s++)
+    {
+        vec2 seed = uv.xy * (float(100-s) - 1.0);
+        vec3 rayDir = getCameraRayDir(uv-(oldRand(seed,iTime)/256.0), camPos, camTarget); 
+        finalCol+=pathTrace(camPos, rayDir,fragCoord,uv,fd);
+        totalfd+=fd;
+    }
+    finalCol/=float(samplesPerPixel);
+    totalfd/=float(samplesPerPixel);
+    
+    finalCol=pow(finalCol,vec3(0.45));
+    
+    float coc=totalfd*0.02;
+    if ((totalfd>2.0)&&(totalfd<=2.5)) coc=totalfd*0.05;
+    if (totalfd>2.5) coc= 0.7 * abs(1.0 - length(camPos - camTarget) / totalfd);
+    
+    // if you like motion blur
+    //fragColor = vec4(mix(texture(iChannel0, fragCoord / viewPort.xy).rgb,finalCol, 0.5),coc);
+    outColor = vec4(finalCol,coc);
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,117 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="rotate" type="float" default="0.0" />
+	<param name="rotateSpeed" type="float" default="0.0" />
+	<param name="shapeSum" type="float" default="0.0" />
+	<param name="shapeMult" type="float" default="0.0" />
+	<param name="sineSpeed" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="rotate" program="fp" />
+		<bind param="rotateSpeed" program="fp" />
+		<bind param="shapeSum" program="fp" />
+		<bind param="shapeMult" program="fp" />
+		<bind param="sineSpeed" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform float rotate;
+uniform float rotateSpeed, shapeSum, shapeMult, sineSpeed;
+
+// float shape(vec2 p)
+// {
+// 	return mix(
+//         length(p),
+// 		max(abs(p.x),abs(p.y)), 
+//         (sin(iTime)*.8+.8)*.9);
+// }
+
+float shape(vec2 p)
+{
+	return mix(
+        length(p),
+		max(abs(p.x),abs(p.y)), 
+        (sin(iTime) * shapeMult + shapeSum)* sineSpeed);
+}
+
+mat2 rot(float a)
+{
+	float c = cos(a);
+	float s = sin(a);
+	return mat2(c,-s,s,c);
+}
+
+void main()
+{
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+	vec2 g = fragCoord.xy;
+	vec2 si = viewPort.xy;
+	vec2 p = (g-si*.5)/si.y;
+	
+	float s = 1., k;
+
+	for (int i=0;i<12;i++)
+	{
+		p = mod(p-1., 2.) - 1.;
+		k = 1./pow(shape(p),2.);
+		p *= k;
+		s *= k;
+		// p *= rot(iTime * 0.01);
+		p *= rot(rotate * rotateSpeed);
+	}
+		
+	float c = length(p)/s - 0.001; 
+	
+	vec3 col = vec3(0);
+	
+	col = step(vec3(0.003, 0.009, 0.001), vec3(c));
+	
+	outColor = vec4(col, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

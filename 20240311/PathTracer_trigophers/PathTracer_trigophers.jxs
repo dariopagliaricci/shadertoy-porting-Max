@@ -1,0 +1,496 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0; 
+uniform sampler2D iChannel1;
+uniform vec3 iMouse;
+
+#define pi 3.1415926536
+#define SCENE 0
+
+vec2 pixel;
+vec3 color;
+vec3 c;
+vec3 finC;
+vec3 point;
+vec3 vec;
+vec3 normal;
+vec4 temp;
+float rDist;
+int material;
+bool AspectDim;
+
+const float KEY_W =87.;
+const float KEY_A =65.;
+const float KEY_S =83.;
+const float KEY_D =68.;
+const float KEY_SHIFT = 16.;
+const float KEY_SPACE = 32.;
+
+// - - - - - - - - - - - - - - - - - Common Functions - - - - - - - - - - - - - - - -
+// Hash functions by Nimitz:
+// https://www.shadertoy.com/view/Xt3cDn
+uint baseHash( uvec2 p ) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+float hash1( inout float seed ) {
+    uint n = baseHash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    return float(n)/float(0xffffffffU);
+}
+vec2 hash2( inout float seed ) {
+    uint n = baseHash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+//my single axis based normalization, such that aspect ratio is preserved
+//but fits to any resolution
+void aspectNorm(vec2 fragCoord, vec2 scale) {
+    if (viewPort.x<viewPort.y) {
+        pixel = scale*(fragCoord/viewPort.xx-vec2(0.5, viewPort.y/viewPort.x/2.0));
+        AspectDim = false;
+    } else {
+        pixel = scale*(fragCoord/viewPort.yy-vec2(viewPort.x/viewPort.y/2.0, 0.5));
+        AspectDim = true;
+    }
+    
+}
+
+//Schlick's Approximation, here's a desmos graph I made: https://www.desmos.com/calculator/nks7jgzgd6
+float calcFresnel(float n0, float n1) {
+    float r = (n0-n1)/(n0+n1);
+    r = r*r;
+    float a = dot(vec, normal);
+    return r+(1.-r)*pow((1.+a), 5.);
+}
+
+//random vector
+vec3 randVec(float seed) {
+    vec3 randV = vec3(1, 1, 1);
+    while (length(randV) > 1.0) {
+        randV = vec3(hash1(seed), hash1(seed), hash1(seed));
+    }
+    return randV;
+}
+vec3 cosineDirection(vec3 nor, float seed) {
+    float u = hash1(seed)*2.0-1.0;
+    float a = hash1(seed)*6.28318531;
+    return normalize(nor+vec3(sqrt(1.0-u*u)*vec2(cos(a),sin(a)), u) );
+}
+
+// - - - - - - - - - - - - - - - - - Distance Functions - - - - - - - - - - - - - - - -
+//Sphere distance
+void sphere(vec3 sPos, float rad, vec3 sColor, int mat, float seed) {
+    vec3 obj = sPos - point;
+    temp.x = dot(obj, vec);
+    temp.y = dot(obj, obj);
+    if ((temp.x > 0.0) && (rad * rad > (temp.y - temp.x * temp.x))) {
+        temp.z = sqrt(rad * rad - (temp.y - temp.x * temp.x));
+        if ((temp.y > rad * rad) && rDist > temp.x - temp.z) {
+            rDist = temp.x - temp.z;
+            normal = normalize(point + vec * rDist - sPos);
+            c = sColor;
+            if (mat == 3) {
+                material = 0;
+                float f = calcFresnel(1.0, 1.25);
+                if (hash1(seed)<f) {
+                    material = 1;
+                    c = vec3(255);
+                }
+            } else {
+                material = mat;
+            }
+        }
+    }
+}
+
+
+//inigo quilez
+void triIntersect( in vec3 ro, in vec3 rd, in vec3 v0, in vec3 v1, in vec3 v2 )
+{
+    vec3 v1v0 = v1 - v0;
+    vec3 v2v0 = v2 - v0;
+    vec3 rov0 = ro - v0;
+    vec3  n = cross( v1v0, v2v0 );
+    vec3  q = cross( rov0, rd );
+    float d = 1.0/dot( rd, n );
+    float u = d*dot( -q, v2v0 );
+    float v = d*dot(  q, v1v0 );
+    float t = d*dot( -n, rov0 );
+    if(! (t<0.0 || u<0.0 || v<0.0 || (u+v)>1.0 ) ) {
+        if (t < rDist) {
+            normal = normalize(n);
+            rDist = t;
+            c = vec3(75, 75, 75);
+            material = 0;
+        }
+    }
+    //return vec3( t, u, v );
+}
+
+//Finite plane distance
+void fPlane(int t, vec3 pPos, vec2 dim, vec3 pColor, vec3 pColor2, float scale, int mat, float seed) {
+    if (t == 0) { //x normal
+        temp.x = 0.0-(point.x - pPos.x)/vec.x;
+        if ((vec.x != 0.0) && ((0.0-temp.x) < 0.0) && (temp.x < rDist)) {
+            if ((pPos.y-dim.x)<(vec.y*temp.x+point.y)&&
+                (pPos.y+dim.x)>(vec.y*temp.x+point.y)&&
+                (pPos.z-dim.y)<(vec.z*temp.x+point.z)&&
+                (pPos.z+dim.y)>(vec.z*temp.x+point.z)) {
+                rDist = temp.x;
+                if (int(mod( round((rDist*vec.y+point.y)/scale) + round((rDist*vec.z+point.z)/scale) , 2.0)) == 1) {
+                    c = pColor;
+                } else {
+                    c = pColor2;
+                }
+                normal = vec3((point.x>pPos.x)?1.0:-1.0, 0.0, 0.0);
+                material = 0;
+                if (mat == 3) {
+                    float f = calcFresnel(1.0, 1.5);
+                    if (hash1(seed)<f) {
+                        material = 1;
+                        c = vec3(255);
+                    }
+                } else {
+                    material = mat;
+                }
+            }
+        }
+    } else if (t == 1) { //y normal
+        temp.x = 0.0-(point.y - pPos.y)/vec.y;
+        if ((vec.y != 0.0) && ((0.0-temp.x) < 0.0) && (temp.x < rDist)) {
+            if ((pPos.x-dim.x)<(vec.x*temp.x+point.x)&&
+                (pPos.x+dim.x)>(vec.x*temp.x+point.x)&&
+                (pPos.z-dim.y)<(vec.z*temp.x+point.z)&&
+                (pPos.z+dim.y)>(vec.z*temp.x+point.z)) {
+                rDist = temp.x;
+                if (int(mod( round((rDist*vec.x+point.x+19.)/scale) + round((rDist*vec.z+point.z+19.)/scale) , 2.0)) == 1) {
+                    c = pColor;
+                } else {
+                    c = pColor2;
+                }
+                normal = vec3(0.0, (point.y>pPos.y)?1.0:-1.0, 0.0);
+                material = 0;
+                if (mat == 3) {
+                    float f = calcFresnel(1.0, 1.5);
+                    if (hash1(seed)<f) {
+                        material = 1;
+                        c = vec3(255);
+                    }
+                } else {
+                    material = mat;
+                }
+            }
+        }
+    } else { //z normal
+        temp.x = 0.0-(point.z - pPos.z)/vec.z;
+        if ((vec.z != 0.0) && ((0.0-temp.x) < 0.0) && (temp.x < rDist)) {
+            if ((pPos.x-dim.x)<(vec.x*temp.x+point.x)&&
+                (pPos.x+dim.x)>(vec.x*temp.x+point.x)&&
+                (pPos.y-dim.y)<(vec.y*temp.x+point.y)&&
+                (pPos.y+dim.y)>(vec.y*temp.x+point.y)) {
+                rDist = temp.x;
+                if (int(mod( round((rDist*vec.x+point.x)/scale) + round((rDist*vec.y+point.y)/scale) , 2.0)) == 1) {
+                    c = pColor;
+                } else {
+                    c = pColor2;
+                }
+                normal = vec3(0.0, 0.0, (point.z>pPos.z)?1.0:-1.0);
+                material = 0;
+                if (mat == 3) {
+                    float f = calcFresnel(1.0, 1.5);
+                    if (hash1(seed)<f) {
+                        material = 1;
+                        c = vec3(255);
+                    }
+                } else {
+                    material = mat;
+                }
+            }
+        }
+    }
+}
+
+
+
+
+// - - - - - - - - - - - - - - - - - - - - Scene - - - - - - - - - - - - - - - - - - - -
+void scene(float seed) {
+  if (SCENE == 0) { //My Showcase of GI Scene
+    triIntersect(point, vec, vec3(-30.0, -49.0,  40.0), vec3(0, 100, 0), vec3( 40.0, -59.0, -20.0));
+  
+    sphere(vec3( 40.0, -59.0, -20.0), 40.0, vec3(200.0, 200.0, 200.0), 1, seed);
+    sphere(vec3(-30.0, -49.0,  40.0), 50.0, vec3(255.0, 255.0, 255.0), 0, seed);
+    
+    fPlane(0, vec3( 100,   0,   0), vec2(100,100),        vec3( 25,150,25),        vec3( 25,150,25),  1.0,       0, seed); //right
+    fPlane(0, vec3(-100,   0,-100), vec2(100,200),        vec3(150, 25,25),        vec3(150, 25,25),  1.0,      0, seed); //left
+    fPlane(0, vec3( 300,   0,-200), vec2(100,100),        vec3(250,250,250),       vec3(250,250,250),  1.0,      0, seed); //far right
+    
+    fPlane(1, vec3( 100, 100,-200), vec2(200,100), vec3(  255,  255,  255),  vec3(  250,  250,  250),  1.0,                   0, seed); //ceiling
+    fPlane(1, vec3( 100,-100,-100), vec2(200,200), vec3(  255,  255,  100),  vec3(  100,  100,  150), 40.0, 3     , seed); //floor
+    fPlane(1, vec3(   0, 100,   0), vec2(33, 33), vec3(400000, 360000,300000), vec3(400000, 360000,300000),  1.0,     2, seed); //light
+    fPlane(1, vec3(   0, 100,   0), vec2(100,100), vec3(250, 250, 250), vec3(250, 250, 250),  1.0,         0, seed); //light
+    
+    fPlane(2, vec3(   0,   0, 100), vec2(100,100),       vec3(150,150,150),        vec3(150,150,150),  1.0,        0, seed); //front
+    fPlane(2, vec3( 100,   0,-300), vec2(200,100),       vec3( 50, 50,200),        vec3( 50, 50,200),  1.0,      0, seed); //back
+    fPlane(2, vec3( 200,   0,-100), vec2(100,100),       vec3(255,255,255),        vec3(250,250,250),  1.0,      0, seed); //side front
+    
+    
+    
+  } else if (SCENE == 1) { //piano_miles's pathtracer scene (https://scratch.mit.edu/projects/391016539/)
+    fPlane(1, vec3(0, -200, 0), vec2(200, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(0, 200, 0), vec2(200, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(125, 100, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(125, 0, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(125, -100, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(-125, 100, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(1, vec3(-125, 0, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    
+    fPlane(0, vec3(75, 50, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(0, vec3(75, -150, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(0, vec3(-75, 150, 0), vec2(50, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(0, vec3(-75, -100, 0), vec2(100, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(0, vec3(175, 150, 0), vec2(50, 100), vec3(600000, 420000, 260000), vec3(600000, 420000, 260000), 50.0, 2, seed);
+    fPlane(0, vec3(175, -50, 0), vec2(50, 100), vec3(15000, 30000, 150000), vec3(15000, 30000, 150000), 50.0, 2, seed);
+    fPlane(0, vec3(-175, 50, 0), vec2(100, 100), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    
+    fPlane(2, vec3(0, 0, 100), vec2(200, 200), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed);
+    fPlane(2, vec3(0, 0, -100), vec2(200, 200), vec3(240, 240, 240), vec3(75, 75, 75), 50.0, 0, seed); 
+    
+    
+    
+  } else if (SCENE == 2) { //Ballsrender from wikipedia >:)
+    fPlane(1, vec3(60., 80, -80.)*4., vec2(64, 64), vec3(900000, 900000, 900000), vec3(9000000, 9000000, 9000000), 1.0, 2, seed);
+    fPlane(1, vec3(0, -0.5, 0)*4., vec2(20000, 20000), vec3(80, 80, 80),  vec3(50, 50, 50), 38.0, 3, seed);
+
+    sphere(vec3(05.38326, 09.48362, -109.691)*4., 09.75855*4., vec3(70, 70, 70), 3, seed);
+    sphere(vec3(-11.8142, 06.83359, -94.0422)*4., 07.11052*4., vec3(25, 8, 95), 3, seed);
+    sphere(vec3(-34.1409, 07.85611, -95.5498)*4., 08.13467*4., vec3(5, 90, 5), 3, seed);
+    sphere(vec3(-23.9994, 18.7003, -124.832)*4., 18.9863*4., vec3(130, 5, 5), 3, seed);
+    sphere(vec3(32.3795, 11.6985, -98.1731)*4., 11.9819*4., vec3(5, 5, 90), 3, seed);
+    sphere(vec3(36.9962, 14.3103, -139.278)*4., 14.5811*4., vec3(35, 8, 95), 3, seed);
+    sphere(vec3(27.3374, 07.51414, -115.845)*4., 07.7825*4., vec3(130, 10, 10), 3, seed);
+    sphere(vec3(14.9821, 05.74386, -124.279)*4., 06.00562*4., vec3(5, 90, 5), 3, seed);
+    sphere(vec3(-01.04378, 11.5052, -146.261)*4., 11.7685*4., vec3(5, 5, 90), 3, seed);
+    
+    
+}
+//   } else { //piano_miles's other path tracer scene (https://scratch.mit.edu/projects/425020125/)
+//     fPlane(1, vec3(0,-100,0), vec2(20000,20000), vec3(  200,  200,  200),  vec3(  25,  25,  25), 60.0, 3, seed); //floor
+    
+//     sphere(vec3(126.983, 0, 502.544), 100.0, vec3(250, 25, 25)/2., 3, seed);
+//     sphere(vec3(099.6031, -054.2131, 360.426), 024.6911, vec3(70, 38, 150)/2., 3, seed);    
+//     sphere(vec3(330.538, -110.349, 1216.35), 354.71, vec3(230, 90, 15)/2., 3, seed);
+//     sphere(vec3(039.3969, -83.0, 384.57), 016.0, vec3(250, 250, 20)/2., 3, seed);
+//     sphere(vec3(020.3895, 030.2426, 438.208), 018.7254, vec3(50, 250, 50)/2., 3, seed);
+//     sphere(vec3(005.7289, -049.0, 605.545), 050.0, vec3(50, 250, 250)/2., 3, seed);
+//     sphere(vec3(-026.4944, -067.0, 392.281), 032.0, vec3(180, 10, 150)/2., 3, seed);
+//     sphere(vec3(-119.437, -049.0, 423.011), 050.0, vec3(20, 20, 200)/2., 3, seed);
+//     sphere(vec3(-035.6911, -049.1123, 499.068), 029.0709, vec3(220, 220, 220)/2., 3, seed);
+//     sphere(vec3(-184.946, 036.8301, 781.645), 127.904, vec3(130, 100, 40), 1, seed); 
+    
+//     sphere(vec3(-500.0, 500.0,  300.0),200.0, vec3(1600000.0, 1600000.0, 1600000.0), 2, seed);
+//   }
+}
+
+
+
+// - - - - - - - - - - - - - - - - - - - Rendering - - - - - - - - - - - - - - - - - - -
+vec3 skyColoring() { //From https://raytracing.github.io/books/RayTracingInOneWeekend.html
+    temp.x = (vec.y + 1.0) / 2.0;
+    temp.y = (1.0 - temp.x)*255.0;
+    return (vec3(temp.y, temp.y, temp.y)
+         + vec3(temp.x, temp.x, temp.x)
+         * vec3(50.0, 90.0, 150.0));
+}
+
+void setVec(vec3 cameraPosition, vec3 cameraVector) {
+    point = cameraPosition;
+    vec = normalize(cameraVector);
+}
+
+void dirVec(vec2 cameraDirection) {
+    temp.x = vec.z;
+    vec.z = vec.z * cos(cameraDirection.y) - vec.y * sin(cameraDirection.y);
+    vec.y = vec.y * cos(cameraDirection.y) + temp.x * sin(cameraDirection.y);
+    temp.x = vec.z;
+    vec.z = vec.z * cos(cameraDirection.x) - vec.x * sin(cameraDirection.x);
+    vec.x = vec.x * cos(cameraDirection.x) + temp.x * sin(cameraDirection.x);
+}
+
+vec3 raytrace(vec3 cameraPosition, vec2 cameraDirection, float FoV, float RenderDistance, int maxRefs, float fogFact, float seed) {
+    setVec(cameraPosition, vec3(pixel+(AspectDim?vec2(hash1(seed)/viewPort.yy):vec2(hash1(seed)/viewPort.xx)), FoV));
+    dirVec(cameraDirection);
+    finC = vec3(1.0, 1.0, 1.0);
+    c = vec3(0.0, 0.0, 0.0);
+    rDist = 0.0;
+    int refsI = 0;
+    material = 0;
+    while ((rDist < RenderDistance) && (refsI < maxRefs) && !(finC == vec3(0.0, 0.0, 0.0)) && !(material == 2)) {
+        rDist = RenderDistance;
+        scene(seed);
+        if (rDist<RenderDistance) {
+            if (hash1(seed)>(1.0/(rDist*fogFact))) {
+                setVec(point+vec*rDist*hash1(seed)+normal, normal+(randVec(seed)-vec3(0.5))*4.0);
+            } else { 
+                if (true) {
+                finC *= c/vec3(255.0);
+                }
+                if (material == 0) {
+                    setVec(point+vec*rDist+normal, cosineDirection(normal, seed));
+                } else if (material == 1) {
+                    setVec(point+vec*rDist+normal, vec-normal*vec3(2.0)*dot(normal, vec));
+                
+                } else {
+                }
+            }
+        }
+        refsI++;
+    }
+    
+    if (SCENE == 3) {
+        if (!(rDist<RenderDistance)) {
+            finC *= vec3(46, 100, 160);
+        }
+    } else if (SCENE == 2) {
+        if (!(rDist<RenderDistance)) {
+            finC *= vec3(0, 0, 0);
+        }
+    } else {
+    if (!(rDist<RenderDistance)) {
+            finC *= skyColoring();
+        }
+    }
+    
+    return finC-1.0;
+}
+
+// - - - - - - - - - - - - - - - - - - - - Display - - - - - - - - - - - - - - - - - - -
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 cameraDirection;
+    if (iFrame == 0) {
+        cameraDirection = vec2(pi+0.2, pi/2.);
+    } else {
+        cameraDirection = vec2((iMouse.x-viewPort.x/2.0)/viewPort.x*8.0, 
+                              clamp((iMouse.y-viewPort.y/2.0)/viewPort.y*4.5, pi/-2.0, pi/2.0));
+    }
+    float w = texelFetch( iChannel1, ivec2(KEY_W,0), 0 ).x;
+    float a = texelFetch( iChannel1, ivec2(KEY_A,0), 0 ).x;
+    float s = texelFetch( iChannel1, ivec2(KEY_S,0), 0 ).x;
+    float d = texelFetch( iChannel1, ivec2(KEY_D,0), 0 ).x;
+    float shift = texelFetch( iChannel1, ivec2(KEY_SHIFT,0), 0 ).x;
+    float space = texelFetch( iChannel1, ivec2(KEY_SPACE,0), 0 ).x;
+    if (fragCoord.x <= 1. && fragCoord.y <= 1.) {
+        vec4 data = texture( iChannel0, vec2(0.0, 0.0) )*1.0;
+        data += vec4((w-s)*2.*sin(cameraDirection.x)+(d-a)*2.*cos(0.-cameraDirection.x), space-shift,
+                     (w-s)*2.*cos(cameraDirection.x)+(d-a)*2.*sin(0.-cameraDirection.x), 0.0);
+        outColor = vec4(data.xyz, 1);
+    } else {   
+        vec2 p = (-viewPort.xy + 2.*fragCoord - 1.)/viewPort.y;
+        float seed = float(baseHash(floatBitsToUint(p - iTime)))/float(0xffffffffU);
+        aspectNorm(fragCoord, vec2(1.0, 1.0));
+        float FoV = 1.0;
+        float RenderDistance = 10000000.0;
+        int maxRefs = 5;
+        float foggy;
+        vec3 cameraPosition;
+        
+        vec3 texPos = texture( iChannel0, vec2(0, 0) ).xyz;
+        if (SCENE == 0) {
+            cameraPosition = vec3(-50, 0, -250)+texPos;
+            foggy = 0.0001;
+        } else if (SCENE == 1) {
+            cameraPosition = vec3(0, -199, 0)+texPos;
+            foggy = 0.003;
+        } else if (SCENE == 2) {
+            cameraPosition = vec3(0.06972*4., 19.3017*4., -10.851*4.);
+            cameraDirection = vec2(pi, -0.05);
+            foggy = 0.;
+            FoV = 1.8;
+        } else {
+            cameraPosition = vec3(0, 0, 0)+texPos;
+            foggy = 0.00001;
+            FoV = 1.75;
+        }
+
+        color = raytrace(cameraPosition, cameraDirection, FoV, RenderDistance, maxRefs, foggy, seed);
+        color += raytrace(cameraPosition, cameraDirection, FoV, RenderDistance, maxRefs, foggy, seed);
+        color += raytrace(cameraPosition, cameraDirection, FoV, RenderDistance, maxRefs, foggy, seed);
+        color += raytrace(cameraPosition, cameraDirection, FoV, RenderDistance, maxRefs, foggy, seed);
+        vec4 data = texture( iChannel0, fragCoord/viewPort.xy );
+        if(iFrame==0 || space == 1.0 || shift == 1.0 || iMouse.z > 0.0 || w==1.0 || a==1.0 || s==1.0 || d==1.0) data = vec4(0.0);
+        data += vec4(color/vec3(255.0), 4.0);
+
+        outColor = data;
+    }
+}
+
+]]>
+</program>
+</language>
+</jittershader>

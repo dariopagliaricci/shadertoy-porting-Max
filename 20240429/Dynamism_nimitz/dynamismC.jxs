@@ -1,0 +1,139 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+	
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+
+// Dynamism by nimitz (twitter: @stormoid)
+// https://www.shadertoy.com/view/MtKSWW
+// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
+// Contact the author for other licensing options
+
+#define time iTime
+
+#define time2v (((1.0+sin(time + sin(time*0.4+ cos(time*0.1)))))*1.5)
+#define time2 (time*2.1 + time2v)
+
+//Divergence
+vec2 div( vec2 p, sampler2D smp)
+{
+    vec2 tx = 1. / viewPort.xy;
+
+    vec4 uv =    textureLod(smp, p, -100.);
+    vec4 uv_n =  textureLod(smp, p + vec2(0.0, tx.y), -100.);
+    vec4 uv_e =  textureLod(smp, p + vec2(tx.x, 0.0), -100.);
+    vec4 uv_s =  textureLod(smp, p + vec2(0.0, -tx.y), -100.);
+    vec4 uv_w =  textureLod(smp, p + vec2(-tx.x, 0.0), -100.);
+
+   	float div = uv_s.y - uv_n.y - uv_e.x + uv_w.x;
+    float div2 = uv_s.w - uv_n.w - uv_e.z + uv_w.z;
+    
+    return vec2(div, div2)*1.8;
+}
+
+void main()
+{
+	vec2 fragCoord = jit_in.uv *viewPort.xy;
+	vec2 p = fragCoord.xy / viewPort.xy;
+    
+    vec2 dv = div(p, iChannel0);
+    vec2 dv2 = div(p, iChannel1);
+    
+    dv = pow(abs(dv), vec2(.5))*sign(dv);
+    dv = clamp(dv,0.,4.);
+    dv2 = pow(abs(dv2), vec2(.5))*sign(dv2);
+    dv2 = clamp(dv2,0.,4.);
+    
+    float t1 = mod(time2*0.35,4.);
+    float t2 = mod(time2*0.35 + 1.,4.);
+    float t3 = mod(time2*0.35 + 2.,4.);
+    float t4 = mod(time2*0.35 + 3.,4.);
+    
+    const float ws = 1.1;
+    const float wof = 1.8;
+    
+    //derivative of the "depth"
+    //time*2.1 + ((1.0+sin(time + sin(time*0.4+ cos(time*0.1)))))*1.5
+    float x = time;
+    float drvT = 1.5 * cos(x + sin(0.4*x + cos(0.1*x)))*(cos(0.4*x + cos(0.1*x)) * (0.4 - 0.1*sin(0.1*x)) + 1.0) + 2.1;
+    
+    float ofsc = 0.8 + drvT*0.07;
+    float t1w = clamp(t1*ws + wof,0.,10.);
+    float t2w = clamp(t2*ws + wof,0.,10.);
+    float t3w = clamp(t3*ws + wof,0.,10.);
+    float t4w = clamp(t4*ws + wof,0.,10.);
+    
+    vec3 col = vec3(0);
+    
+    col += sqrt(t1)*vec3(0.28,0.19,0.15)*exp2(dv.x*t1w-t1w*ofsc);
+    col += sqrt(t2)*vec3(0.1,0.13,0.23)*exp2(dv.y*t2w-t2w*ofsc);
+    col += sqrt(t3)*vec3(0.27,0.07,0.07)*exp2(dv2.x*t3w-t3w*ofsc);
+    col += sqrt(t4)*vec3(0.1,0.18,0.25)*exp2(dv2.y*t4w-t4w*ofsc);
+    
+    col = pow(col, vec3(.6))*1.2;
+    col *= smoothstep(0.,1.,col);
+    
+    col *= pow(16.0*p.x*p.y*(1.0 - p.x)*(1.0 - p.y), 0.4);
+    
+	outColor = vec4(col,1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

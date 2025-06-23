@@ -1,0 +1,179 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 Q;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+#define R viewPort.xy
+#define Main void main()
+// #define A(U) texture(iChannel0,(U)/R)
+#define A(U) texture(iChannel0, vec3(U, sqrt(1.0 - dot(U, U))))
+
+float circle (vec2 p, vec2 d, float r) {
+    
+    // |p + d*x| = r
+    // p.p-rr + 2pdx+ddx^2 = 0
+    float b = 2.*dot(p,d);
+    float a = dot(p,p)-r*r;
+    float det = b*b-4.*a;
+    if (det < 0.) return -1.;
+    vec2 o = 0.5*(-b+vec2(-1,1)*sqrt(det));
+    if (o.x < 0.) return o.y;
+    else return min(o.x,o.y);
+}
+#define ei(a) mat2(cos(a),sin(a),-sin(a),cos(a))
+vec4 hash(vec4 p4)
+{
+    p4 = fract(p4  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+float triangle(vec2 p, vec2 d, float r, out vec2 no,float angle) {
+    // p + dx . n = 0
+    // p.n +dx.n = 0
+    // x = -d.n/p.n
+    p *= ei(angle);
+    d *= ei(angle);
+    
+    float o = -1.;
+    vec2 n = vec2(0,-1);
+    float a = -dot(p-r*n,n)/dot(d,n);
+    
+    vec2 q = p + d*a;
+    if (length(q-r*n) < r*sqrt(3.) && a > 0.) o = a, no = n;
+    
+    n = vec2(sqrt(3.)/2.,.5);
+    float b = -dot(p-r*n,n)/dot(d,n);
+    
+    q = p + d*b;
+    if (length(q-r*n) < r*sqrt(3.) && (b < o||o < 0.) && b>0.) o = b, no = n;
+    
+    
+    n = vec2(-sqrt(3.)/2.,.5);
+    float c = -dot(p-r*n,n)/dot(d,n);
+    
+    q = p + d*c;
+    if (length(q-r*n) < r*sqrt(3.) && (c < o||o < 0.) && c>0.) o = c, no = n;
+    
+    no *= ei(-angle);
+    return o;
+    
+    
+}
+float polygon(vec2 p, vec2 d, float r, out vec2 no, float angle, int sides) {
+    p *= ei(angle);
+    d *= ei(angle);
+    
+    float o = -1.;
+    float theta = 2. * 3.14159265359 / float(sides);
+    
+    for (int i = 0; i < sides; i++) {
+        float ang = theta * float(i);
+        vec2 n = vec2(cos(ang), sin(ang));
+        float a = -dot(p - r * n, n) / dot(d, n);
+        
+        vec2 q = p + d * a;
+        if (length(q - r * n) < r * tan(theta / 2.) && a > 0. && (a < o || o < 0.)) {
+            o = a;
+            no = n;
+        }
+    }
+    
+    no *= ei(-angle);
+    return o;
+} 
+   
+Main {
+    vec2 U = jit_in.uv * viewPort.xy;
+    Q = .95*A(U);
+    for(float k = 0.; k < 30.; k++) {
+        vec4 h0 = hash(vec4(k,U,iFrame));
+        vec2 p = 2.*(U-.5*R)/R.y;
+        vec2 d = vec2(cos(3.14159*2.*h0.x),sin(3.14159*2.*h0.x));
+        vec2 d0 = d;
+        for (float i = 0.; i < 8.; i++) {
+            vec2 no,no2;
+            float c = polygon(p,d,.5,no,.1*iTime,6);
+            float g = polygon(p,d,.2,no2,.1*iTime,4);
+            bool t = true;
+            if (g < c && g>0.) c = g, no = no2,t = false;
+            vec4 h = hash(vec4(k,1,iFrame,i));
+            if (c > 0.) {
+                p += d*c;
+                float s = sign(dot(p,d));
+                no *= -s;
+                if (h.x < 0.2) {
+                    d = reflect(d,no);
+                } else {
+                    if ((float(t)*2.-1.)*s < 0.)
+                    d = refract(d,no,1./(1.4-.3*h0.z));
+                    else 
+                    d = refract(d,no,(1.4-.3*h0.z));
+                 }
+                p+= 1e-4*d;
+            } else {
+                p += d;
+                Q += (.5+1.5*step(abs(p.y-.4),.05))*.13*max(sin(-2.+6.2*h0.z+vec4(1,2,3,4)),0.)*exp(-10.*length(d-vec2(1,0)));
+                break;
+            }
+        }
+    }
+}
+]]>
+</program>
+</language>
+</jittershader>

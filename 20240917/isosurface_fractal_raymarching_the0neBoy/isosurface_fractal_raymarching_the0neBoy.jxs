@@ -1,0 +1,228 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+	// <param name="iMouse" type="vec3" default="0 0 0" />
+    <param name="color01" type="float" default="0.0" />
+    <param name="color02" type="float" default="0.0" />
+    <param name="color03" type="float" default="0.0" />
+    <param name="color04" type="float" default="0.0" />
+    <param name="color05" type="float" default="0.0" />
+    <param name="color06" type="float" default="0.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+		// <bind param="iMouse" program="fp" />
+        <bind param="color01" program="fp" />
+        <bind param="color02" program="fp" />
+        <bind param="color03" program="fp" />
+        <bind param="color04" program="fp" />
+        <bind param="color05" program="fp" />
+        <bind param="color06" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform float color01, color02, color03, color04, color05, color06;
+// uniform vec3 iMouse;
+
+vec3 cPow(vec3 z, float n) {
+    float r = length(z);
+    float phi = atan(z.y,z.x);
+    float theta = atan(length(z.xy),z.z);
+
+    z = pow(r,n) * vec3(sin(n*theta)*cos(n*phi),sin(n*theta)*sin(n*phi),cos(n*theta));
+
+    return z;
+}
+vec3 hsv2rgb( in vec3 c )
+{
+    vec3 rgb = clamp( abs(mod(c.x*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0 );
+
+	return c.z * mix( vec3(1.0), rgb, c.y);
+}
+
+#define orthographic 0
+#define iterations 15
+
+vec2 mandelbrot(vec3 z, float n) {
+    vec3 c = z;
+    float t = 1e20;
+    float d = 0.0;
+    
+    for (int i = 0; i<iterations; i++) {
+        d += z.x*z.x+z.y*z.y+z.z*z.z;
+        if (z.x*z.x+z.y*z.y+z.z*z.z > 150.0) {
+            return vec2(sqrt(d/float(i+1)),t);
+        }
+        
+        
+        
+        z = cPow(z,n)+c;
+        
+        t = min(length(z),t);
+    }
+    return vec2(-1.0,t);
+}
+vec2 fractal(vec3 z, float n) {
+    vec3 c = z;
+    float t = 1e20;
+    float d = 0.0;
+    
+    for (int i = 0; i<iterations; i++) {
+        // d += z.x*z.x+z.y*z.y+z.z*z.z;
+        d += z.x*z.x+z.y*z.y+z.z*z.z;
+        // if (z.x*z.x+z.y*z.y+z.z*z.z > 150.0) {
+        if (z.x*z.x+z.y*z.y+z.z*z.z > 999.0) {
+            return vec2(sqrt(d/float(i+1)),t);
+        }
+        
+        
+        
+        z = cPow(z,n)+c;
+        
+        t = min(length(z),t);
+    }
+    return vec2(-1.0,t);
+}
+
+vec4 func(float x, float y, float z) {
+    vec2 info = fractal(vec3(x,y,z),2.0);
+
+    float iso = info.x;
+    float t = info.y;
+    
+    // vec3 col = vec3(sin(t*3.7+1.4),cos(t*2.3+0.6),sin(t*2.5+1.3));
+    vec3 col = vec3(sin(t*color01+color02),cos(t*color03+color04),sin(t*color05+color06));
+    col *= col;
+    
+    return vec4(col,iso);
+}
+
+// RENDERING --------------------------------------------------------------------------
+vec4 f(vec3 x) {
+    return func(x.x, x.y, x.z);
+}
+vec3 grad( vec3 x )
+{
+    vec2 h = vec2( 0.00001, 0.0 );
+    return vec3( f(x+h.xyy).w - f(x-h.xyy).w,
+                 f(x+h.yxy).w - f(x-h.yxy).w,
+                 f(x+h.yyx).w - f(x-h.yyx).w )/(2.0*h.x);
+}
+float de(vec3 x) {
+    return f(x).w/length(grad(x));
+}
+
+mat2 rot2d(float x) {
+    return mat2(
+        cos(x), -sin(x),
+        sin(x), cos(x)
+    );
+}
+void rot3d(inout vec3 rd, float x, float y) {
+    rd.yz *= rot2d(x);
+    rd.xz *= rot2d(y);
+}
+void main()
+{
+    // vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // vec2 uv = (fragCoord-viewPort.xy*.5)/viewPort.y;
+    // vec2 m = (iMouse.xy-viewPort.xy*.5)/viewPort.y;
+    
+    // vec3 ro = vec3(0,0,-3);
+    // rot3d(ro, -m.y*3.0, m.x*1.777*3.0);
+    
+    // vec3 rd = -normalize(ro);
+    
+    // vec3 leftDir = normalize(cross(rd, vec3(0,1,0)));
+    // vec3 upDir = cross(leftDir,rd);
+    // if (orthographic == 0) {
+    //     const float focalLen = 1.0;
+
+    //     rd = normalize(rd + leftDir*uv.x + upDir*uv.y);
+    // } else {
+    //     const float orthoZoom = 5.0;
+    //     ro = ro + leftDir*uv.x*orthoZoom + upDir*uv.y*orthoZoom;
+    // }
+
+    vec2 screenPos = jit_in.uv*2 - 1;
+    float ratio = viewPort.x / viewPort.y;
+    screenPos.x *= ratio;
+   
+    vec3 ro = eye;
+
+    vec3 target = vec3(0.);
+    vec3 front = normalize(target - ro);
+    vec3 right = cross( vec3(0., 1., 0.), front);
+    vec3 up = cross(front, right);
+
+    vec3 pixPos = vec3(screenPos, 4);
+    vec3 rd = normalize(pixPos.x*right + pixPos.y*up + pixPos.z*front);
+
+
+    vec3 col = vec3(1);
+    
+    float t = 0.0;
+    for (int i=0; i<1000; i++) {
+        float dist = de(ro+rd*t);
+        if (dist < 0.0001) {
+            col = f(ro+rd*t).rgb;
+            col *= vec3(exp(-t*.2));
+            break;
+        }
+        if (t > 1000.0) {
+            break;
+        }
+        t += dist;
+    }
+
+    // Output to screen
+    outColor = vec4(col,1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

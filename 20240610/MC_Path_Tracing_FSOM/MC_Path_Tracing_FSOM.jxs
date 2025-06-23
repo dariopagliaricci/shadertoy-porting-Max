@@ -1,0 +1,245 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+uniform samplerCube iChannel1;
+
+
+// MonteCarlo Ray Tracing v2.0 
+//https://www.shadertoy.com/view/XXG3RG
+
+struct material {
+    vec3 col;
+    float emission;
+    float smoothness;
+    float specularProb;
+    float refractIndex;
+    float opacity;
+};
+
+// Poisson's hash (https://www.shadertoy.com/view/dssXRj)
+float seed;
+vec2 hash22(vec2 p){
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+float hash1() {
+    return fract(sin(seed += 0.1) * 4568.7564);
+}
+
+vec2 hash2() {
+    return vec2(hash1(), hash1());
+}
+
+vec3 hash3() {
+    return vec3(hash1(), hash1(), hash1());
+}
+
+vec2 randomDir2D() {
+    vec2 curr;
+    while(true) {
+        curr = hash2() * 2.0 - 1.0;
+        if(length(curr) < 1.0){
+            return curr;
+        }
+    }
+}
+
+vec3 randomDir() {
+    vec3 d;
+    while(true) {
+        d = hash3() * 2.0 - 1.0;
+        if(length(d) <= 1.0) return normalize(d);
+    }
+}
+
+vec3 rotate2D(vec3 p, vec2 t){
+    float stx = sin(t.x);
+    float ctx = cos(t.x);
+    float sty = sin(t.y);
+    float cty = cos(t.y);
+    mat3 xRotation;
+    xRotation[0] = vec3(1, 0, 0);
+    xRotation[1] = vec3(0, ctx, -stx);
+    xRotation[2] = vec3(0, stx, ctx);
+    
+    mat3 yRotation;
+    yRotation[0] = vec3(cty, 0, -sty);
+    yRotation[1] = vec3(0, 1, 0);
+    yRotation[2] = vec3(sty, 0, cty);
+    return p*xRotation*yRotation;
+}
+
+void raytraceSphere(vec3 o, vec3 d, inout bool h, vec4 s, inout float t, inout vec3 n, in material inMat, inout material outMat) {
+    vec3 oc = o - s.xyz;
+    float a = dot(d, d);
+    float b = 2.0 * dot(oc, d);
+    float c = dot(oc, oc) - s.w * s.w;
+    float disc = b * b - 4.0 * a * c;
+    float currT = (-b - sqrt(disc))/(2.0 * a);
+    if (disc > 0.0 && currT >= 0.0 && currT < t) {
+        t = currT;
+        h = true;
+        n = normalize((o + d * t) - s.xyz);
+        outMat = inMat;
+    }
+}
+
+float raytraceScene(vec3 o, vec3 d, out bool h, out vec3 n, out material mat) {
+    h = false;
+    n = vec3(0);
+    float t = 1000000.0;
+    //raytraceSphere(o, d, h, vec4(1, -0.25, 0, 0.25), t, n, material(vec3(0, 0, 1), 0.5, 1.0, 1.0, 1.52, 10.0), mat);
+    //raytraceSphere(o, d, h, vec4(0, 0, 0, 0.5), t, n, material(vec3(0, 1, 0), 0.5, 0.6, 1.0, 1.52, 10.0), mat);
+    //raytraceSphere(o, d, h, vec4(-1, -0.175, 0, 0.325), t, n, material(vec3(1, 0, 0), 0.5, 1.0, 1.0, 1.52, 10.0), mat);
+    raytraceSphere(o, d, h, vec4(0, -10000.25, 0, 10000), t, n, material(vec3(1), 0.5, 1.0, 0.1, 0.0, 0.0), mat);
+    
+    for (int i = -2; i <= 2; ++i) {
+        raytraceSphere(o, d, h, vec4(-2, 0, i, 0.25), t, n, material(vec3(0.2, float(i + 2) / 4.0, 0.5), 0.5, 0.0, 0.0, 0.0, 0.0), mat);
+        raytraceSphere(o, d, h, vec4(-1, 0, i, 0.25), t, n, material(vec3(0.4, float(i + 2) / 4.0, 0.5), 0.5, 0.8, 0.05, 0.0, 0.0), mat);
+        raytraceSphere(o, d, h, vec4(0, 0, i, 0.25), t, n, material(vec3(0.6, float(i + 2) / 4.0, 0.5), 0.5, 1.0, 0.02, 0.0, 0.0), mat);
+        raytraceSphere(o, d, h, vec4(1, 0, i, 0.25), t, n, material(vec3(0.8, float(i + 2) / 4.0, 0.5), 0.5, 1.0, 0.5, 0.0, 0.0), mat);
+        raytraceSphere(o, d, h, vec4(2, 0, i, 0.25), t, n, material(vec3(1, float(i + 2) / 4.0, 0.5), 0.5, 1.0, 1.0, 1.52, 10.0), mat);
+    }
+    
+    return t;
+}
+
+// Raytracing in One Weekend (https://raytracing.github.io/books/RayTracingInOneWeekend.html)
+float schlick(float cosTheta, float refractRatio) {
+    float r = (1.0 - refractRatio) / (1.0 + refractRatio);
+    r = r * r;
+    return r + (1.0 - r) * pow((1.0 - cosTheta), 5.0);
+}
+
+vec3 pathtrace(vec3 o, vec3 d) {
+    vec3 col = vec3(1);
+    float t;
+    vec3 n;
+    material mat;
+    bool h = false;
+    
+    for (int i = 0; i < 12; ++i) {
+        h = false;
+        t = raytraceScene(o, d, h, n, mat);
+        if (!h) {
+            col *= pow(textureLod(iChannel1, o + d * 1600.0 + vec3(0, -50, 0), 0.0).rgb, vec3(4)) * 8.0;
+            break;
+        } else {
+            float isSpecular = mat.specularProb > hash1() ? 1.0 : 0.0;
+            
+            vec3 diffuseD = normalize(randomDir() + n);
+            vec3 reflectD = normalize(reflect(d, n));
+            
+            float cosTheta = min(dot(-d, n), 1.0);
+            float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+            float refractRatio = dot(d, n) >= 0.0 ? mat.refractIndex : 1.0 / mat.refractIndex;
+            
+            o = o + d * t + n * sign(dot(d, n)) * 0.01;
+            
+            if (mat.refractIndex > 1.0 && schlick(cosTheta, refractRatio) <= hash1() && refractRatio * sinTheta <= 1.0) {
+                float inside = sign(dot(d, n));
+                d = mix(randomDir(), refract(d, -n * inside, refractRatio), mat.smoothness * isSpecular);
+                if (inside < 0.0) {
+                    col *= mat.col * mat.emission;
+                }
+            } else {
+                d = mix(diffuseD, reflectD, mat.smoothness * isSpecular);
+
+                col *= mix(mat.col * mat.emission, vec3(1), isSpecular);
+            }
+        }
+        if (mat.emission > 1.0) break;
+    }
+    
+    return col;
+}
+
+void main(){
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    seed = iTime + dot(sin(fragCoord), vec2(443.712, 983.234));
+    seed += hash1() * 434.251;
+    
+    vec2 uv = ((fragCoord + hash2() - 0.5) - 0.5*viewPort.xy)/viewPort.y;
+    
+    vec3 o = rotate2D(vec3(0, 0, -7), vec2(radians(20.0), radians(40.0)));
+    vec3 d = rotate2D(normalize(vec3(uv, 1.75)), vec2(radians(20.0), radians(40.0)));
+    vec3 focalPoint = o + d * 7.0;
+    
+    o += rotate2D(vec3(randomDir2D(), 0), vec2(radians(20.0), radians(40.0))) * 0.1;
+    vec3 shiftedDir = normalize(focalPoint - o);
+    
+    vec3 col = pathtrace(o, shiftedDir);
+    vec4 data = texture(iChannel0, vec3(fragCoord, 0.0), 0);
+    if(iMouse.z > 0.0){
+        data *= 0.0;
+    }
+    data += vec4(col, 1);
+    
+    outColor = data;
+}
+]]>
+</program>
+</language>
+</jittershader>

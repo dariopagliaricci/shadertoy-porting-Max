@@ -1,0 +1,792 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+uniform samplerCube iChannel1;
+uniform sampler2D iChannel2;
+
+//////* GLOBALS *//////
+const float FOV = 95.0;
+const float farplane = 100.0;
+
+const int MARCH_STEPS = 48;
+
+const int BOUNCES = 8;
+const int SAMPLES = 2;
+
+
+const float exposure = 0.5;
+const float skybox_bright = 2.0;
+
+const float HIT_OFFSET = 0.03f;
+const float PI = 3.14159265359;
+const float PI2 = 2.0f * PI;
+
+const vec3 AMBENT = vec3(0.0);
+
+const float past_ratio = 0.10;
+#define TIME_SMOOTH
+
+#define RUSSIAN // slightly noiser image, mostly smooth's out
+
+
+
+const float KEY_SPACE = 32.5/256.0;
+
+
+//////* DATASTRUCTURES *//////
+
+struct HitInfo {
+    float dist;
+    vec3 col;
+    vec3 light;
+    
+    float spec;
+    vec3 spec_col;
+    
+    float spec_rough;
+    
+    float IOR; 
+    float refrac;
+    float refr_rough;
+    vec3 refac_col;
+};
+
+// refract defults
+#define RDEF 1.0, 0.0, 0.0, vec3(0.0)
+
+
+// speculer defults
+#define DEF 0.0, vec3(1.0),                 0.0, 1.0, 0.0, 0.0, vec3(0.0)
+#define PERF_MIRROR 1.0, vec3(1.0),         0.0, 1.0, 0.0, 0.0, vec3(0.0)
+#define SHADE_MIRROR 1.0, vec3(0.5),        0.5, 1.0, 0.0, 0.0, vec3(0.0)
+
+
+//////* SDF'S- *//////
+
+
+float sdSphere(vec3 p, float s )
+{
+    return length(p)-s;
+}
+
+float sdBox(vec3 p,vec3 b )
+{
+    vec3 q = abs(p) - b;
+    return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+float sdOctahedron( vec3 p, float s) // not exact
+{
+  p = abs(p);
+  return (p.x+p.y+p.z-s)*0.57735027;
+}
+
+#define sabs(p) sqrt((p)*(p)+2e-3)
+#define smin(a,b) (a+b-sabs(a-b))*.5
+#define smax(a,b) (a+b+sabs(a-b))*.5
+
+float sdDodec(vec3 p,float r){
+	float G=sqrt(5.)*.5+.5;
+	vec3 n=normalize(vec3(G,1,0));
+	float d=0.;
+    p=sabs(p);
+    d=smax(d,dot(p,n));
+    d=smax(d,dot(p,n.yzx));
+    d=smax(d,dot(p,n.zxy));
+	return d-r;
+}
+
+float sdIcosa(vec3 p,float r){
+	float G=sqrt(5.)*.5+.5;
+	vec3 n=normalize(vec3(G,1./G,0));
+	float d=0.;
+    p=sabs(p);
+    d=smax(d,dot(p,n));
+    d=smax(d,dot(p,n.yzx));
+    d=smax(d,dot(p,n.zxy));
+	d=smax(d,dot(p,normalize(vec3(1))));
+    return d-r;
+}
+
+//#define phase_shift_on
+vec3 sdMandlebulb(vec3 p) {
+	p.xyz = p.xzy;
+	vec3 z = p;
+	vec3 dz=vec3(0.0);
+	float power = 8.0;
+	float r, theta, phi;
+	float dr = 1.0;
+	
+	float t0 = 1.0;
+	for(int i = 0; i < 7; ++i) {
+		r = length(z);
+		if(r > 2.0) continue;
+		theta = atan(z.y / z.x);
+        #ifdef phase_shift_on
+		phi = asin(z.z / r) + iTime*0.01;
+        #else
+        phi = asin(z.z / r);
+        #endif
+		
+		dr = pow(r, power - 1.0) * dr * power + 1.0;
+	
+		r = pow(r, power);
+		theta = theta * power;
+		phi = phi * power;
+		
+		z = r * vec3(cos(theta)*cos(phi), sin(theta)*cos(phi), sin(phi)) + p;
+		
+		t0 = min(t0, r);
+	}
+	return vec3(0.5 * log(r) * r / dr, t0, 0.0);
+}
+
+
+//////* MANIPULATIONS AND UNIONS*//////
+
+
+mat2 rot2D(float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    mat2 rot = mat2(c, -s, s, c);
+
+    return rot;
+}
+
+
+
+
+HitInfo opUnion(HitInfo s1, HitInfo s2) {
+    if (s1.dist < s2.dist) return s1;
+    else return s2;
+}
+
+
+//////* SCENES *//////
+
+// old
+HitInfo test(vec3 pos) {
+  float size = 0.5;
+
+  // Spheres (same as before)
+  float d1 = sdSphere(pos - vec3(0.0, 0.0, 3.0), size);
+  vec3 c1 = vec3(1.0, 0.2, 0.2);
+  HitInfo s1 = HitInfo(d1, c1, vec3(0.0), DEF);
+
+  float d2 = sdSphere(pos - vec3(2.0, 0.0, 3.0), size * 1.5);
+  vec3 c2 = vec3(1.000,1.000,1.000);
+  HitInfo s2 = HitInfo(d2, c2, vec3(5.0), DEF); // emissive
+
+  float d3 = sdSphere(pos - vec3(-2.0, 0.0, 3.0), size);
+  vec3 c3 = vec3(0.2, 0.2, 1.0);
+  HitInfo s3 = HitInfo(d3, c3, vec3(0.0), DEF);
+
+  // Walls (modified for Cornell Box)
+  float dbackwall = sdBox(pos - vec3(0.0, 1.0, 4.0), vec3(3.5, 18.0, 0.1)); // Back wall with very small depth
+  vec3 cbackwall = vec3(1.000,1.000,1.000);
+  HitInfo backwall = HitInfo(dbackwall, cbackwall, vec3(0.0), DEF);
+
+  float dleftwall = sdBox(pos - vec3(-4.0, 1.0, 5.0), vec3(0.1, 18.0, 4.0)); // Left wall with very small depth
+  vec3 cleftwall = vec3(0.8,0.8,0.8);  // Adjust color for left wall
+  HitInfo leftwall = HitInfo(dleftwall, cleftwall, vec3(0.0), DEF);
+
+  // No right wall (implicit because there's no geometry there) 
+
+  float dfloor = sdBox(pos - vec3(0.0, -1.0, 5.0), vec3(3.5, 0.1, 4.0)); // Floor with very small depth
+  vec3 cfloor = vec3(1.0,0.9,0.7);  // Adjust color for floor
+  HitInfo floor = HitInfo(dfloor, cfloor, vec3(0.0), DEF);
+
+  // Find closest intersection
+  HitInfo back = opUnion(s1, s2);
+  back = opUnion(back, s3);
+  back = opUnion(back, backwall);
+  back = opUnion(back, leftwall);
+  back = opUnion(back, floor);
+
+  return back;
+}
+
+// conwels box 
+HitInfo box(vec3 inpos) { \
+    vec3 pos = inpos - vec3(0.0, -0.2, 8.0);
+    
+    float dp = 0.8;
+    
+    // walls
+    float rect = 5.0;
+    
+    HitInfo back_wall = HitInfo(
+        sdBox(
+            pos - vec3(0.0, 0.0, rect), // pos
+            vec3(rect, rect, 0.1) // size
+            ),
+        vec3(1.0, 1.0, 1.0), // col
+        vec3(0.0), // light
+        
+        DEF // defult values
+    );
+    
+    HitInfo left_wall = HitInfo(
+        sdBox(
+            pos - vec3(-rect, 0.0, 0.0), // pos
+            vec3(0.1, rect, rect) // size
+            ),
+        vec3(0.835,0.125,0.125), // col
+        vec3(0.000,0.000,0.000), // light
+        
+        DEF
+    );
+    
+    HitInfo right_wall = HitInfo(
+        sdBox(
+            pos - vec3(rect, 0.0, 0.0), // pos
+            vec3(0.1, rect, rect) // size
+            ),
+        vec3(0.000,1.000,0.000), // col
+        vec3(0.000,0.000,0.000), // light
+        
+        DEF
+    );
+    
+    HitInfo floor_wall = HitInfo(
+        sdBox(
+            pos - vec3(0.0, -rect, 0.0), // pos
+            vec3(rect, 0.1, rect) // size
+            ),
+        vec3(0.000,0.000,1.000), // col
+        vec3(0.000,0.000,0.000), // light
+        
+        SHADE_MIRROR
+    );
+
+    
+    HitInfo roof_wall = HitInfo(
+        sdBox(
+            pos - vec3(0.0, rect, 0.0), // pos
+            vec3(rect, 0.1, rect) // size
+            ),
+        vec3(1.0, 1.0, 1.0), // col
+        vec3(0.000,0.000,0.000), // light
+        
+        DEF
+    );
+    
+    // spheres
+    vec3 sl_col = vec3(0.306,0.016,0.663);
+    HitInfo sphere_left = HitInfo(
+        sdSphere(
+            pos - vec3(-2.5, -2.8, 0.0),
+            1.5
+        ),
+        sl_col,
+        vec3(0.0),
+        
+        0.5, 
+        sl_col, 
+        0.0,
+        
+        RDEF
+    );
+    
+    
+    vec3 tr = pos;
+    tr -= vec3(2.5, 0.0, 0.0);
+    tr.xy *= rot2D(1.0);
+    tr.yz *= rot2D(1.0);
+    vec3 scol = vec3(1.000,0.843,0.000);
+    HitInfo sphere_right = HitInfo(
+        sdBox(
+            tr,
+            vec3(1.0)
+        ),
+        scol,
+        vec3(0.0),
+        
+        0.5, // spec
+        scol, // spec col
+        
+        0.0, // rough
+        
+        RDEF
+    );
+    
+    HitInfo sphere_mid = HitInfo(
+        sdSphere(
+            pos - vec3(0.0, -2.8, 3.0),
+            2.5
+        ),
+        vec3(1.000,1.000,1.000),
+        vec3(0.0),
+        
+        0.0,
+        vec3(1.000,1.000,1.000),
+        0.0,
+        
+        2.0, 
+        1.0, 
+        0.0,
+        vec3(1.0)
+    );
+    
+    
+    // lights
+    HitInfo light_roof = HitInfo(
+        sdBox(
+            pos - vec3(0.0, 4.9, 0.0), // pos
+            vec3(1.5, 0.5, 1.5) // size
+            ),
+        vec3(1.000,1.000,1.000), // col
+        vec3(1.000,1.000,1.000) * 15.0, // light
+        
+        DEF
+    );
+
+
+    ////////////
+
+    HitInfo end; 
+    
+    end = opUnion(back_wall, left_wall);
+    end = opUnion(end, right_wall);
+    end = opUnion(end, floor_wall);
+    end = opUnion(end, roof_wall);
+    
+    end = opUnion(end, sphere_left);
+    end = opUnion(end, sphere_mid);
+    end = opUnion(end, sphere_right);
+    
+    end = opUnion(end, light_roof);
+    
+    
+    end.col *= dp;
+    return end;
+}
+
+// shape test scene
+HitInfo display(vec3 inpos) { \
+    vec3 pos = inpos - vec3(0.0, -0.0, 8.0);
+    
+    float dp = 0.8;
+    
+    // walls
+    float rect = 10.0;
+    HitInfo floor_wall = HitInfo(
+        sdBox(
+            pos - vec3(0.0, -4.0, 0.0), // pos
+            vec3(rect, 0.1, rect) // size
+            ),
+        vec3(0.000,0.000,1.000), // col
+        vec3(1.000,0.000,0.000) * 0.0, // light
+        
+        SHADE_MIRROR
+    );
+
+    
+    
+    // objects
+    vec3 mc = vec3(1.0, 1.0, 1.0);
+    float size = 2.5;
+    size = 1.0 / size;
+    
+    vec3 mp = pos - vec3(0.0, 0.0, 2.0);
+    vec3 mb = sdMandlebulb(mp * size);
+    HitInfo test = HitInfo(
+        mb.x / size,
+        mc,
+        vec3(0.0),
+        
+        
+        PERF_MIRROR
+        
+    );
+    
+    
+    // lights
+    float rs = 3.0;
+    HitInfo light_roof = HitInfo(
+        sdBox(
+            pos - vec3(0.0, 4.9, 0.0), // pos
+            vec3(rs, 0.5, rs) // size
+            ),
+        vec3(1.000,1.000,1.000), // col
+        vec3(1.000,0.576,0.161) * 15.0, // light 255, 147, 41
+        
+        DEF
+    );
+
+
+    ////////////
+
+    HitInfo end; 
+    end = test;
+    
+    //end = opUnion(end, test);
+    
+    end = opUnion(end, light_roof);
+    
+    
+    end.col *= dp;
+    return end;
+}
+
+
+
+HitInfo map(vec3 pos) {
+  HitInfo current = box(pos);
+
+  return current;
+}
+
+
+
+//////* HELPER FUNCTIONS *//////
+
+
+
+float pull(vec3 p, vec3 e) 
+{
+    return map(p + e).dist;
+}
+
+vec3 get_normal(vec3 p) {
+    const vec3 e = vec3(.001, 0.0, 0.0);
+    return normalize(
+        vec3(
+            pull(p, e.xyy) - pull(p, -e.xyy),
+            pull(p, e.yxy) - pull(p, -e.yxy),
+            pull(p, e.yyx) - pull(p, -e.yyx)
+        )
+    );
+}
+
+
+
+//////* RNG STUFF *//////
+
+uint wang_hash(inout uint seed)
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+ 
+float RandomFloat01(inout uint state)
+{
+    return float(wang_hash(state)) / 4294967296.0;
+}
+ 
+vec3 RandomUnitVector(inout uint state)
+{
+    float z = RandomFloat01(state) * 2.0f - 1.0f;
+    float a = RandomFloat01(state) * PI2;
+    float r = sqrt(1.0f - z * z);
+    float x = r * cos(a);
+    float y = r * sin(a);
+    return vec3(x, y, z);
+}
+
+uint gen_rng(vec2 fragCoord, int frame) 
+{
+    return uint(
+        uint(fragCoord.x) * uint(1973)
+        + uint(fragCoord.y) * uint(9277)
+        + uint(frame) * uint(26699)) | uint(1);
+}
+
+
+//////* COLOR STUFF *//////
+
+vec3 LessThan(vec3 f, float value)
+{
+    return vec3(
+        (f.x < value) ? 1.0f : 0.0f,
+        (f.y < value) ? 1.0f : 0.0f,
+        (f.z < value) ? 1.0f : 0.0f);
+}
+ 
+vec3 LinearToSRGB(vec3 rgb)
+{
+    rgb = clamp(rgb, 0.0f, 1.0f);
+ 
+    return mix(
+        pow(rgb, vec3(1.0f / 2.4f)) * 1.055f - 0.055f,
+        rgb * 12.92f,
+        LessThan(rgb, 0.0031308f)
+    );
+}
+ 
+vec3 SRGBToLinear(vec3 rgb)
+{
+    rgb = clamp(rgb, 0.0f, 1.0f);
+ 
+    return mix(
+        pow(((rgb + 0.055f) / 1.055f), vec3(2.4f)),
+        rgb / 12.92f,
+        LessThan(rgb, 0.04045f)
+    );
+}
+
+// ACES tone mapping curve fit to go from HDR to LDR
+//https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+vec3 ACESFilm(vec3 x)
+{
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return clamp((x*(a*x + b)) / (x*(c*x + d) + e), 0.0f, 1.0f);
+}
+
+HitInfo CastRay(int steps, vec3 ray_pos, vec3 ray_dir) 
+{
+    float t = 0.0;
+    HitInfo back;
+    back.dist = farplane * 2.0;
+    
+    for (int i = 0; i < steps; i++) {
+        vec3 p = ray_pos + ray_dir * t;
+        
+        HitInfo test = map(p);
+        
+        t += test.dist;
+        
+        if (test.dist < 0.03) { test.dist = t; back = test; break; }
+        if (t > farplane) {test.dist = t; back = test; break; }
+    }
+    
+    return back;
+}
+
+float FresnelReflectAmount(float n1, float n2, vec3 normal, vec3 incident, float f0, float f90)
+{
+        // Schlick aproximation
+        float r0 = (n1-n2) / (n1+n2);
+        r0 *= r0;
+        float cosX = -dot(normal, incident);
+        if (n1 > n2)
+        {
+            float n = n1/n2;
+            float sinT2 = n*n*(1.0-cosX*cosX);
+            // Total internal reflection
+            if (sinT2 > 1.0)
+                return f90;
+            cosX = sqrt(1.0-sinT2);
+        }
+        float x = 1.0-cosX;
+        float ret = r0+(1.0-r0)*x*x*x*x*x;
+ 
+        // adjust reflect multiplier for object reflectivity
+        return mix(f0, f90, ret);
+}
+
+
+vec3 PathTrace(vec3 st_ray_pos, vec3 st_ray_dir, inout uint rng)
+{
+    // init
+    vec3 ret = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    vec3 ray_pos = st_ray_pos;
+    vec3 ray_dir = st_ray_dir;
+    
+    // path traceing loop 
+    for (int i = 0; i <= BOUNCES; i++) {
+        HitInfo hit = CastRay(MARCH_STEPS, ray_pos, ray_dir);
+        
+        if (hit.dist > farplane) { // ray misses
+            ret += SRGBToLinear(texture(iChannel1, ray_dir).rgb) * skybox_bright * throughput;
+            break;
+        }
+        
+        vec3 hit_pos = ray_pos + ray_dir * hit.dist;
+        vec3 hit_normal = get_normal(hit_pos);
+        ray_pos = hit_pos + hit_normal * HIT_OFFSET;
+        
+        
+        float spec_chance = hit.spec;
+        if (spec_chance > 0.0) 
+        {
+            spec_chance = FresnelReflectAmount(
+                1.0,
+                1.0, // IOR
+                ray_dir,
+                hit_normal,
+                spec_chance,
+                1.0
+            );
+        }
+        
+        // calc wether to or not to do speculer lighting
+        float do_spec = (RandomFloat01(rng) < spec_chance) ? 1.0f : 0.0f;
+        
+        // get the probability for choosing the ray type we chose
+        float ray_prob = (do_spec == 1.0f) ? spec_chance : 1.0f - spec_chance;
+        ray_prob = max(ray_prob, 0.0001f);    
+        
+        
+        // Calculate a new ray direction.
+        // Diffuse uses a normal oriented cosine weighted hemisphere sample.
+        // Perfectly smooth specular uses the reflection ray.
+        // Rough (glossy) specular lerps from the smooth specular to the rough diffuse by the material roughness squared
+        // Squaring the roughness is just a convention to make roughness feel more linear perceptually.
+        vec3 diffuse_ray_dir = normalize(hit_normal + RandomUnitVector(rng));
+        vec3 spec_ray_dir = reflect(ray_dir, hit_normal);
+        spec_ray_dir = normalize(mix(spec_ray_dir, diffuse_ray_dir, hit.spec_rough * hit.spec_rough));
+        ray_dir = mix(diffuse_ray_dir, spec_ray_dir, do_spec);
+        
+        //ray_dir = normalize(hit_normal + RandomUnitVector(rng));
+        
+        ret += hit.light * throughput;
+        
+        throughput *= mix(hit.col, hit.spec_col, do_spec);
+        
+        
+        throughput /= ray_prob;
+        // Russian Roulette
+        // As the throughput gets smaller, the ray is more likely to get terminated early.
+        // Survivors have their value boosted to make up for fewer samples being in the average.
+        #ifdef RUSSIAN
+        {
+        	float p = max(throughput.r, max(throughput.g, throughput.b));
+        	if (RandomFloat01(rng) > p)
+            	break;
+
+        	// Add the energy we 'lose' by randomly terminating paths
+        	throughput *= 1.0f / p;            
+        }
+        #endif
+        
+        //return hit_normal * 0.5 + 0.5;
+        //return hit.col;
+    }
+
+    return ret;
+}
+
+
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    float aspect = viewPort.x / viewPort.y;
+    
+    uint rng = gen_rng(fragCoord, iFrame);
+    
+    vec3 ray_pos = vec3(0.0, 0.0, 0.0);
+    
+    float cam_dist = 1.0f / tan(FOV * 0.5 * PI / 180.0);
+    
+    // calculate subpixel camera jitter for anti aliasing
+    vec2 jitter = vec2(RandomFloat01(rng), RandomFloat01(rng)) - 0.5f;
+    
+    vec3 ray_target = vec3(((fragCoord + jitter) / viewPort.xy) * 2.0 - 1.0, cam_dist);
+    ray_target.y /= aspect;
+    
+    vec3 ray_dir = normalize(ray_target - ray_pos);
+    ray_dir.yz *= rot2D(0.0);
+    
+    vec3 color = vec3(0.0);
+    for (int i = 0; i < SAMPLES; i++)
+        color += PathTrace(ray_pos, ray_dir, rng) / float(SAMPLES);
+
+    
+    #ifdef TIME_SMOOTH
+        // see if space was pressed. if so we want to restart our render.
+        // This is useful for when we go fullscreen for a bigger image.
+        bool spacePressed = (texture(iChannel2, vec2(KEY_SPACE,0.25)).x > 0.1);
+
+        // average the frames together
+    //     vec4 last_frame_color = texture(iChannel0, fragCoord / viewPort.xy);
+    //     float blend = (last_frame_color.a == 0.0f || spacePressed) ? 1.0f : 1.0f / (1.0f + (1.0f / last_frame_color.a));
+    //     color = mix(last_frame_color.rgb, color, blend);
+        
+    //     outcolor = vec4(color, blend);
+    // #else
+    //     vec3 last_frame_color = texture(iChannel0, fragCoord / viewPort.xy).rgb;
+    //     color = mix(last_frame_color, color,  past_ratio);
+
+    
+    // Assume fragCoord is in screen space and we need to convert it to a direction vector
+    vec3 direction = normalize(vec3(fragCoord.xy - 0.5 * viewPort.xy, 1.0));
+
+    vec4 last_frame_color = texture(iChannel0, direction);
+    float blend = (last_frame_color.a == 0.0f || spacePressed) ? 1.0f : 1.0f / (1.0f + (1.0f / last_frame_color.a));
+    color = mix(last_frame_color.rgb, color, blend);
+    
+    outColor = vec4(color, blend);
+#else
+    vec3 last_frame_color = texture(iChannel0, fragCoord / viewPort.xy).rgb;
+    color = mix(last_frame_color, color, past_ratio);
+
+    	outColor = vec4(color, 1.0);
+    #endif
+    
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

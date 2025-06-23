@@ -1,0 +1,700 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+
+#define MAXN 3 //maximum number of intervals 1-6
+
+//----------------------
+#define NOHIT 1e5
+#define ZERO min(iFrame, 0)
+#define time iTime*2.
+
+//structs:
+// Its= ray intersection distance + normal 
+// Span = interval between entry point and exit point on convex shape
+// Shape= ordered array of spans on a CSG shape
+struct Its
+{
+	float t;
+	uint n;    //normal 
+	
+};
+
+const Its  NO_its=Its(NOHIT,0u);
+struct Span
+{
+	Its n;
+	Its f;
+	bool merged;
+};
+
+struct Shape
+{
+	int l; 
+	Span[MAXN] s;
+};
+
+
+void init(inout Shape y){
+	y.l=0;
+}
+
+
+
+void add(inout Shape y,  Span x){
+
+
+    if(y.l>=MAXN) return;
+    int id=y.l++; 
+
+	if(id==0) y.s[0]=x;
+#if (MAXN>1)      
+    else if(id==1) y.s[1]=x;
+#endif
+#if (MAXN>2)   
+    else if(id==2) y.s[2]=x;
+#endif
+#if (MAXN>3)    
+    else if(id==3) y.s[3]=x;
+#endif 
+#if (MAXN>4)  
+    else if(id==4) y.s[4]=x;
+#endif
+#if (MAXN>5)  
+    else if(id==5) y.s[5]=x;
+#endif
+#if (MAXN>6)  
+    else if(id==6) y.s[6]=x;
+#endif
+
+
+}
+
+bool seq(inout Its a1, inout Its a2, inout Its a3,inout Its a4)
+{
+    return a1.t<a2.t && a2.t<a3.t && a3.t<a4.t;
+}
+bool seq(inout Its a1,inout Its a2)
+{
+    return a1.t<a2.t ;
+}
+Shape getShape( Span x){
+    Shape s;s.l=0;  add(s,x);
+    return s;
+}
+
+
+bool no_hit(Span x) {return x.n.t==NOHIT || x.f.t<0.; }
+
+//-------------------------------
+//UNION A+B:
+void addMerge(inout Shape cs,  Span y,bool reduce){
+    if(reduce){
+        if(y.merged) return;
+        for(int j=0;j<cs.l;j++)
+        {           
+            Span x=cs.s[j];
+            if(x.merged) continue;
+            else if(seq(x.f,y.n)|| seq(y.f,x.n )) continue;
+            else if(seq(x.n,y.n,x.f,y.f)) {cs.s[j].merged=true; y=Span(x.n,y.f,false);}
+            else if(seq(y.n,x.n,y.f,x.f)) {cs.s[j].merged=true; y=Span(y.n,x.f,false);}
+            else if(seq(x.n,y.n,y.f,x.f)) {cs.s[j].merged=true; y=Span(x.n,x.f,false);}
+            else if(seq(y.n,x.n,x.f,y.f)) {cs.s[j].merged=true; y=Span(y.n,y.f,false); }
+        }
+    }
+    add(cs,y);    
+}
+
+Shape Union(Shape as, Shape bs,bool reduce){   
+    Shape cs;
+    init(cs);
+    for(int i=0;i<as.l;i++) addMerge(cs,as.s[i],reduce);
+    for(int i=0;i<bs.l;i++) addMerge(cs,bs.s[i],reduce);
+
+    if(!reduce) return cs;    
+    //ds=REDUCE(cs)
+    Shape ds;
+    init(ds);
+    for(int i=0;i<cs.l;i++) if(!cs.s[i].merged) add(ds,cs.s[i]);
+    return ds;
+}
+
+ 
+
+//-------------------------------
+//INTERSECTION A*B:
+Shape Inter(Shape as, Shape bs){ 
+    Shape cs;
+    init(cs);
+    for(int i=0;i<as.l;i++) {
+        Span a=as.s[i];
+        if(no_hit(a)) continue;
+        for(int j=0;j<bs.l;j++) {
+            Span b=bs.s[j];
+            if(no_hit(b)) continue;
+            else if(seq( a.f,b.n)|| seq(b.f,a.n )) continue;
+            else if(seq(a.n,b.n,a.f,b.f)) add(cs,Span(b.n,a.f,false));
+            else if(seq(b.n,a.n,b.f,a.f)) add(cs,Span(a.n,b.f,false));
+            else if(seq(a.n,b.n,b.f,a.f)) add(cs,b);
+            else if(seq(b.n,a.n,a.f,b.f)) add(cs,a);		
+        }
+    }
+    return cs;
+}
+//-----------------------------
+//SUBTRACTION A-B:
+Shape Sub(Shape as, Span b){
+    Shape cs;
+    init(cs);
+     for(int j=0;j<as.l;j++) {
+        Span a=as.s[j];
+        if(no_hit(a) ) continue;
+        if(seq( a.f,b.n)) add(cs,a);
+        else if(seq(b.f,a.n )) add(cs,a);
+        else if(seq(a.n,b.n,a.f,b.f)) add(cs,Span(a.n,b.n,false)); 
+        else if(seq(b.n,a.n,b.f,a.f)) add(cs,Span(b.f,a.f,false)); 
+        else if(seq(a.n,b.n,b.f,a.f)) {add(cs,Span(a.n,b.n,false)); add(cs,Span(b.f,a.f,false)); }
+        else if(seq(b.n,a.n,a.f,b.f)) continue;	
+    }
+    return cs;
+}
+
+Shape Sub(Shape as, Shape bs){ 
+    for(int i=0;i<bs.l;i++) {
+        Span b=bs.s[i];        
+        if(!no_hit(b)) as=Sub( as,  b);        
+    }
+    return as;
+}
+
+//----------------------------
+
+
+//IQ normal compression https://www.shadertoy.com/view/llfcRl
+uint direct_32( in vec3 nor )
+{
+    nor /= max(max(abs(nor.x),abs(nor.y)),abs(nor.z));
+
+    vec3 v = 0.5 + 0.5*nor;
+    uvec3 d = uvec3(round(v*vec3(2047.0,1023.0,2047.0)));
+    return d.x|(d.y<<11u)|(d.z<<21u);
+}
+
+vec3 i_direct_32( uint data )
+{
+    uvec3 d = uvec3( data, data>>11, data>>21 ) & uvec3(2047u,1023u,2047u);
+    vec3 v = vec3(d)*2.0/vec3(2047.0,1023.0,2047.0) - 1.0;
+    return normalize(v);
+}
+//-----------Intersection primitives--------------------
+Span iSphere( in vec3 ro, in vec3 rd, float ra )
+{
+
+    vec3 oc = ro ;
+    float b = dot( oc, rd );
+    float c = dot( oc, oc ) - ra*ra;
+    float h = b*b - c;
+    if( h<0. ) return Span(NO_its,NO_its,true); // no intersection
+    h = sqrt( h );
+    vec3 oNor =normalize(ro-(b+h)*rd); 
+    vec3 fNor= normalize(ro-(b-h)*rd); 
+    if( h-b < 0. ) return  Span(NO_its,NO_its,true);
+    return Span(Its(-b-h,direct_32(oNor)) , Its(-b+h,direct_32(-fNor)),false);
+}
+
+Span iBox( in vec3 ro, in vec3 rd, vec3 boxSize) 
+{
+    vec3 m = 1./rd; 
+    vec3 n = m*ro;   
+    vec3 k = abs(m)*boxSize;
+
+    vec3 t1 = -n - k;
+    vec3 t2 = -n + k;
+    float tN = max( max( t1.x, t1.y ), t1.z );
+    float tF = min( min( t2.x, t2.y ), t2.z );
+    if( tN>tF || tF<0.) return Span(NO_its,NO_its,true); // no intersection
+    vec3 oNor = -sign(rd)*step(t1.yzx,t1.xyz)*step(t1.zxy,t1.xyz); 
+     vec3  fNor=- sign(rd)*step(t2.xyz,t2.yzx)*step(t2.xyz,t2.zxy); 
+    return  Span(Its(tN,direct_32(oNor)) , Its(tF,direct_32(fNor)),false);
+}
+
+Span iPlane( in vec3 ro, in vec3 rd, in vec3 n ,float h)
+{
+    float d= -(dot(ro,n)+h)/dot(rd,n);
+    vec3  u = normalize(cross(n,vec3(0,0,1))), v = normalize(cross(u,n) );
+    vec3 oFuv=vec3(1.,dot(ro+d*rd,u), dot(ro+d*rd,v));
+    vec3 oNor=n;
+    if(d<0.)  return Span(NO_its,NO_its,true);
+    return Span(Its(d,direct_32(oNor)),NO_its,false);
+}
+/*
+Span iCylinder( in vec3 ro, in vec3 rd,  in vec3 pa, in vec3 pb, float ra ) // extreme a, extreme b, 
+{
+    Span no_hit =  Span(NO_its,NO_its,true);;
+
+    vec3 ba = pb-pa;
+
+    vec3  oc = ro - pa;
+
+    float baba = dot(ba,ba);
+    float bard = dot(ba,rd);
+    float baoc = dot(ba,oc);
+    
+    float k2 = baba            - bard*bard;
+    float k1 = baba*dot(oc,rd) - baoc*bard;
+    float k0 = baba*dot(oc,oc) - baoc*baoc - ra*ra*baba;
+    
+    float h = k1*k1 - k2*k0;
+    if( h<0.0 )  return no_hit;
+    h = sqrt(h);
+    
+    float t = (-k1-h)/k2;
+    float y = baoc + t*bard; 
+    float t2 = ( ((y<0.0) ? 0.0 : baba) - baoc)/bard;   
+    
+    if( (y<0.0 || y>baba )  && abs(k1+k2*t2)>h)  return no_hit;
+    Its iN,iF;
+    vec3 w = normalize(ba), u = normalize(cross(ba,vec3(0,0,1))), v = normalize(cross(u,w) );
+    
+    //entry point
+    vec3 q = (oc+t*rd-ba)*mat3(u,v,w);   
+    if( y>0.0 && y<baba ) iN= Its( t, direct_32((oc+t*rd - ba*y/baba)/ra) ); 
+    else iN= Its(t2, direct_32(ba*sign(y)/baba )); 
+        
+  
+    //exit point
+    t = (-k1+ h)/k2;
+    y = baoc + t*bard; 
+    t2 = ( ((y<0.0) ? 0.0 : baba) - baoc)/bard;
+    q = (oc+t*rd-ba)*mat3(u,v,w); 
+    if( y>0.0 && y<baba ) iF= Its( t, direct_32((oc+t*rd - ba*y/baba)/ra) ); 
+    else iF= Its(t2, direct_32(ba*sign(y)/baba) ); 
+    
+    return Span(iN , iF ,false);
+  
+}*/
+
+//---------mixed functions--------------------------
+
+
+struct Hit{   
+    float d;
+    vec3 n;
+    float id;
+};
+
+
+Hit FastUnion( Hit a, Hit b)
+{
+   if(a.d<b.d ) return a;
+   else return b;
+}
+#define Add(_ro,_func) _ro = FastUnion(_ro,_func);
+
+uint erot(uint n, vec3 ax, float ro) {
+    vec3 p= i_direct_32(n) ;
+    return direct_32(mix(dot(p,ax)*ax,p,cos(ro))+sin(ro)*cross(ax,p));
+}
+vec3 erot(vec3 p, vec3 ax, float ro) {
+
+    return (mix(dot(p,ax)*ax,p,cos(ro))+sin(ro)*cross(ax,p));
+}
+
+void erot(inout Shape s,vec3 ax, float an){
+    for(int i=0;i <s.l;i++){
+        s.s[i].n.n=erot(s.s[i].n.n, ax, an);
+        s.s[i].f.n=erot(s.s[i].f.n, ax, an);
+    }   
+}
+//unused here
+#define  RotGroup( _p, _rd, _ro, _ax,  _c ,  _a,  _body) \
+     vec3 _rdt= _rd; \
+    _p=erot( _p , _ax, _a); \
+    _rdt=  normalize(erot( _rdt , _ax, _a)); \
+    _body \
+    _ro.n=  normalize(erot( _ro.n , _ax, -_a)); \
+
+//Raytracing CSG 2  by Kastorp
+//------------------------------
+//another experiment: a sphere with 21 subtractions
+//Artifacts are  due to limiting the number of intervals MAXN to 4
+//NOTE: poor performances with openGL
+//------------------------------------
+
+Hit Ray(Shape y,float mat){
+       
+    float tMin=NOHIT;
+    int idm=-1;
+    
+    for(int i=0;i<y.l;i++) if(y.s[i].n.t<tMin && y.s[i].f.t>1e-4 ) {idm=i;tMin=y.s[i].n.t;}
+    if(idm<0) return Hit(NOHIT,vec3(0),mat);
+    
+    Its ix = y.s[idm].n;
+    if(ix.t<0. ) ix= y.s[idm].f;
+    
+    return Hit( ix.t,i_direct_32(ix.n),mat);
+}
+Shape gear(vec3 rd,vec3 ro ,float n,float v) {
+    float tk=.2,sz=tk*n*1.2;
+    Shape s= getShape(iSphere(ro,rd,sz));
+    s= Inter(s,getShape(iBox(ro,rd,vec3(sz,sz,.08))));
+    s= Sub(s,getShape(iSphere(ro,rd,sz-tk*2.)));
+    Shape s2; 
+    for(int i=0;i<int(n);i++){
+        float  an=3.14/n*float(i)+iTime/n*v;
+        vec3  ax=vec3(0,0,1),
+              rro= erot(ro,  ax, an),
+              rrd= erot(rd,  ax, an);
+        s2= getShape(iBox(rro,rrd,vec3(sz+tk,tk,sz+tk)));
+        erot(s2,ax,-an);        
+        s= Sub(s,s2);  
+        
+    }
+    s2= getShape(iSphere(ro,rd,sz-tk));
+    s2= Sub(s2,getShape(iSphere(ro,rd,sz-3.*tk)));
+    s2= Inter(s2,getShape(iBox(ro,rd,vec3(sz,sz,.1))));
+    s= Union(s2,s,true);
+    return s;
+}
+Hit trace(vec3 rd,vec3 ro ) { 
+   
+
+    Shape s= getShape(iPlane(ro,rd,vec3(0,1.,0),0.));
+    Hit r =  Ray(s,1.);
+
+#if 1
+    s= getShape(iSphere(ro-vec3(0.,2.,0.),rd,2.));
+    Shape s2;  
+    
+    for(int i=0;i<21;i++){
+        float tk=.1, h=-1.65 + .55 *float(i%7);
+        vec3 sz= i>=14?vec3(3.,3.,tk) : i>=7? vec3(tk,3.,3.):vec3(3.,tk,3.);
+        vec3 pos = i>=14? vec3(0,2.,h): i>=7? vec3(h,2.,0.):vec3(0.,2.+h,0.);
+        s2= getShape(iBox(ro-pos,rd,sz));
+        s= Sub(s,s2);    
+    }
+   Add(r,Ray(s,3.)); 
+#else
+
+    Add(r,Ray(gear(rd,ro-vec3(0,2.,0),5.,1.),3.));
+    Add(r,Ray(gear(rd,ro-vec3(1.75,3.0,0),4.,-1.),3.));
+#endif
+   return r; 
+           
+   
+}
+
+
+#define PATH_LENGTH 8
+#define MAX_DIST 1e10
+//
+// Hash functions by Nimitz:
+// https://www.shadertoy.com/view/Xt3cDn
+//
+
+uint baseHash( uvec2 p ) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+float hash1( inout float seed ) {
+    uint n = baseHash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    return float(n)/float(0xffffffffU);
+}
+
+vec2 hash2( inout float seed ) {
+    uint n = baseHash(floatBitsToUint(vec2(seed+=.1,seed+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+//
+// Ray tracer helper functions
+//
+
+float FresnelSchlickRoughness( float cosTheta, float F0, float roughness ) {
+    return F0 + (max((1. - roughness), F0) - F0) * pow(abs(1. - cosTheta), 5.0);
+}
+
+vec3 cosWeightedRandomHemisphereDirection( const vec3 n, inout float seed ) {
+  	vec2 r = hash2(seed);
+	vec3  uu = normalize(cross(n, abs(n.y) > .5 ? vec3(1.,0.,0.) : vec3(0.,1.,0.)));
+	vec3  vv = cross(uu, n);
+	float ra = sqrt(r.y);
+	float rx = ra*cos(6.28318530718*r.x); 
+	float ry = ra*sin(6.28318530718*r.x);
+	float rz = sqrt(1.-r.y);
+	vec3  rr = vec3(rx*uu + ry*vv + rz*n);
+    return normalize(rr);
+}
+
+vec3 modifyDirectionWithRoughness( const vec3 normal, const vec3 n, const float roughness, inout float seed ) {
+    vec2 r = hash2(seed);
+    
+	vec3  uu = normalize(cross(n, abs(n.y) > .5 ? vec3(1.,0.,0.) : vec3(0.,1.,0.)));
+	vec3  vv = cross(uu, n);
+	
+    float a = roughness*roughness;
+    
+	float rz = sqrt(abs((1.0-r.y) / clamp(1.+(a - 1.)*r.y,.00001,1.)));
+	float ra = sqrt(abs(1.-rz*rz));
+	float rx = ra*cos(6.28318530718*r.x); 
+	float ry = ra*sin(6.28318530718*r.x);
+	vec3  rr = vec3(rx*uu + ry*vv + rz*n);
+    
+    vec3 ret = normalize(rr);
+    return dot(ret,normal) > 0. ? ret : n;
+}
+
+vec2 randomInUnitDisk( inout float seed ) {
+    vec2 h = hash2(seed) * vec2(1,6.28318530718);
+    float phi = h.y;
+    float r = sqrt(h.x);
+	return r*vec2(sin(phi),cos(phi));
+}
+
+//
+// Scene description
+//
+
+vec3 rotateY( const in vec3 p, const in float t ) {
+    float co = cos(t);
+    float si = sin(t);
+    vec2 xz = mat2(co,si,-si,co)*p.xz;
+    return vec3(xz.x, p.y, xz.y);
+}
+      
+vec3 worldhit( in vec3 ro, in vec3 rd, in vec2 dist, out vec3 normal ) {
+    vec3  d = vec3(dist, 0.);
+    Hit h =trace(rd,ro);
+    if( h.d<d.y && h.d>d.x &&  h.d< NOHIT) {
+        normal=h.n;
+        d=vec3(d.y, h.d, h.id);
+    }
+	return d;    
+}
+
+//
+// Palette by Íñigo Quílez: 
+// https://www.shadertoy.com/view/ll2GD3
+//
+vec3 pal(in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d) {
+    return a + b*cos(6.28318530718*(c*t+d));
+}
+
+float checkerBoard( vec2 p ) {
+   return mod(floor(p.x) + floor(p.y), 2.);
+}
+
+vec3 getSkyColor( vec3 rd ) {
+    vec3 col = mix(vec3(1),vec3(.5,.7,1), .5+.5*rd.y);
+    float sun = clamp(dot(normalize(vec3(-.4,.7,-.6)),rd), 0., 1.);
+    col += vec3(1,.6,.1)*(pow(sun,4.) + 10.*pow(sun,32.));
+    return col;
+}
+
+#define LAMBERTIAN 0.
+#define METAL 1.
+#define DIELECTRIC 2.
+
+float gpuIndepentHash(float p) {
+    p = fract(p * .1031);
+    p *= p + 19.19;
+    p *= p + p;
+    return fract(p);
+}
+
+void getMaterialProperties(in vec3 pos, in float mat, 
+                           out vec3 albedo, out float type, out float roughness) {
+    albedo = pal(mat*.59996323+.5, vec3(.5),vec3(.5),vec3(1),vec3(0,.1,.2));
+
+    if( mat < 1.5 ) {            
+        albedo = vec3(.25 + .25*checkerBoard(pos.xz ));
+        roughness = .75 * albedo.x - .15;
+        type = METAL;
+    } else {
+        type = floor(gpuIndepentHash(mat+.3) * 3.);
+        roughness = (1.-type*.475) * gpuIndepentHash(mat);
+    }
+}
+
+//
+// Simple ray tracer
+//
+
+float schlick(float cosine, float r0) {
+    return r0 + (1.-r0)*pow((1.-cosine),5.);
+}
+vec3 render( in vec3 ro, in vec3 rd, inout float seed ) {
+    vec3 albedo, normal, col = vec3(1.); 
+    float roughness, type;
+    
+    for (int i=0; i<PATH_LENGTH; ++i) {    
+    	vec3 res = worldhit( ro, rd, vec2(1e-9, 100), normal );
+		if (res.z > 0.) {
+			ro += rd * res.y;
+       		
+            getMaterialProperties(ro, res.z, albedo, type, roughness);
+            
+            if (type < LAMBERTIAN+.5) { // Added/hacked a reflection term
+                float F = FresnelSchlickRoughness(max(0.,-dot(normal, rd)), .04, roughness);
+                if (F > hash1(seed)) {
+                    rd = modifyDirectionWithRoughness(normal, reflect(rd,normal), roughness, seed);
+                } else {
+                    col *= albedo;
+			        rd = cosWeightedRandomHemisphereDirection(normal, seed);
+                }
+            } else if (type < METAL+.5) {
+                col *= albedo;
+                rd = modifyDirectionWithRoughness(normal, reflect(rd,normal), roughness, seed);            
+            } else { // DIELECTRIC
+                vec3 normalOut, refracted;
+                float ni_over_nt, cosine, reflectProb = 1.;
+                if (dot(rd, normal) > 0.) {
+                    normalOut = -normal;
+            		ni_over_nt = 1.4;
+                    cosine = dot(rd, normal);
+                    cosine = sqrt(1.-(1.4*1.4)-(1.4*1.4)*cosine*cosine);
+                } else {
+                    normalOut = normal;
+                    ni_over_nt = 1./1.4;
+                    cosine = -dot(rd, normal);
+                }
+            
+	            // Refract the ray.
+	            refracted = refract(normalize(rd), normalOut, ni_over_nt);
+    	        
+        	    // Handle total internal reflection.
+                if(refracted != vec3(0)) {
+                	float r0 = (1.-ni_over_nt)/(1.+ni_over_nt);
+	        		reflectProb = FresnelSchlickRoughness(cosine, r0*r0, roughness);
+                }
+                
+                rd = hash1(seed) <= reflectProb ? reflect(rd,normal) : refracted;
+                rd = modifyDirectionWithRoughness(-normalOut, rd, roughness, seed);            
+            }
+        } else {
+            col *= getSkyColor(rd);
+			return col;
+        }
+    }  
+    return vec3(0);
+}
+
+mat3 setCamera( in vec3 ro, in vec3 ta, float cr ) {
+	vec3 cw = normalize(ta-ro);
+	vec3 cp = vec3(sin(cr), cos(cr),0.0);
+	vec3 cu = normalize( cross(cw,cp) );
+	vec3 cv =          ( cross(cu,cw) );
+    return mat3( cu, cv, cw );
+}
+
+void main() {
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    bool reset = iFrame == 0;
+            
+    vec2 mo = iMouse.xy == vec2(0) ? vec2(.0) : 
+              abs(iMouse.xy)/viewPort.xy - .5;
+        
+    // vec4 data = texelFetch(iChannel0, ivec2(0), 0);
+    vec4 data = texture(iChannel0, vec3(1.0, 0.0, 0.0)); // Sample the positive X face of the cubemap
+    if (round(mo*viewPort.xy) != round(data.yz) || round(data.w) != round(viewPort.x)) {
+        reset = true;
+    }
+    
+    vec3 ro = vec3(+4.5*(mo.x), 2., +4.5*(.5-mo.y));
+    vec3 ta = vec3(0.,2.,-10.);
+    mat3 ca = setCamera(ro, ta, 0.);    
+    vec3 normal;
+    
+    float fpd = .7;//data.x;
+    if(all(equal(ivec2(fragCoord), ivec2(0)))) {
+        // Calculate focus plane.
+        float nfpd =  worldhit(ro, normalize(vec3(.0,0.4,0)-ro), vec2(0, 100), normal).y;
+		outColor = vec4(nfpd, mo*viewPort.xy, viewPort.x);
+    } else { 
+        vec2 p = (-viewPort.xy + 2.*fragCoord - 1.)/viewPort.y;
+        float seed = float(baseHash(floatBitsToUint(p- iTime)))/float(0xffffffffU);
+
+        // AA
+        p += 2.*hash2(seed)/viewPort.y ;
+        vec3 rd = ca * normalize( vec3(p.xy,1.6) );  
+
+        // DOF
+        vec3 fp = ro + rd * fpd;
+        ro = ro + ca * vec3(randomInUnitDisk(seed), 0.)*.003;
+        rd = normalize(fp - ro);
+
+        vec3 col = render(ro, rd, seed);
+
+        if (reset) {
+           outColor = vec4(col, 1);
+        } else {
+           outColor = vec4(col, 1) + texture(iChannel0, vec3(fragCoord, 0.0));
+        }
+    }
+}
+]]>
+</program>
+</language>
+</jittershader>

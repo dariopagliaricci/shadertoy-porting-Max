@@ -1,0 +1,139 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+// Crystal Drops
+// by Michal 'spolsh' Klos 2017
+
+#define R viewPort
+#define T iTime
+#define F fragCoord
+
+vec3 sharpen()
+{ // by NickWest (lslGRr)
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = F.xy/R.xy;
+  	vec2 step = 1.0/viewPort.xy;
+    float scale = 1.5;
+	vec3 texA = texture(iChannel0, uv + vec2(-step.x, -step.y) * scale).rgb;
+	vec3 texB = texture(iChannel0, uv + vec2( step.x, -step.y) * scale).rgb;
+	vec3 texC = texture(iChannel0, uv + vec2(-step.x,  step.y) * scale).rgb;
+	vec3 texD = texture(iChannel0, uv + vec2( step.x,  step.y) * scale).rgb;   
+    vec3 around = 0.25 *(texA+texB+texC+texD);
+	vec3 center = texture(iChannel0, uv).rgb;
+	vec3 col = center +(center-around)*1.0;
+    return col;
+}
+
+float depthToMask(float d)
+{
+	d *= 100.0;
+    d = abs(d -8.5);
+    d = pow(d, 6.0);
+    d = clamp(d, 0.0, 1.0);    
+    return d;
+}
+
+vec2 Hash22(vec2 uv)
+{
+    float f = uv.x + uv.y * 37.0;
+    return fract(cos(f)*vec2(10003.579, 37049.7));
+}
+
+vec4 bokeh(vec2 uv, float rad)
+{ // based on dof by Jochen "Virgill" Feldkötter, Alcatraz / Rhodium 4k Intro liquid carbon
+  // simplyfied version of Dave Hoskins blur
+  // now bokeh is not cut within dof mask, added alpha blending based on difference of dof mask samples
+    const float GA =2.399; 
+	const mat2 rot = mat2(cos(GA),sin(GA),-sin(GA),cos(GA));
+	vec4 acc = vec4(texture(iChannel0,uv).rgb, rad);
+    float d = rad;
+    vec2 pixel=0.0002*vec2(5.*R.y/R.x,7.);
+	vec2 angle=vec2(0,rad);
+	for (int j=0;j<80;j++)
+    {  
+        rad += 1./rad;
+	    angle*=rot;
+        vec2 tap_uv = uv+pixel*(rad-1.)*angle;
+        if (abs(tap_uv.y*2.-1.) > 0.743) continue; // fix letterbox artifacts
+        vec4 col=texture(iChannel0, tap_uv);
+      	acc.rgb = max(acc.rgb,col.rgb);
+        acc.a = max(acc.a, abs(d-depthToMask(col.w)));
+	}
+	return acc;
+}
+
+void main()
+{      
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = F.xy/R.xy;    
+    vec2 v = 2.0*(uv-0.5);
+    v.x *= R.x/R.y;
+        
+    float cas = step(abs(v.y)*2.39,R.x/R.y);
+    if (cas<0.1) return;
+         
+    float d = depthToMask(texture(iChannel0, uv).w);
+    // fragColor = vec4(d); return; // uncomment to see dof mask
+    
+    vec3 sharp = sharpen();   
+	vec4 dof = bokeh(uv, d);
+    outColor = vec4(mix(sharp, dof.rgb, dof.a), 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,97 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 Q;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+uniform samplerCube iChannel1;
+
+#define R viewPort.xy
+#define A(U) texture(iChannel0,(U)/R)
+// #define B(U) texture(iChannel1,(U)/R)
+#define B(U) texture(iChannel1, vec3(U, sqrt(1.0 - dot(U, U))))
+#define Main void main()
+#define Neighborhood vec4 n = A(U+vec2(0,1));vec4 e = A(U+vec2(1,0));vec4 s = A(U-vec2(0,1));vec4 w = A(U-vec2(1,0));vec4 m = 0.25*(n+e+s+w);
+#define ei(a) mat2(cos(a),sin(a),-sin(a),cos(a))
+vec4 hash(vec4 p4)
+{
+    p4 = fract(p4  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+
+Main {
+	vec2 U = jit_in.uv * viewPort.xy;
+    Q = B(U);
+    vec4 h = hash(vec4(U,iFrame,iTime));
+    vec2 u = vec2(cos(2.*3.14159*h.x),sin(2.*3.14159*h.x));
+    
+    for (float i = 1.; i < 100.; i++) {
+        vec4 q = A(U);
+        Q += 10.*max(sin(-2.+6.*h.z+vec4(1,2,3,4)),0.)*exp(-12.*length(u-vec2(1,0)))/i;
+        u += .25*(1.+.5*h.z)*q.xy;
+        if (length(u)>0.)
+        u = normalize(u);
+        U += u;
+    }
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

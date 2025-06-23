@@ -1,0 +1,167 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="colMod01" type="float" default="0.0" />
+	<param name="colMod02" type="float" default="0.0" />
+	<param name="colMod03" type="float" default="0.0" />
+	<param name="colMod04" type="float" default="0.0" />
+	<param name="colMod05" type="float" default="0.0" />
+	<param name="colMod06" type="float" default="0.0" />
+	<param name="colMod07" type="float" default="0.0" />
+	<param name="colMod08" type="float" default="0.0" />
+	<param name="colMod09" type="float" default="0.0" />
+	<param name="colMod10" type="float" default="0.0" />
+	<param name="colMod11" type="float" default="0.0" />
+	<param name="colMod12" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="colMod01" program="fp" />
+		<bind param="colMod02" program="fp" />
+		<bind param="colMod03" program="fp" />
+		<bind param="colMod04" program="fp" />
+		<bind param="colMod05" program="fp" />
+		<bind param="colMod06" program="fp" />
+		<bind param="colMod07" program="fp" />
+		<bind param="colMod08" program="fp" />
+		<bind param="colMod09" program="fp" />
+		<bind param="colMod10" program="fp" />
+		<bind param="colMod11" program="fp" />
+		<bind param="colMod12" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 Q;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform float colMod01, colMod02, colMod03, colMod04, colMod05, colMod06, colMod07, colMod08, colMod09, colMod10, colMod11, colMod12;
+uniform samplerCube iChannel0;
+
+// #define A(U) texture(iChannel0,(U)/R)
+#define A(U) texture(iChannel0, normalize(vec3((U) - 0.5 * R, 1.0)))
+#define R viewPort.xy
+#define Main void main()
+#define ei(a) mat2(cos(a),sin(a),-sin(a),cos(a))
+vec4 hash(vec4 p) {
+    const vec4 k = vec4(0.1031, 0.11369, 0.13787, 0.16379); 
+    p = fract(p * k);                                       
+    p += dot(p, p.wxyz + k);                                
+    p = fract((p.xxyz + p.yzww) * p.zyxw);                  
+    return fract(sin(p) * 43758.5453);                      
+}
+
+// vec2 F (vec2 u) {
+//     vec2 o = vec2(0);
+//     u *= ei(.5);
+//     o += vec2(cos(.1*u.y),sin(.1*u.x));
+//     u *= ei(.5);
+//     o += vec2(cos(.05*u.y),sin(.05*u.x));
+//     u *= ei(.5);
+//     o += vec2(cos(.025*u.y),sin(.025*u.x));
+//     o.y += .2;
+//     return .05*o;
+// }
+
+vec2 F(vec2 u) {
+    vec2 o = vec2(0);
+    u *= ei(.40);// modify those floats in order to change the shape   
+    o += vec2(cos(.1*u.y), sin(.1*u.x));  
+    u *= ei(.40); // modify those floats in order to change the shape 
+    o += vec2(cos(.05*u.y), sin(.05*u.x));  
+    u *= ei(.40); // modify those floats in order to change the shape  
+    o += vec2(cos(.025*u.y), sin(.025*u.x));  
+    o.y += .2;
+    return .40*o;// modify those floats in order to change the shape
+}
+
+
+// Main {
+//    vec2 U = jit_in.uv * viewPort.xy;
+//    Q = vec4(0);
+//    vec4 h = hash(vec4(U,iFrame,iTime));
+//    float a = 2.*3.14159265*h.x;
+//    vec2 v = 2.*vec2(cos(a),sin(a));
+//    vec2 u = U;
+//    for (float i = 0.; i < 200.; i++) {
+//        u += v;
+//        v += F(u);
+//        Q += step(length(u-.5*R),5.);
+//        Q.x += 2.*step(length(u-.35*R),5.);
+//        Q += vec4(1,2,3,4)*step(length(u-.7*R),5.);
+//        Q += vec4(4,3,2,1)*step(length(u-vec2(.3,.7)*R),5.);
+//        Q += vec4(3,1,2,1)*step(length(u-vec2(.7,.3)*R),5.);  
+//    }  
+//    Q += A(U);   
+// }
+
+Main {
+   vec2 U = jit_in.uv * viewPort.xy;
+   Q = vec4(0);
+   vec4 h = hash(vec4(U,iFrame,iTime));
+   float a = 2.*3.14159265*h.x;
+   vec2 v = 2.*vec2(cos(a),sin(a));
+   vec2 u = U;
+   for (float i = 0.; i < 1000.; i++) {
+       u += v;
+       v += F(u);
+       //modifyng the last value increases brightness in the step(length(u-.1*R),50.);
+       //modify intermediate values in step(length(u-vec2(.7,.3)*R),5.) changes color
+       Q += step(length(u- colMod01*R),colMod02);
+       Q.x += 2.*step(length(u-colMod03*R),colMod04);//last value increase red color weight 
+       Q += vec4(1,2,3,4)*step(length(u-colMod05*R),colMod06);
+       Q += vec4(4,3,2,1)*step(length(u-vec2(colMod07,colMod08)*R),colMod09);//last value increases brown brighteness 
+       Q += vec4(3,1,2,1)*step(length(u-vec2(colMod10,colMod11)*R),colMod12);//last value increases red brightness overall
+   }  
+   Q += A(U);
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

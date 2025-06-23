@@ -1,0 +1,158 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 Q;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+#define Main void main()
+#define R viewPort.xy
+#define A(direction) texture(iChannel0, normalize(direction))
+#define ei(a) mat2(cos(a),sin(a),-sin(a),cos(a))
+// circular  https://iquilezles.org/articles/smin/
+float smin( float a, float b, float k )
+{
+    k *= 1.0/(1.0-sqrt(0.5));
+    float h = max( k-abs(a-b), 0.0 )/k;
+    return min(a,b) - k*0.5*(1.0+h-sqrt(1.0-h*(h-2.0)));
+}
+vec4 hash(vec4 p4)
+{
+    p4 = fract(p4  * vec4(.1031, .1030, .0973, .1099));
+    p4 += dot(p4, p4.wzxy+33.33);
+    return fract((p4.xxyz+p4.yzzw)*p4.zywx);
+}
+
+float triPrism( vec3 p, vec2 h )
+{
+  vec3 q = abs(p);
+  return max(q.z-.5*h.y,max(q.x*0.866025+p.y*0.5,-p.y)-h.x*0.5);
+}
+
+
+float map (vec3 p) {
+    float d = triPrism(p-vec3(0,0,-.25),vec2(.5,.5));
+    return min(d,-p.z);
+
+}
+vec3 normal (vec3 p) {
+    vec2 e = vec2(1e-3,0);
+    float m = map(p);
+    return normalize(vec3(
+        map(p+e.xyy)-m,
+        map(p+e.yxy)-m,
+        map(p+e.yyx)-m
+    ));
+
+}
+Main {
+    
+    vec2 U = jit_in.uv * viewPort.xy;
+    // Convert U (vec2) to a vec3 for cube map sampling
+    vec3 cubeDir = normalize(vec3(U, 1.0)); 
+    Q = A(cubeDir); // Use the cube map sampling for Q
+    // Q = A(U);
+    vec4 h = hash(vec4(iFrame,1,1,1));
+    float w = h.w;
+    U = 2.*(U+h.xy-.5*R)/R.y;
+    vec3 p = vec3(0,0,-2.3);
+    vec3 d = normalize(vec3(U,3.));
+    d.y = -d.y;
+    p.yz *= ei(-.8);
+    d.yz *= ei(-.8);
+    p += h.z*d*map(p);
+    for (float i = 0.; i < 200.; i++) {
+        float m = map(p);
+        p += d*max(abs(m),1e-4);
+        if (p.z >0.) {
+            //d = normalize(reflect(d,normal(p))*.5+.2*normalize(hash(vec4(R*U,iFrame,i)).xyz*2.-1.));
+            d = normalize(hash(vec4(R*U,iFrame,i)).xyz*2.-1.);
+            d.z = -abs(d.z);
+            p += d*.001;
+        } 
+        else 
+        if (abs(m) < 1e-3) {
+            float z = (hash(vec4(R*U,iFrame,i)).z*2.-1.);
+            vec3 n = normal(p);
+            d = z>0.?reflect(d,n):normalize(d-(.2+.1*w)*n);//refract(d,n,1.);
+            p += .001*d;
+        }
+        
+        if (p.z < -3.) {
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            p += d*(p.z+5.);
+            Q += max(sin(-2.+6.1*w+vec4(1,2,3,4)),0.)*100.*
+                float(length(p.xy-vec2(2,1))<1.);
+            Q += .5*vec4(3,1,2,1)*max(sin(-2.+3.1*w+vec4(1,2,3,4)),0.)*100.*
+                float(length(p.xy-vec2(-7,-3))<1.);
+            Q += vec4(1,2,3,1)*max(sin(-2.+3.1*w+vec4(1,2,3,4)),0.)*100.*
+                float(length(p.xy-vec2(7,3))<.5);
+            break;
+        }
+    }
+    
+
+}
+
+]]>
+</program>
+</language>
+</jittershader>

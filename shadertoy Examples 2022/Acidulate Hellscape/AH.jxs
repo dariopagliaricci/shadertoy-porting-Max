@@ -1,0 +1,176 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+
+	<param name="ichannel0" type="int" default="0" />
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+
+		<bind param="iChannel0" program="fp" />
+		
+		
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 uv;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform int iFrame;
+			uniform sampler2D iChannel0;
+			
+
+			// Acidulate Hellscape
+			// who said hell didn't taste sweet and sour?
+
+			#define R iResolution.xy
+			#define N(a,b,c) normalize(vec3(a,b,c))
+
+			float noise;
+
+			vec3 lookAt (vec3 from, vec3 at, vec2 uv, float fov)
+			{
+			  vec3 z = normalize(at-from);
+			  vec3 x = normalize(cross(z, vec3(0,1,0)));
+			  vec3 y = normalize(cross(x, z));
+			  return normalize(z * fov + uv.x * x + uv.y * y);
+			}
+
+			// sinful math
+			float gyroid (vec3 seed)
+			{
+			    return dot(sin(seed),cos(seed.yzx));
+			}
+
+			// spicy noise
+			float fbm (vec3 seed)
+			{
+			    float result = 0., a = .5;
+			    for (int i = 0; i < 8; ++i, a/=2.)
+			    {
+			        seed.y += result*.2;
+			        result += abs(gyroid(seed/a))*a;
+			    }
+			    return result;
+			}
+
+			// signed distance function
+			float map(vec3 p)
+			{
+			    float dist = 100.;
+			    
+			    // travel
+			    p.z -= iTime*.2;
+			    
+			    // displace
+			    noise = fbm(p*.4);
+			    noise = sin(noise*6.+p.z*.2-iTime*.5);
+			    dist = p.y - noise*.5;
+			    
+			    return dist * .5;
+			}
+
+			void main()
+			{
+			    vec2 fragCoord = jit_in.uv * iResolution.xy; 
+
+			    vec2 uv = (fragCoord-iResolution.xy/2.)/iResolution.y;
+			    vec3 color = vec3(0);
+			    
+			    // layers
+			    const float frames = 3.;
+			    for (float f = 0.; f < frames; ++f)
+			    {
+			        // blue noise scroll by iq https://www.shadertoy.com/view/tlySzR
+			        ivec2 p = ivec2(fragCoord);
+			        p = (p+(iFrame*int(frames)+int(f))*ivec2(113,127)) & 1023;
+			        vec3 blu = texelFetch(iChannel0,p,0).xyz;
+
+			        // coordinates
+			        vec3 pos = vec3(0,4,3);
+			        vec3 at = vec3(0,0,0);
+			        vec3 ray = lookAt(pos, at, uv, 1.);
+
+			        // raymarch
+			        const float count = 20.;
+			        float maxDist = 10.;
+			        float steps = 0.;
+			        float total = 0.;
+			        for (steps = count; steps > 0.; --steps) {
+			            float dist = map(pos);
+			            if (dist < 2.*total/iResolution.y || total > maxDist) break;
+			            dist *= 0.9+0.1*blu.z;
+			            pos += ray * dist;
+			            total += dist;
+			        }
+			        
+			        // shading
+			        float shade = steps/count;
+			        if (shade > .1 && total < maxDist) {
+
+			            // NuSan https://www.shadertoy.com/view/3sBGzV
+			            vec2 noff = vec2(.01,0);
+			            vec3 normal = normalize(map(pos)-vec3(map(pos-noff.xyy), map(pos-noff.yxy), map(pos-noff.yyx)));
+
+			            // Inigo Quilez color palette https://iquilezles.org/www/articles/palettes/palettes.htm
+			            vec3 tint = .6+.4*cos(vec3(1,2,3)*5. + pos.z + pos.y*2.);
+
+			            // lighting
+			            if (noise > 0.5) {
+			                tint *= pow(dot(normal, N(0,-1,2))*.5+.5, 2.);
+			                tint += .3*dot(normal, N(1,1,-2))*.5+.5;
+			            } else {
+			                tint *= dot(normal, N(0,-1,1))*.5+.5;
+			                tint += .8*pow(dot(normal, N(0,1,-2))*.5+.5, 2.);
+			            }
+			            
+			            tint *= smoothstep(5.,0.,pos.z);
+			            tint *= pow(shade,3.)*3.;
+			            tint *= .5+.5*blu.x;
+			            color += tint / frames;
+			        }
+			    }
+			    
+			    fragColor = vec4(color, 1);
+			}
+		]]>
+		</program>
+	</language>
+</jittershader>

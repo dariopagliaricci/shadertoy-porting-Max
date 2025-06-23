@@ -1,0 +1,282 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iTimeDelta" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	// <param name="iChannel0" type="int" default="0" />
+
+	<param name="FOVp" type="float" default="0.4" />
+	<param name="focal_length_p" type="float" default="100.0" />
+	<param name="apertureP" type="float" default="1.0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iTimeDelta" program="fp" />
+		<bind param="iFrame" program="fp" />
+		// <bind param="iChannel0" program="fp" />
+		<bind param="FOVp" program="fp" />
+		<bind param="focal_length_p" program="fp" />
+		<bind param="apertureP" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+				
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform float iTimeDelta;
+uniform int iFrame;
+// uniform samplerCube iChannel0;
+uniform float FOVp, focal_length_p, apertureP;
+
+//initializing global variables
+vec3 rp = vec3(0., 0., 0.);
+vec3 rd = vec3(0., 0., 1.);
+vec3 rgb = vec3(1., 1., 1.);
+vec2 uv = vec2(0.);
+float i = 0.;
+float a = 0.;
+float seed = 0.;
+
+//pseudo-random number generator 1
+float rand(vec2 co){
+    seed += fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+    return fract(sin(dot(co.xy + seed ,vec2(12.9898,78.233))) * 43758.5453);
+}
+
+//pseudo-random number generator 2
+float hash(vec2 p) {
+    vec3 p3  = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    seed += fract((p3.x + p3.y) * p3.z);
+    return fract((p3.x + p3.y) * p3.z + seed);
+}
+
+//generates uniform random position on a sphere
+vec3 randpos(vec2 uv) {
+    float u = hash(vec2(uv + float(iFrame) + a));
+    float v = hash(vec2(uv + u - a));
+
+    float theta = 2.0 * 3.14159265 * u;
+    float phi = acos(2.0 * v - 1.0);
+
+    float x = sin(phi) * cos(theta);
+    float y = sin(phi) * sin(theta);
+    float z = cos(phi);
+
+    return normalize(vec3(x, y, z));
+}
+
+
+//calculates distance the ray must travel until it hits the sphere's edge
+float spheredist(vec3 pos, float r){
+    vec3 diff = rp - pos;
+    float b = dot(diff, rd);
+    float c = dot(diff, diff) - r * r;
+    float discr = b * b - c;
+
+    float t = -1.0;  
+
+    if (discr >= 0.0) {
+        float sqrtDiscr = sqrt(discr);
+        float t0 = -b - sqrtDiscr;
+        float t1 = -b + sqrtDiscr;
+
+        if (t0 >= 0.0) {
+            t = t0;
+        } else if (t1 >= 0.0) {
+            t = -1.;
+        }
+    }
+
+    if(t>=0.){
+        return t;
+    }
+    else{
+        return 999999.;
+    }
+}
+
+
+//main function for calculating color of ray after reflecting, or scattering
+void rendersphere(vec3 pos, float r, vec3 colour, float closedist, float blurryp, float block, float gloss, float scatterblur){
+    //calculates distance to the sphere defined in the parameters given
+    float t = spheredist(pos, r);
+    
+    //checks to make sure the ray intersects the sphere and the sphere is the closest to the camera
+    if (t >= 0.0 && t == closedist) {
+        closedist = -5.;
+        //initializes variables. colordp is a variable to change color influence based on the tilt of the surface of the sphere
+        float colordp = 1.; 
+        rd = normalize(rd);
+        rp += rd * t;
+        
+        //if the ray gets scattered
+        if (hash(uv + a + float(iFrame)) < blurryp){
+            rd = randpos(vec2(hash(uv + a + float(iFrame))));
+            if(dot(rd, normalize(rp-pos)) < 0.){rd *= -1.;}
+            colordp *= dot(normalize(rp - pos), rd);
+        
+        //if the ray gets reflected
+        }else{
+            rd = reflect(rd, normalize(rp - pos));
+            //if the ray hits a "polished" layer and doesn't interact with the color of the sphere
+            if(hash(vec2(rand(uv)) + a / rand(vec2(iTime))) <= gloss){
+            rgb /= colour;
+            }
+            
+            //calculates noise of the ray based on the blurryness of the sphere
+            vec3 temprd = randpos(vec2(rand(length(uv) + uv + hash(vec2(iFrame)))));
+            if(dot(temprd, normalize(rp-pos)) < 0.){temprd *= -1.;}
+            rd += temprd * scatterblur * rand(a - uv + rand(vec2(iFrame)));
+            rd = normalize(rd);
+        }
+        
+        //gives the sphere a grid texture 
+        float tex = 1.;
+        if(block == 1.){tex = round(mod(dot(round(rp/3.), vec3(1.,1.,1.)), 2.))/2. + 0.5;}
+            
+        
+        
+        //final color calculation
+        if(length(colour) < 5.){
+            rgb *= colour * colordp * tex;
+        }else{
+            rgb *= colour;
+            i = 999999.;
+            
+        }
+    }
+}
+
+
+
+
+
+//main image function
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    //initializes variables
+    uv = fragCoord/viewPort.xy;
+    float FOV = FOVp;
+    float focal_length = focal_length_p;
+    float aperture = apertureP;
+	uv -= 0.5;
+    uv.x *= viewPort.x/viewPort.y;
+    uv *= FOV;
+    vec3 average = vec3(0.);
+    
+    //begins the loop of firing rays. The upper limit of 'a' determines how many rays will be fired.
+    for( a = 1.; a <= 10.; a++){
+        
+        
+        rp = vec3(0., 0., 0.);
+        rd = vec3(uv.x + (hash(uv + a + float(iFrame)) - 0.5)/2000., uv.y + (hash(uv + a + iTimeDelta) - 0.5)/2000., 1.);
+        rd = normalize(rd);
+        
+        float randrad = sqrt(hash(uv + a + float(iFrame)))* aperture;
+        float randangle = hash(uv + a + hash(vec2(float(iFrame)))) * 2. * 3.14159265358979 ;
+
+        rp += vec3(cos(randangle) * randrad, sin(randangle) * randrad, 0.);
+        rd -= vec3(cos(randangle) * randrad, sin(randangle) * randrad, 0.)/focal_length;
+        
+        rd = normalize(rd);
+
+        rgb = vec3(.2, .2, .2);
+        float closedist = 99999.;
+        for(i = 0.; i < 5.; i++){
+            float closedist = 99999.;
+            
+            
+            closedist = min(closedist, spheredist(vec3(-150, 300., 100), 50.));
+            closedist = min(closedist, spheredist(vec3(0, -999999. - 6., 0), 999999.));
+            closedist = min(closedist, spheredist(vec3(0, 2., 100), 8.));
+            closedist = min(closedist, spheredist(vec3(23, 9., 80), 15.));
+            closedist = min(closedist, spheredist(vec3(-20, 4., 60), 10.));
+            closedist = min(closedist, spheredist(vec3(9, -3., 66), 3.));
+            closedist = min(closedist, spheredist(vec3(-9, -4., 45.), 2.));
+            closedist = min(closedist, spheredist(vec3(-9, -2., 120.), 4.));
+            closedist = min(closedist, spheredist(vec3(20, 4., 30.), 10.));
+
+
+
+            rendersphere(vec3(-150, 300., 100), 50., vec3(255.,255.,255.)*2., closedist, .9, 0., .2, 0.01);
+            rendersphere(vec3(0, -999999. - 6., 0), 999999., vec3(1., 1., 1.), closedist, .8, 0., .2, 0.01);
+            rendersphere(vec3(0, 2., 100), 8., vec3(255,135,197)/255., closedist, .8, 0., 1., 0.08);
+            rendersphere(vec3(23, 9., 80), 15., vec3(243,149,149)/255., closedist, .9, 0., .2, 0.01);
+            rendersphere(vec3(-20, 4., 60), 10., vec3(219,237,247)/255., closedist, .9, 0., .8, 0.1);
+            rendersphere(vec3(9, -3., 66), 3., vec3(224,213,230)/255., closedist, .9, 0., .8, 0.1);
+            rendersphere(vec3(-9, -4., 45.), 2., vec3(254,200,154)/255., closedist, .9, 0., .8, 0.8);
+            rendersphere(vec3(-9, -2., 120.), 4., vec3(201,228,223)/255., closedist, .9, 0., .8, 0.01);
+            rendersphere(vec3(20, 4., 30.), 10., vec3(249,238,133)/255., closedist, .9, 0., .8, 0.2);
+            
+            
+            
+            if (closedist == 99999.){
+                i = 99999.;
+                rgb *= vec3(4., 4.5, 5.);
+            }
+        }
+        if(a == 1.){
+            average = rgb;
+        }else{
+            average *= (a-1.)/a;
+            average += rgb/a;
+        }
+    }
+    outColor = vec4(vec3(average), 1.);
+    
+    // if(iFrame == 0){
+    //     outColor = vec4(vec3(average), 1.);
+    // }else{
+    //     vec3 dir = normalize(vec3(uv, 1.0));
+    //     // outColor = texture(iChannel0, fragCoord/viewPort.xy);
+    //     outColor = texture(iChannel0, dir);
+    //     outColor = mix(outColor, vec4(vec3(average), 1.), 1./max((float(iFrame)-60.), 1.));
+    // }
+}
+]]>
+</program>
+</language>
+</jittershader>

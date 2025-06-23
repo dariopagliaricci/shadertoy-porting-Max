@@ -1,0 +1,177 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+    <param name="iTime" type="float" default="0.0" />
+    <param name="borderCol" type="float" default="0.0" />
+    <param name="iMouse" type="vec3" default="0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+        <bind param="iMouse" program="fp" />
+        <bind param="borderCol" program="fp" />
+
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform float borderCol;
+
+//Inspired by the work of @okazz
+//https://twitter.com/okazz_/status/1436332410690441219
+
+//I didn't look at their code but the result is similar enough that I wonder if the
+//algorithm is the same. 
+
+//I'm pretty sure there's also a famous painting that looks like this but I can't remember it
+
+#define pi 3.1415926535
+float h21 (vec2 a) {
+    return fract(sin(dot(a.xy,vec2(12.9898,78.233)))*43758.5453123);
+}
+float h11 (float a) {
+    return fract(sin((a)*12.9898)*43758.5453123);
+}
+//iq palette
+vec3 pal( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d ){
+    return a + b*cos(2.*pi*(c*t+d));
+}
+float box(vec2 p, vec2 b){
+    vec2 d = abs(p)-b;
+    return max(d.x,d.y);
+}
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 R = viewPort.xy;
+    vec2 uv = (fragCoord-0.5*R.xy)/R.y;
+    vec3 col = vec3(0);
+    float t = mod(iTime*1.2,6000.);
+    float px = 1./viewPort.y;
+    
+    //You can remove the R.x/R.y to get a square
+    vec2 xRange = vec2(-0.5,0.5)*R.x/R.y;
+    vec2 yRange = vec2(-0.5,0.5);
+    float id = 0.;
+    float seed = floor(t/6.);
+    float a;
+    
+    
+    //PLAY WITH THESE VARIABLES :D
+    float minSize = 0.015;
+    //float breakSize = 0.04;
+    float iters = 10.;
+    float borderSize = -0.002;
+    float minIters = 1.;
+    
+    //minSize = min(minSize,breakSize);
+    for(float i = 0.;i<iters;i++){
+        float xLength = xRange.y-xRange.x;
+        float yLength = yRange.y-yRange.x;
+        float dividex = h21(vec2(i+id,seed))*(xLength)+xRange.x;
+        float dividey = h21(vec2(i+id,seed))*(yLength)+yRange.x;
+        
+        dividex= clamp(dividex,xRange.x+minSize,xRange.y-minSize);
+        dividey= clamp(dividey,yRange.x+minSize,yRange.y-minSize);
+        
+        float mn = min(length(xRange.x-dividex),length(xRange.y-dividex));
+        mn = min(mn,min(length(yRange.x-dividey),length(yRange.y-dividey)));
+        if(mn<minSize&&i-1.>minIters) break;
+        
+        ////////////////////////////////
+        ////////////////////////////////
+        vec2 diff = vec2(0);
+        if(uv.x<dividex){
+            xRange = vec2(xRange.x,dividex);
+            diff.x+=dividex;
+        }
+        else{
+            xRange = vec2(dividex,xRange.y);
+            diff.x-=dividey;
+        }
+        if(uv.y<dividey){
+            yRange = vec2(yRange.x,dividey);
+            diff.y-=dividex;
+        }
+        else{
+            yRange = vec2(dividey,yRange.y);
+            diff.y+=dividey;
+        }
+
+        id = length(diff+10.0);
+        
+        xLength = xRange.y-xRange.x;
+        yLength = yRange.y-yRange.x;
+        //xLength*=1.0-abs(pow(abs(cos(t*pi/6.)),5.0));
+        //yLength*=1.0-abs(pow(abs(cos(t*pi/6.)),5.0));
+        vec2 center = vec2((xRange.x+xRange.y)/2.,(yRange.x+yRange.y)/2.);
+        vec2 m = (.5 + .5 * vec2(cos(iTime), sin(iTime*1.7))) * R.xy;
+        if (iMouse.z > 0.) m = iMouse.xy;
+        float scale = clamp(length(center - (m-0.5*R.xy)/R.y) / 0.3, 0., 1.);
+        xLength *= scale;
+        yLength *= scale;
+        a = box(uv-center,vec2(xLength,yLength)*0.5);
+        //if(h11(id)<0.2)a=0.;
+    }
+    id = h11(id)*1000.0;
+    vec3 e = vec3(0.5); // Base color vector
+    vec3 al = pal(id * 0.1, e * 0.5, e * 0.1, e * 2.5, vec3(0.0, 0.33, 0.66)); // Adjusted color palette
+    col = clamp(al, 0., 1.); // Ensure color values are within valid range
+    col = vec3(0.95); // Base color
+    col -= borderCol * smoothstep(-px, px, a + borderSize); // Apply border effect
+
+    // vec3 al = pal(id*0.1,e*1.2,e,e*2.0,vec3(0,0.33,0.66));
+    // col = clamp(al,0.,1.);
+    // col = vec3(.95);
+    // col -= .8 * smoothstep(-px,px,a+borderSize);
+   // col = vec3(-a*10.0);
+    outColor = vec4(col,1.0);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

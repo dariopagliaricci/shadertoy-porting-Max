@@ -1,0 +1,387 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+  <param name="iFrame" type="int" default="0" />
+  <param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+  <param name="iChannel1" type="int" default="1" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+    <bind param="iFrame" program="fp" />
+    <bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+    <bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;	
+uniform sampler2D iChannel1;  
+
+float ring(vec2 p, vec2 s){
+return length(normalize(p)*s.x - p)-s.y;
+}
+
+float box(vec2 p, vec2 s){
+vec2 a = abs(p)-s;
+return max(a.x,a.y);
+}
+
+vec3 pal(float es, vec3 a){
+return 0.5 + 0.5*cos(2.0*3.14159*es + a);
+}
+const float pi = 3.14159;
+vec2 rot(vec2 a, float c){
+float g = c;
+float l = length(a);
+a = normalize(a);
+float ang = atan(a.y,a.x)+g; 
+return vec2(l*cos(ang),l*sin(ang));
+}
+
+//NOT MY CODE
+uint wang_hash(inout uint seed)
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+ 
+float rndf(inout uint state)
+{
+    return float(wang_hash(state)) / 4294967296.0;
+}
+/////////////
+
+float escape = 0.;
+float jb(vec3 p){
+    float s=3., e;
+    s*=e=3./min(dot(p,p),50.);
+    p=abs(p)*e;
+    escape = 0.;
+    for(int i=0;i++<17;){
+        p=vec3(2,4,2)-abs(p-vec3(2,4,2)),
+            s*=e=8./min(dot(p,p),10.),
+            p=abs(p)*e;
+           escape += exp(-0.2*dot(p,p));
+            }
+    return min(length(p.xz)-.1,p.y)/s;
+}
+
+float jb3(vec3 p){
+    float s=3., e;
+    s*=e=3./min(dot(p,p),50.);
+    p=abs(p)*e;
+    escape = 0.;
+    for(int i=0;i++<17;){
+        p=vec3(2,4,2)-abs(p-vec3(2,4,2)),
+            s*=e=8./min(dot(p,p),10.),
+            p=abs(p)*e;
+            escape += exp(-0.2*dot(p,p));
+            }
+    return min(length(p.xz)-.1,p.y)/s;
+}
+
+  float DEmine(vec3 p0){
+vec4 p = vec4(p0, 1.);
+escape = 0.;
+for(int i = 0; i < 7; i++){
+p*=4.79;
+p.xyz = mod(p.xyz-1.5, 3.)-1.5;
+float m = length(p.xyz);
+
+p/=dot(p.xyz,p.xyz)+mod(m, 1.);
+escape += exp(-0.2*dot(p.xyz,p.xyz));
+}
+
+return length(p.xyz)/p.w;
+}
+void sphere_fold(inout vec3 z, inout float dz) {
+  float fixed_radius2 = 1.9;
+  float min_radius2 = .1;
+  float r2 = dot(z, z);
+  if(r2 < min_radius2) {
+    float temp = (fixed_radius2 / min_radius2);
+    z *= temp; dz *= temp;
+  }else if(r2 < fixed_radius2) {
+    float temp = (fixed_radius2 / r2);
+    z *= temp; dz *= temp;
+  }
+}
+
+float de22( vec3 p ){
+    vec3 CSize = vec3(1., 1.7, 1.);
+    p = p.xzy;
+    float scale = 1.1;
+    for( int i=0; i < 8;i++ ){
+      p = 2.0*clamp(p, -CSize, CSize) - p;
+      float r2 = dot(p,p+sin(p.z*.3));
+      float k = max((2.)/(r2), .5);
+      p *= k; scale *= k;
+    }
+    float l = length(p.xy);
+    float rxy = l - 1.0;
+    float n = l * p.z;
+    rxy = max(rxy, (n) / 8.);
+    return (rxy) / abs(scale);
+  }
+/////////////////////////////////////
+float DEeerr(vec3 p0){
+//p0 = mod(p0, 2.)-1.;
+    vec4 p = vec4(p0, 1.);
+    escape = 0.;
+        //p.xyz=1.0-abs(abs(p.xyz+sin(p.xyz)*1.)-1.);
+
+        if(p.x < p.z)p.xz = p.zx;
+        if(p.z > p.y)p.zy = p.yz;
+        if(p.y > p.x)p.yx = p.xy;
+
+    for(int i = 0; i < 12; i++){
+        //if(p.x > p.z)p.xz = p.zx;
+       //if(p.z > p.y)p.zy = p.yz;
+       if(p.y > p.x)p.yx = p.xy;
+               // p.xyz = abs(p.xyz);
+
+        //box_fold(p.xyz);
+        sphere_fold(p.xyz,p.w);
+        //p.xyz = abs(p.xyz);
+        uint seed = uint(p.x+p.y+p.z);
+        p*=(1.9/clamp(dot(p.xyz,p.xyz),0.,1.0));
+        p.xyz=abs(p.xyz)-vec3(3.5,.5,3.3);
+       //p*=1.2;
+p.yxz -= sin(float(i)*1.)*0.9;
+        escape += exp(-0.2*dot(p.xyz,p.xyz));
+        //vec3 norm = normalize(p.xyz);
+        //float theta = acos(norm.z/length(norm.xyz));
+        //float phi = atan(norm.y/norm.x);
+        //escape = min(max(theta,phi),escape);
+    }
+    float m = 1.5;
+   p.xyz-=clamp(p.xyz,-m,m);
+return (length(p.xyz)/p.w)*0.5;
+}
+float newde(vec3 p0){
+vec4 p = vec4(p0, 1.);
+escape = 0.;
+p.xz = (p.x > p.z)?p.zx:p.xz;
+//p.yz = (p.y > p.z)?p.zy:p.yz;
+p.xy = (p.x > p.y)?p.yx:p.xy;
+
+for(int i = 0; i < 12; i++){
+//p = abs(p);
+//p.xz = (p.x > p.z)?p.zx:p.xz;
+//p.yz = (p.y > p.z)?p.zy:p.yz;
+//p.xy = (p.x > p.y)?p.yx:p.xy;
+
+p.xyz = mod(p.xyz-1., 2.)-1.;
+p *= 1.1/clamp(dot(p.xyz,p.xyz),0.,1.2);
+//p.xyz -= vec3(2.,0.4,0.6);
+escape += exp(-0.2*dot(p.xyz,p.xyz));
+}
+p/=p.w;
+return abs(p.x)*0.25;
+}
+
+float fractal(vec3 p0){
+//p0 = mod(p0, 2.)-1.;
+    vec4 p = vec4(p0, 1.);
+    escape = 0.;
+                                p.xyz=abs(p.xyz);
+                                uint seed = uint(p.x+p.y+p.z);
+        if(p.x < p.z)p.xz = p.zx;
+        if(p.z > p.y)p.zy = p.yz;
+        if(p.y > p.x)p.yx = p.xy;
+    for(int i = 0; i < 12; i++){
+        if(p.x < p.z)p.xz = p.zx;
+        if(p.z < p.y)p.zy = p.yz;
+        if(p.y < p.x)p.yx = p.xy;
+        
+        p.xyz = abs(p.xyz);
+
+        p*=((1.4+rndf(seed)*0.1)/clamp(dot(p.xyz,p.xyz),0.5,1.));
+        p.xyz-=vec3(0.2+rndf(seed)*0.2,0.6-rndf(seed)*0.3,2.3);
+        p*=1.2-rndf(seed)*0.4;
+
+        escape += exp(-0.2*dot(p.xyz,p.xyz));
+        //vec3 norm = normalize(p.xyz);
+        //float theta = acos(norm.z/length(norm.xyz));
+        //float phi = atan(norm.y/norm.x);
+        //escape = min(max(theta,phi),escape);
+    }
+    float m = 1.5;
+    p.xyz-=clamp(p.xyz,-m,m);
+return (length(p.xyz)/p.w)*0.5;
+}
+
+float fractal_de46(vec3 p){
+    float s = 2.;
+    float e = 0.;
+    escape = 0.;
+    for(int j=0;++j<7;){
+        p.xz=abs(p.xz)-2.3,
+        p.z>p.x?p=p.zyx:p,
+        p.z=1.5-abs(p.z-1.3+sin(p.z)*.2),
+        p.y>p.x?p=p.yxz:p,
+        p.x=3.-abs(p.x-5.+sin(p.x*3.)*.2),
+        p.y>p.x?p=p.yxz:p,
+        p.y=.9-abs(p.y-.4),
+        e=12.*clamp(.3/min(dot(p,p),1.),.0,1.)+
+        2.*clamp(.1/min(dot(p,p),1.),.0,1.),
+        p=e*p-vec3(7,1,1),
+        s*=e;
+        escape+=exp(-0.2*dot(p,p));
+        }
+    return length(p)/s;
+}
+
+float jb2(vec3 p){
+  p.xz=fract(p.xz)-.5;
+  escape = 0.;
+  float k=1.;
+  float s=0.;
+  for(int i=0;i++<12;){
+    s=2./clamp(dot(p,p),.1,1.),
+    p=abs(p)*s-vec3(.4,5,.5),
+    k*=s;
+    escape += exp(-0.2*dot(p,p));
+    }
+    
+
+  return length(p)/k-.001;
+}
+vec2 hash2( vec2 p )
+{
+  return textureLod( iChannel1, (p+0.5)/256.0, 0.0 ).xy;
+}
+vec2 voronoi(vec2 p){
+vec2 f = floor(p);
+vec2 res = vec2(8.);
+for(int i = 0; i < 9; i++){
+vec2 coords = f + vec2(mod(float(i),3.)-1., float(i/3)-1.);
+vec2 o = hash2( coords );
+o = 0.5 + 0.4*sin(6.2831*o );
+vec2 pos = (coords+o);
+float d = dot(pos-p,pos-p);
+if( d < res.x )
+{
+    res.y = res.x;
+    res.x = d;
+}
+else if( d < res.y )
+{
+    res.y = d;
+}
+}
+return res;
+}
+
+vec3 lens(vec2 p, vec2 mouse,inout uint k){
+vec3 col = vec3(exp(-20.*length(mouse-p)));
+col += exp(-20.*length(-mouse*rndf(k)*0.5-p));
+col += exp(-ring(-mouse*0.4-p, vec2(0.7, 0.01))*20.)
+*sin(texture(iChannel0, normalize(p*rndf(k))).x);
+col *= pal(exp(-length(-mouse*rndf(k)*0.9-p)), vec3(0.9,0.5,0.9));
+for(int i = 0;i < 5; i++){
+col += exp(-ring(mouse*2.*(0.1+float(i)/5.0)-p, vec2(0.1-float(i)/15.0, 0.001*float(i+1)))*20.);
+}
+col *= pal(length(mouse*rndf(k)-p), vec3(0.9,0.5,0.4))*0.4;//
+//col += exp(-length(mouse-p))*vec3(0.9,0.6,0.2)
+//*sin(texture(iChannel0, normalize(mouse-p)).x)*exp(-length(mouse-p)*5.)*2.;
+//col += exp(-length(mouse-p)*10.)*2.;
+//col *= pal(length(-mouse-p)*10., vec3(0.9,0.4,0.9));
+col += exp(-(abs(box(-mouse*rndf(k)-p, vec2(0.1)))+0.2)*20.);
+col += exp(-jb3((vec3(p*2.,iTime*0.4))/2.)*1000.);
+col *= pal(escape, vec3(0.9,0.4,0.2));
+
+col += exp(-voronoi(p).x*200.);
+col *= pal(escape, vec3(0.9,0.4,0.2));
+
+return col;
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/viewPort.xy;
+    ///NOT MY CODE///
+    uint r = uint(uint(fragCoord.x) * uint(1973) 
+    + uint(fragCoord.y) * uint(9277) 
+    + uint(iFrame) * uint(26699)) | uint(1);
+    
+    ///////////////
+    
+    
+uv = uv * 2.0 - 1.0;
+uv.x *= 1.3;
+uv.y /= 1.3;
+uv *= 3.5;
+    // Time varying pixel color
+    vec2 mouse = iMouse.xy / viewPort.xy;
+    mouse = mouse * 2.0 - 1.0;
+    vec3 col = vec3(0.);
+    
+    for(int i = 0; i < 15; i++){
+    uint k = uint(i+1);
+        float offset = rndf(k);
+        col += lens(rot(uv*(rndf(k)+0.04), offset*iTime), vec2(cos(offset*2.*3.14159+iTime), sin(offset*2.*3.14159-iTime)), k)*offset*0.4;
+    }
+
+    // Output to screen
+    outColor = vec4(col,1.0);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

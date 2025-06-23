@@ -1,0 +1,600 @@
+<jittershader name="PathTracing">
+    <description>Raytracing Shader</description>
+
+    <!-- Default parameters -->
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="pos" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+    <param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+
+    <param name="BVHBuffer" type="int" default="1" />
+    // <param name="texbuf2" type="int" default="3" />
+
+    <!-- Raytracing Settings -->
+    <param name="MaxBounceCount" type="int" default="5" />
+    <param name="NumRaysPerPixel" type="int" default="1" />
+    <param name="Frame" type="int" default="0" />
+
+    <!-- Camera Settings -->
+    <param name="DefocusStrength" type="float" default="0.0" />
+    <param name="DivergeStrength" type="float" default="0.0" />
+    <param name="ViewParams" type="vec3" default="1.0 1.0 1.0" />
+    <param name="CamLocalToWorldMatrix" type="mat4" default="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+
+    <!-- Sky Settings -->
+    <param name="UseSky" type="int" default="1" />
+    <param name="SunColour" type="vec3" default="1.0 1.0 1.0" />
+    <param name="SunFocus" type="float" default="1.0" />
+    <param name="SunIntensity" type="float" default="1.0" />
+
+    <!-- Debug Settings -->
+    <param name="visMode" type="int" default="0" />
+    <param name="debugVisScale" type="float" default="1.0" />
+
+    <language name="glsl" version="1.5">
+        <!-- Bind default parameters -->
+        <bind param="MVP" program="vp" />
+        <bind param="pos" program="vp" />
+        <bind param="uv" program="vp" />
+        <bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+
+        <!-- Bind raytracing settings -->
+        <bind param="MaxBounceCount" program="fp" />
+        <bind param="NumRaysPerPixel" program="fp" />
+        <bind param="Frame" program="fp" />
+
+        <!-- Bind camera settings -->
+        <bind param="DefocusStrength" program="fp" />
+        <bind param="DivergeStrength" program="fp" />
+        <bind param="ViewParams" program="fp" />
+        <bind param="CamLocalToWorldMatrix" program="fp" />
+
+        <!-- Bind sky settings -->
+        <bind param="UseSky" program="fp" />
+        <bind param="SunColour" program="fp" />
+        <bind param="SunFocus" program="fp" />
+        <bind param="SunIntensity" program="fp" />
+
+        <!-- Bind debug settings -->
+        <bind param="visMode" program="fp" />
+        <bind param="debugVisScale" program="fp" />
+
+        <bind param="BVHBuffer" program="fp" />
+        // <bind param="texbuf2" program="fp" />
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 pos;
+            in vec2 uv;
+
+            out jit_PerVertex {
+                vec2 uv;
+            } jit_out;
+            uniform mat4 MVP;
+            
+            void main(void) {
+                gl_Position = vec4(pos, 1.);
+                jit_out.uv = uv;
+            }
+        ]]>
+</program>
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+    vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 fragColor;
+
+// --- Settings and constants ---
+const float PI = 3.1415;
+
+// Raytracing Settings
+uniform int MaxBounceCount;
+uniform int NumRaysPerPixel;
+uniform int Frame;
+
+// Camera settings
+uniform float DefocusStrength;
+uniform float DivergeStrength;
+uniform vec3 ViewParams;
+uniform mat4 CamLocalToWorldMatrix;
+
+// Sky settings
+uniform vec3 _WorldSpaceLightPos0; // Light direction (for directional light)
+uniform int UseSky;
+uniform vec3 SunColour;
+uniform float SunFocus;
+uniform float SunIntensity;
+
+// Debug settings
+uniform int visMode;
+uniform float debugVisScale;
+
+uniform samplerBuffer BVHBuffer; // Buffer containing BVH data
+// uniform samplerBuffer texbuf2;
+
+// --- Structures ---
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+    vec3 invDir;
+};
+
+struct Triangle {
+    vec3 posA, posB, posC;
+    vec3 normA, normB, normC;
+};
+
+struct TriangleHitInfo {
+    bool didHit;
+    float dst;
+    vec3 hitPoint;
+    vec3 normal;
+    int triIndex;
+};
+
+struct RayTracingMaterial {
+    vec4 colour;
+    vec4 emissionColour;
+    vec4 specularColour;
+    float emissionStrength;
+    float smoothness;
+    float specularProbability;
+    int flag;
+};
+
+struct Model {
+    int nodeOffset;
+    int triOffset;
+    mat4 worldToLocalMatrix;
+    mat4 localToWorldMatrix;
+    RayTracingMaterial material;
+};
+
+// struct BVHNode {
+//     vec3 boundsMin;
+//     vec3 boundsMax;
+//     int startIndex;
+//     int triangleCount;
+// };
+
+struct ModelHitInfo {
+    bool didHit;
+    vec3 normal;
+    vec3 hitPoint;
+    float dst;
+    RayTracingMaterial material;
+};
+
+struct BVHNode {
+    vec3 boundsMin;
+    vec3 boundsMax;
+    int leftNode;
+    int firstTriIdx;
+    int triCount;
+};
+
+// // --- Buffers (and their sizes) ---	
+layout(std430, binding = 0) buffer ModelBuffer {
+    Model ModelInfo[];
+};
+
+// layout(std430, binding = 1) buffer TriangleBuffer {
+//     Triangle Triangles[];
+// };
+
+
+// layout(std430, binding = 2) buffer BVHNodeBuffer {
+//     BVHNode Nodes[];
+// };
+
+// Utility functions to fetch data from buffers
+Model getModel(int index) {
+    return texelFetch(ModelBuffer, index);
+}
+
+// Triangle getTriangle(int index) {
+//     return texelFetch(TriangleBuffer, index);
+// }
+
+// BVHNode getBVHNode(int index) {
+//     return texelFetch(BVHNodeBuffer, index);
+// }
+
+uniform int triangleCount;
+uniform int modelCount;
+
+// ---- RNG Functions ----
+
+// PCG (permuted congruential generator). Thanks to:
+// www.pcg-random.org and www.shadertoy.com/view/XlGcRh
+// uint NextRandom(inout uint state) {
+//     state = state * 747796405u + 2891336453u;
+//     uint result = ((state >> ((state >> 28u) + 4u)) ^ state;
+//     result = (result >> 22u) ^ result;
+//     return result;
+// }
+
+uint NextRandom(inout uint state) {
+    state = state * 747796405u + 2891336453u;
+    uint result = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    result = (result >> 22u) ^ result;
+    return result;
+}
+
+float RandomValue(inout uint state) {
+    return float(NextRandom(state)) / 4294967295.0; // 2^32 - 1
+}
+
+// Random value in normal distribution (with mean=0 and sd=1)
+float RandomValueNormalDistribution(inout uint state) {
+    // Thanks to https://stackoverflow.com/a/6178290
+    float theta = 2 * PI * RandomValue(state);
+    float rho = sqrt(-2 * log(RandomValue(state)));
+    return rho * cos(theta);
+}
+
+// Calculate a random direction
+vec3 RandomDirection(inout uint state) {
+    // Thanks to https://math.stackexchange.com/a/1585996
+    float x = RandomValueNormalDistribution(state);
+    float y = RandomValueNormalDistribution(state);
+    float z = RandomValueNormalDistribution(state);
+    return normalize(vec3(x, y, z));
+}
+
+vec2 RandomPointInCircle(inout uint rngState) {
+    float angle = RandomValue(rngState) * 2 * PI;
+    vec2 pointOnCircle = vec2(cos(angle), sin(angle));
+    return pointOnCircle * sqrt(RandomValue(rngState));
+}
+
+// Crude sky colour function for background light
+vec3 GetEnvironmentLight(vec3 dir) {
+    if (UseSky == 0) return vec3(0);
+    const vec3 GroundColour = vec3(0.35, 0.3, 0.35);
+    const vec3 SkyColourHorizon = vec3(1, 1, 1);
+    const vec3 SkyColourZenith = vec3(0.08, 0.37, 0.73);
+    
+    float skyGradientT = pow(smoothstep(0, 0.4, dir.y), 0.35);
+    float groundToSkyT = smoothstep(-0.01, 0, dir.y);
+    vec3 skyGradient = mix(SkyColourHorizon, SkyColourZenith, skyGradientT);
+    vec3 lightDir = normalize(_WorldSpaceLightPos0);
+    float sun = pow(max(0, dot(dir, lightDir)), SunFocus) * SunIntensity;
+    // float sun = pow(max(0, dot(dir, _WorldSpaceLightPos0.xyz)), SunFocus) * SunIntensity;
+    // Combine ground, sky, and sun
+    // vec3 composite = mix(GroundColour, skyGradient, groundToSkyT) + sun * SunColour * (groundToSkyT >= 1);
+    float sunContribution = step(1.0, groundToSkyT); // Returns 1.0 if groundToSkyT >= 1.0, else 0.0
+    // Combine ground, sky, and sun
+    vec3 composite = mix(GroundColour, skyGradient, groundToSkyT) + sun * SunColour * sunContribution;
+    return composite;
+}
+
+// --- Ray Intersection Functions ---
+
+// Calculate the intersection of a ray with a triangle using Möller–Trumbore algorithm
+// Thanks to https://stackoverflow.com/a/42752998
+TriangleHitInfo RayTriangle(Ray ray, Triangle tri) {
+    vec3 edgeAB = tri.posB - tri.posA;
+    vec3 edgeAC = tri.posC - tri.posA;
+    vec3 normalVector = cross(edgeAB, edgeAC);
+    vec3 ao = ray.origin - tri.posA;
+    vec3 dao = cross(ao, ray.dir);
+
+    float determinant = -dot(ray.dir, normalVector);
+    float invDet = 1 / determinant;
+
+    // Calculate dst to triangle & barycentric coordinates of intersection point
+    float dst = dot(ao, normalVector) * invDet;
+    float u = dot(edgeAC, dao) * invDet;
+    float v = -dot(edgeAB, dao) * invDet;
+    float w = 1 - u - v;
+
+    // Initialize hit info
+    TriangleHitInfo hitInfo;
+    hitInfo.didHit = determinant >= 1E-8 && dst >= 0 && u >= 0 && v >= 0 && w >= 0;
+    hitInfo.hitPoint = ray.origin + ray.dir * dst;
+    hitInfo.normal = normalize(tri.normA * w + tri.normB * u + tri.normC * v);
+    hitInfo.dst = dst;
+    return hitInfo;
+}
+
+// Thanks to https://tavianator.com/2011/ray_box.html
+float RayBoundingBoxDst(Ray ray, vec3 boxMin, vec3 boxMax) {
+    vec3 tMin = (boxMin - ray.origin) * ray.invDir;
+    vec3 tMax = (boxMax - ray.origin) * ray.invDir;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+
+    bool hit = tFar >= tNear && tFar > 0;
+    float dst = hit ? tNear > 0 ? tNear : 0 : 1.0 / 0.0;
+    return dst;
+}
+
+
+// TriangleHitInfo RayTriangleBVH(inout Ray ray, float rayLength, int nodeOffset, int triOffset, inout ivec2 stats) {
+//     TriangleHitInfo result;
+//     result.dst = rayLength;
+//     result.triIndex = -1;
+
+//     int stack[32];
+//     int stackIndex = 0;
+//     stack[stackIndex++] = nodeOffset + 0;
+
+//     while (stackIndex > 0) {
+//         BVHNode node = Nodes[stack[--stackIndex]];
+//         bool isLeaf = node.triangleCount > 0;
+
+//         if (isLeaf) {
+//             for (int i = 0; i < node.triangleCount; i++) {
+//                 Triangle tri = Triangles[triOffset + node.startIndex + i];
+//                 TriangleHitInfo triHitInfo = RayTriangle(ray, tri);
+//                 stats[0]++; // count triangle intersection tests
+
+//                 if (triHitInfo.didHit && triHitInfo.dst < result.dst) {
+//                     result = triHitInfo;
+//                     result.triIndex = node.startIndex + i;
+//                 }
+//             }
+//         } else {
+//             int childIndexA = nodeOffset + node.startIndex + 0;
+//             int childIndexB = nodeOffset + node.startIndex + 1;
+//             BVHNode childA = Nodes[childIndexA];
+//             BVHNode childB = Nodes[childIndexB];
+
+//             float dstA = RayBoundingBoxDst(ray, childA.boundsMin, childA.boundsMax);
+//             float dstB = RayBoundingBoxDst(ray, childB.boundsMin, childB.boundsMax);
+//             stats[1] += 2; // count bounding box intersection tests
+            
+//             // We want to look at closest child node first, so push it last
+//             bool isNearestA = dstA <= dstB;
+//             float dstNear = isNearestA ? dstA : dstB;
+//             float dstFar = isNearestA ? dstB : dstA;
+//             int childIndexNear = isNearestA ? childIndexA : childIndexB;
+//             int childIndexFar = isNearestA ? childIndexB : childIndexA;
+
+//             if (dstFar < result.dst) stack[stackIndex++] = childIndexFar;
+//             if (dstNear < result.dst) stack[stackIndex++] = childIndexNear;
+//         }
+//     }
+
+//     return result;
+// }
+
+BVHNode getBVHNode(int index) {
+    BVHNode node;
+    int baseIndex = index * 9; // Each node occupies 9 elements in the buffer
+
+    node.boundsMin = vec3(
+        texelFetch(BVHBuffer, baseIndex + 0).r,
+        texelFetch(BVHBuffer, baseIndex + 1).r,
+        texelFetch(BVHBuffer, baseIndex + 2).r
+    );
+    node.boundsMax = vec3(
+        texelFetch(BVHBuffer, baseIndex + 3).r,
+        texelFetch(BVHBuffer, baseIndex + 4).r,
+        texelFetch(BVHBuffer, baseIndex + 5).r
+    );
+    node.startIndex = int(texelFetch(BVHBuffer, baseIndex + 6).r);
+    node.triangleCount = int(texelFetch(BVHBuffer, baseIndex + 7).r);
+    return node;
+}
+
+TriangleHitInfo RayTriangleBVH(inout Ray ray, float rayLength, int nodeOffset, int triOffset, inout ivec2 stats) {
+    TriangleHitInfo result;
+    result.dst = rayLength;
+    result.triIndex = -1;
+
+    int stack[32];
+    int stackIndex = 0;
+    stack[stackIndex++] = nodeOffset + 0;
+
+    while (stackIndex > 0) {
+        BVHNode node = getBVHNode(stack[--stackIndex]); // Use getBVHNode instead of Nodes
+        bool isLeaf = node.triCount > 0;
+
+        if (isLeaf) {
+            for (int i = 0; i < node.triCount; i++) {
+                Triangle tri = getTriangle(triOffset + node.firstTriIdx + i);
+                TriangleHitInfo triHitInfo = RayTriangle(ray, tri);
+                stats[0]++; // count triangle intersection tests
+
+                if (triHitInfo.didHit && triHitInfo.dst < result.dst) {
+                    result = triHitInfo;
+                    result.triIndex = node.firstTriIdx + i;
+                }
+            }
+        } else {
+            int childIndexA = nodeOffset + node.leftNode;
+            int childIndexB = childIndexA + 1;
+            BVHNode childA = getBVHNode(childIndexA); // Use getBVHNode instead of Nodes
+            BVHNode childB = getBVHNode(childIndexB); // Use getBVHNode instead of Nodes
+
+            float dstA = RayBoundingBoxDst(ray, childA.boundsMin, childA.boundsMax);
+            float dstB = RayBoundingBoxDst(ray, childB.boundsMin, childB.boundsMax);
+            stats[1] += 2; // count bounding box intersection tests
+
+            // Traverse the closest child first
+            bool isNearestA = dstA <= dstB;
+            float dstNear = isNearestA ? dstA : dstB;
+            float dstFar = isNearestA ? dstB : dstA;
+            int childIndexNear = isNearestA ? childIndexA : childIndexB;
+            int childIndexFar = isNearestA ? childIndexB : childIndexA;
+
+            if (dstFar < result.dst) stack[stackIndex++] = childIndexFar;
+            if (dstNear < result.dst) stack[stackIndex++] = childIndexNear;
+        }
+    }
+
+    return result;
+}
+
+ModelHitInfo CalculateRayCollision(Ray worldRay, out ivec2 stats) {
+    ModelHitInfo result;
+    result.dst = 1.0 / 0.0;
+    Ray localRay;
+
+    for (int i = 0; i < modelCount; i++) {
+        Model model = ModelInfo[i];
+        // Transform ray into model's local coordinate space
+        localRay.origin = vec3(model.worldToLocalMatrix * vec4(worldRay.origin, 1));
+        localRay.dir = vec3(model.worldToLocalMatrix * vec4(worldRay.dir, 0));
+        localRay.invDir = 1 / localRay.dir;
+
+        // Traverse bvh to find closest triangle intersection with current model
+        TriangleHitInfo hit = RayTriangleBVH(localRay, result.dst, model.nodeOffset, model.triOffset, stats);
+
+        // Record closest hit
+        if (hit.dst < result.dst) {
+            result.didHit = true;
+            result.dst = hit.dst;
+            result.normal = normalize(vec3(model.localToWorldMatrix * vec4(hit.normal, 0)));
+            result.hitPoint = worldRay.origin + worldRay.dir * hit.dst;
+            result.material = model.material;
+        }
+    }
+
+    return result;
+}
+
+vec2 mod2(vec2 x, vec2 y) {
+    return x - y * floor(x / y);
+}
+
+vec3 Trace(vec3 rayOrigin, vec3 rayDir, inout uint rngState) {
+    vec3 incomingLight = vec3(0);
+    vec3 rayColour = vec3(1);
+    
+    ivec2 stats;
+    float dstSum = 0;
+
+    for (int bounceIndex = 0; bounceIndex <= MaxBounceCount; bounceIndex++) {
+        Ray ray;
+        ray.origin = rayOrigin;
+        ray.dir = rayDir;
+        ModelHitInfo hitInfo = CalculateRayCollision(ray, stats);
+
+        if (hitInfo.didHit) {
+            dstSum += hitInfo.dst;
+            RayTracingMaterial material = hitInfo.material;
+            if (material.flag == 1) // Checker pattern
+            {
+                vec2 c = mod2(floor(hitInfo.hitPoint.xz), vec2(2.0));
+                material.colour = c.x == c.y ? material.colour : material.emissionColour;
+            }
+
+            // Figure out new ray position and direction
+            bool isSpecularBounce = material.specularProbability >= RandomValue(rngState);
+
+            rayOrigin = hitInfo.hitPoint;
+            vec3 diffuseDir = normalize(hitInfo.normal + RandomDirection(rngState));
+            vec3 specularDir = reflect(rayDir, hitInfo.normal);
+            rayDir = normalize(mix(diffuseDir, specularDir, material.smoothness * float(isSpecularBounce)));
+
+            // Update light calculations
+            vec3 emittedLight = material.emissionColour.rgb * material.emissionStrength;
+            incomingLight += emittedLight * rayColour;
+            rayColour *= mix(material.colour.rgb, material.specularColour.rgb, float(isSpecularBounce));
+
+            // Random early exit if ray colour is nearly 0 (can't contribute much to final result)
+            float p = max(rayColour.r, max(rayColour.g, rayColour.b));
+            if (RandomValue(rngState) >= p) {
+                break;
+            }
+            rayColour *= 1.0f / p;
+        } else {
+            incomingLight += GetEnvironmentLight(rayDir) * rayColour;
+            break;
+        }
+    }
+
+    return incomingLight;
+}
+
+vec3 TraceDebugMode(vec3 rayOrigin, vec3 rayDir) {
+    ivec2 stats; // num triangle tests, num bounding box tests
+    Ray ray;
+    ray.origin = rayOrigin;
+    ray.dir = rayDir;
+    ModelHitInfo hitInfo = CalculateRayCollision(ray, stats);
+
+    // Triangle test count vis
+    if (visMode == 1) {
+        float triVis = float(stats[0]) / debugVisScale;
+        return triVis < 1 ? vec3(triVis) : vec3(1, 0, 0);
+    }
+    // Box test count vis
+    else if (visMode == 2) {
+        float boxVis = float(stats[1]) / debugVisScale;
+        return boxVis < 1 ? vec3(boxVis) : vec3(1, 0, 0);
+    }
+    // Distance
+    else if (visMode == 3) {
+        return vec3(length(rayOrigin - hitInfo.hitPoint) / debugVisScale);
+    }
+    // Normal
+    else if (visMode == 4) {
+        if (!hitInfo.didHit) return vec3(0);
+        return hitInfo.normal * 0.5 + 0.5;
+    }
+
+    return vec3(1, 0, 1); // Invalid test mode
+}
+
+// // Run for every pixel in the display
+// out vec4 fragColor;
+// in vec2 uv;
+
+void main() {
+    // Create seed for random number generator
+    uvec2 numPixels = uvec2(textureSize(screenTexture, 0));
+    uvec2 pixelCoord = uvec2(uv * vec2(numPixels));
+    uint pixelIndex = pixelCoord.y * numPixels.x + pixelCoord.x;
+    uint rngState = pixelIndex + uint(Frame) * 719393u;
+
+    // Calculate focus point
+    vec3 focusPointLocal = vec3(uv - 0.5, 1) * ViewParams;
+    vec3 focusPoint = vec3(CamLocalToWorldMatrix * vec4(focusPointLocal, 1));
+    vec3 camRight = vec3(CamLocalToWorldMatrix[0]);
+    vec3 camUp = vec3(CamLocalToWorldMatrix[1]);
+
+    // Debug Mode
+    #ifdef DEBUG_VIS
+        fragColor = vec4(TraceDebugMode(_WorldSpaceCameraPos, normalize(focusPoint - _WorldSpaceCameraPos)), 1);
+        return;
+    #endif
+    
+    // Trace multiple rays and average together
+    vec3 totalIncomingLight = vec3(0);
+
+    for (int rayIndex = 0; rayIndex < NumRaysPerPixel; rayIndex++) {
+        // -- Calculate ray origin and direction --
+        // Jitter the starting point of the ray. This allows for a depth of field effect.
+        vec2 defocusJitter = RandomPointInCircle(rngState) * DefocusStrength / float(numPixels.x);
+        vec3 rayOrigin = _WorldSpaceCameraPos + camRight * defocusJitter.x + camUp * defocusJitter.y;
+
+        // Jitter the focus point when calculating the ray direction to allow for blurring the image
+        // (at low strengths, this can be used for anti-aliasing)
+        vec2 jitter = RandomPointInCircle(rngState) * DivergeStrength / float(numPixels.x);
+        vec3 jitteredFocusPoint = focusPoint + camRight * jitter.x + camUp * jitter.y;
+        vec3 rayDir = normalize(jitteredFocusPoint - rayOrigin);
+
+        // Trace
+        totalIncomingLight += Trace(rayOrigin, rayDir, rngState);
+    }
+
+    vec3 pixelCol = totalIncomingLight / float(NumRaysPerPixel);
+    fragColor = vec4(pixelCol, 1);
+}
+]]>
+    </program>
+    </language>
+</jittershader>

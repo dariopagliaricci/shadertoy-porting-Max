@@ -1,0 +1,384 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+        
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+
+const int TRACE_ITER = 80;
+const float EPSILON = 0.01;
+const float FAR = 100.0;
+const float ROUGHNESS = 0.1;
+const float ROUGHNESS_SQ = ROUGHNESS * ROUGHNESS;
+const float HEX_SIZE = 0.04;
+const float LIGHT_AMP = 2.0;
+
+const float PI = acos(-1.0);
+const float TAU = 2.0 * PI;
+const float SQRT3 = sqrt(3.0);
+
+#define saturate(x) clamp(x, 0.0, 1.0)
+#define linearstep(a, b, t) saturate( ((t)-(a)) / ((b)-(a)) )
+
+// http://www.jcgt.org/published/0009/03/02/
+uvec3 hash3u(uvec3 v) {
+  v = v * 1664525u + 1013904223u;
+
+  v.x += v.y * v.z;
+  v.y += v.z * v.x;
+  v.z += v.x * v.y;
+
+  v ^= v >> 16u;
+
+  v.x += v.y * v.z;
+  v.y += v.z * v.x;
+  v.z += v.x * v.y;
+
+  return v;
+}
+
+vec3 hash3f(vec3 v) {
+  uvec3 r = floatBitsToUint(v);
+  return vec3(hash3u(r)) / float(-1u);
+}
+
+uvec3 seed;
+vec3 random3() {
+  seed = hash3u(seed);
+  return vec3(seed) / float(-1u);
+}
+
+vec3 smootherstep(float a, float b, vec3 t) {
+  t = linearstep(a, b, t);
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+mat2 rotate2D(float t) {
+  float c = cos(t);
+  float s = sin(t);
+  return mat2(c, s, -s, c);
+}
+
+vec3 uniformSphere(vec2 Xi) {
+  float phi = TAU * Xi.x;
+  float cosTheta = 2.0 * Xi.y - 1.0;
+  float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+  return vec3(
+    sinTheta * cos(phi),
+    sinTheta * sin(phi),
+    cosTheta
+  );
+}
+
+float perlin3DGrad(vec3 p, vec3 off) {
+  vec2 Xi = hash3f(p).xy;
+  return dot(uniformSphere(Xi), off);
+}
+
+float perlin3D(vec3 v) {
+  vec3 cellIndex = floor(v);
+  vec3 cellCoord = v - cellIndex;
+  vec3 cellCoordS = smootherstep(0.0, 1.0, cellCoord);
+
+  return mix(
+    mix(
+      mix(
+        perlin3DGrad(cellIndex + vec3(0.0, 0.0, 0.0), cellCoord - vec3(0.0, 0.0, 0.0)),
+        perlin3DGrad(cellIndex + vec3(1.0, 0.0, 0.0), cellCoord - vec3(1.0, 0.0, 0.0)),
+        cellCoordS.x
+      ),
+      mix(
+        perlin3DGrad(cellIndex + vec3(0.0, 1.0, 0.0), cellCoord - vec3(0.0, 1.0, 0.0)),
+        perlin3DGrad(cellIndex + vec3(1.0, 1.0, 0.0), cellCoord - vec3(1.0, 1.0, 0.0)),
+        cellCoordS.x
+      ),
+      cellCoordS.y
+    ),
+    mix(
+      mix(
+        perlin3DGrad(cellIndex + vec3(0.0, 0.0, 1.0), cellCoord - vec3(0.0, 0.0, 1.0)),
+        perlin3DGrad(cellIndex + vec3(1.0, 0.0, 1.0), cellCoord - vec3(1.0, 0.0, 1.0)),
+        cellCoordS.x
+      ),
+      mix(
+        perlin3DGrad(cellIndex + vec3(0.0, 1.0, 1.0), cellCoord - vec3(0.0, 1.0, 1.0)),
+        perlin3DGrad(cellIndex + vec3(1.0, 1.0, 1.0), cellCoord - vec3(1.0, 1.0, 1.0)),
+        cellCoordS.x
+      ),
+      cellCoordS.y
+    ),
+    cellCoordS.z
+  );
+}
+
+mat3 orthBas(vec3 z) {
+  z = normalize(z);
+  vec3 up = abs(z.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+  vec3 x = normalize(cross(up, z));
+  return mat3(x, cross(z, x), z);
+}
+
+vec2 findNearestHex(vec2 p) {
+  mat2 MAT_SKEW = mat2(1.0, 1.0 / SQRT3, 0.0, 2.0 / SQRT3);
+  mat2 INV_MAT_SKEW = mat2(1.0, -0.5, 0.0, SQRT3 / 2.0);
+
+  vec2 pt = (p * MAT_SKEW) / HEX_SIZE;
+  vec2 cell = floor(pt);
+  cell.y += mod(2.0 * cell.x - cell.y, 3.0) - 1.0;
+
+  vec2 coord = pt - cell;
+  float isTopHalf = step(coord.x, coord.y);
+  cell += vec2(1.0 - isTopHalf, isTopHalf);
+
+  return cell * INV_MAT_SKEW * HEX_SIZE;
+}
+
+vec3 traverseHex(vec3 ro, vec3 rd) {
+  mat3 DIR = mat3(
+    vec3(SQRT3 / 2.0, 0.5, 0.0),
+    vec3(0.0, 1.0, 0.0),
+    vec3(-SQRT3 / 2.0, 0.5, 0.0)
+  );
+
+  vec2 hex = findNearestHex((1E-2 * HEX_SIZE * rd + ro).xy);
+
+  vec3 rdd = rd * DIR;
+  vec3 src = (vec3(hex, 0.0) - ro) * DIR / rdd;
+  vec3 dst = abs((SQRT3 / 2.0 * HEX_SIZE) / rdd);
+
+  vec3 distv = src + dst;
+  float dist = min(min(distv.x, distv.y), distv.z);
+
+  return vec3(hex, dist);
+}
+
+float isectPlane(vec3 ro, vec3 rd, vec3 n) {
+  float t = -dot(ro, n) / dot(rd, n);
+  return t < 0.0 ? FAR : t;
+}
+
+vec4 isectBox(vec3 ro, vec3 rd, vec3 s) {
+  vec3 xo = -ro / rd;
+  vec3 xs = abs(s / rd);
+
+  vec3 dfv = xo - xs;
+  vec3 dbv = xo + xs;
+
+  float df = max(dfv.x, max(dfv.y, dfv.z));
+  float db = min(dbv.x, min(dbv.y, dbv.z));
+  if (df < 0.0) { return vec4(FAR); }
+  if (db < df) { return vec4(FAR); }
+
+  vec3 n = -sign(rd) * step(vec3(df), dfv);
+  return vec4(n, df);
+}
+
+// FAKE rounded box, just modified the normal
+vec4 isectRoundedBox(vec3 ro, vec3 rd, vec3 s, float r) {
+  vec4 isect = isectBox(ro, rd, s);
+  float d = isect.w;
+
+  if (d >= FAR) return vec4(FAR);
+
+  vec3 rp = ro + rd * d;
+  vec3 st = s - r;
+  vec3 rpt = clamp(rp, -st, st);
+  vec3 N = normalize(rp - rpt);
+
+  d += 0.01 * r * length(N - isect.xyz);
+
+  return vec4(N, d);
+}
+
+vec4 isectCappedPillar(vec3 ro, vec3 rd, float r, float len) {
+  float sqLenXY = 1.0 - rd.z * rd.z;
+
+  float b = dot(ro, rd) - ro.z * rd.z;
+  float c = dot(ro, ro) - ro.z * ro.z - r * r;
+  float h = b * b - sqLenXY * c;
+
+  if (h < 0.0) { return vec4(FAR); }
+
+  h = sqrt(h);
+  float dfs = -(b + h) / sqLenXY;
+  float dbs = -(b - h) / sqLenXY;
+  vec3 N = vec3(1.0, 1.0, 0.0) * (ro + rd * dfs) / r;
+  
+  float df = max(dfs, (-ro.z - len * sign(rd.z)) / rd.z);
+  float db = min(dbs, (-ro.z + len * sign(rd.z)) / rd.z);
+  if (df != dfs) {
+    N = vec3(0.0, 0.0, -sign(rd.z));
+  }
+  
+  if (df < 0.0 || db < df) { return vec4(FAR); }
+  return vec4(N, df);
+}
+
+vec3 sampleGGX(vec2 Xi, vec3 N, float roughnessSq) {
+  float phi = Xi.x * TAU;
+  float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (roughnessSq - 1.0) * Xi.y));
+  float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+  return orthBas(N) * vec3(
+    sinTheta * cos(phi),
+    sinTheta * sin(phi),
+    cosTheta
+  );
+}
+
+float fresnelSchlick(float dotVH, float f0, float f90) {
+  return mix(
+    f0,
+    f90,
+    pow(max(1.0 - dotVH, 0.0), 5.0)
+  );
+}
+
+void main() {
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+  seed = uvec3(fragCoord, iFrame);
+
+  vec2 uv = fragCoord / viewPort.xy;
+  vec2 p = uv * 2.0 - 1.0;
+  p.x *= viewPort.x / viewPort.y;
+
+  mat3 cb = orthBas(normalize(vec3(0.0, -0.5, 0.8)));
+  vec3 ro = cb * vec3(0.0, 0.0, 1.0);
+  vec3 rd = cb * normalize(vec3(p, -3.0));
+  ro.xy *= rotate2D(0.1 * iTime);
+  rd.xy *= rotate2D(0.1 * iTime);
+  ro += rd * isectPlane(ro, rd, vec3(0.0, 0.0, 1.0));
+
+  vec3 ro0 = ro;
+  vec3 rd0 = rd;
+
+  float isFirstRay = 1.0;
+
+  vec3 N0 = vec3(0.0);
+  vec3 col = vec3(0.0);
+  vec3 colRem = vec3(1.0);
+  float samples = 1.0;
+
+  for (int i = 0; i < TRACE_ITER; i++) {
+    vec3 result = traverseHex(ro, rd);
+    
+    float noise = perlin3D(vec3(4.0 * result.xy, 0.3 * iTime));
+    vec3 rot = ro - vec3(result.xy, 2.0 * noise - 7.0);
+    vec4 isect = isectCappedPillar(rot, rd, 0.03, 5.0);
+
+    vec3 N = isect.xyz;
+    float isectlen = isect.w;
+
+    if (0.0 < isectlen && isectlen < FAR) {
+      ro += rd * isectlen;
+
+      if (isFirstRay == 1.0) {
+        ro0 = ro;
+        N0 = N;
+        isFirstRay = 0.0;
+      }
+
+      vec3 h = sampleGGX(random3().xy, N, ROUGHNESS_SQ);
+      float dotVH = max(dot(-rd, h), 0.001);
+      
+      rd = normalize(reflect(rd, h));
+      
+      colRem *= fresnelSchlick(dotVH, 0.8, 1.0);
+      colRem *= step(0.0, dot(rd, N));
+
+      ro += EPSILON * rd;
+    } else {
+      ro += rd * result.z;
+    }
+    
+    if (ro.z > 0.0 && rd.z > 0.0) {
+      float plane = isectPlane(ro - vec3(0.0, 0.0, 5.0), rd, normalize(vec3(0.0, 0.0, -1.0)));
+      float planeLight = step(plane, FAR - 1E-3);
+      col += colRem * LIGHT_AMP * planeLight;
+      colRem *= 0.0;
+    }
+
+    if (colRem.x < 0.04) {
+      if (isFirstRay == 1.0) {
+        break;
+      }
+
+      colRem = vec3(1.0);
+      samples += 1.0;
+
+      ro = ro0;
+      rd = rd0;
+
+      vec3 h = sampleGGX(random3().xy, N0, ROUGHNESS_SQ);
+      float dotVH = max(dot(-rd, h), 0.001);
+      
+      rd = normalize(reflect(rd, h));
+      
+      colRem *= fresnelSchlick(dotVH, 0.8, 1.0);
+      colRem *= step(0.0, dot(rd, N0));
+
+      ro += EPSILON * rd;
+    }
+  }
+
+  if (N0 == vec3(0.0)) {
+    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  outColor = vec4(col / samples, 1.0);
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,196 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+// i started here:
+// https://blog.demofox.org/2020/05/25/casual-shadertoy-path-tracing-1-basic-camera-diffuse-emissive/
+
+uint wang_hash(inout uint seed)
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+float hashf(inout uint state) {
+    return float(wang_hash(state)) / 4294967296.0;
+}
+
+
+#define mR(_a)(mat2(cos(_a+vec4(0,33,11,0))))
+#define repM(_x,_y)(_y*.5-mod(_x,_y))
+#define dmin(a,b)((a.x < b.x) ? a : b)
+float sdBox(vec3 p,vec3 s) {
+    p=abs(p)-s;
+    return length(max(p,0.))+min(max(p.x,max(p.y,p.z)),0.);
+}
+vec2 f(vec3 p)
+{
+    // two circular objects, a rectangular light placed in a cube and a sphere
+    float sp = length(vec3(.5 - p.x, .2 + p.y, 1.5 - p.z)) - 3.;//reflective sphere
+    float b = sdBox(vec3(.5-p.x, p.y, 1. + p.z), vec3(3, 4, 5.));//cube
+    float lt = sdBox(vec3(p.xy, 1. + p.z), vec3(.2, .2, .05));//light
+
+    //tunnel
+    vec3 k = vec3(repM(vec2(atan(p.y, p.x) *2.864788, 1.+p.z), vec2(1.1, 6.28)),length(p.xy) - 2.); 
+    k = abs(k) - vec3(.1, .5, .5);
+    float fk = length(max(-vec3(-.125, .089, .25), .5 *k)) + min(max(k.x, max(k.y, k.z)), 0.) - .15;
+    
+    //circular cubes
+    float ll = 0.;
+    p.yz *= mR(.5);
+    p.xz *= mR(1.);
+    
+    vec3 vb = p;
+    vb.x = atan(p.x, p.y) * (6. / 3.14159);
+    vb.x -= floor(.5 + vb.x);
+    vb.y = length(p.xy);
+    vb.yz *= mR(0.34907);
+    vb.y -= 1.5;
+    vb.x = max(abs(vb.y), abs(vb.x));
+    vb = abs(vb) - vec3(.21, 1.5, .25);
+    ll = (max(max(vb.x, vb.y), vb.z));
+
+    return
+        dmin(vec2(fk, 3),
+             dmin(vec2(-b, 7),
+                  dmin(vec2(ll, 5),
+                       dmin(vec2(-sp, -1),
+                            vec2(lt, 11)))));
+}
+
+
+// somewhre on stackoverflow
+vec3 obd(vec3 n, vec2 rv)
+{
+    // http://lolengine.net/blog/2013/09/21/picking-orthogonal-vector-combing-coconuts
+    vec3 t = (n.x > n.z) ? vec3(-n.y, n.x, 0.0) : vec3(0.0, -n.z, n.y), bt = cross(n, t);
+    float ph = rv.y,th = rv.x, sth = sin(th);
+    return t * cos(ph) * sth + bt * sin(ph) * sth + n * cos(th);
+}
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec3 col = vec3(1e-3),hput=vec3(1),specrd=vec3(0);
+    vec2 R=viewPort.xy,e = vec2(1e-4, -1e-4);
+    struct M {vec3 alb, emi;float rgh;} m = M(vec3(.98), vec3(0),0.);
+    // outColor = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    outColor = texture(iChannel0, vec3(fragCoord, 0.0));
+    uint seed =(uint(fragCoord.x)*1973u+uint(fragCoord.y)*9277u+uint(iFrame)*2669u)|1u;
+    float cd = tan(radians(103.*.5));
+    vec2 jt = hashf(seed)+vec2(cos(hashf(seed)),2.*sin(hashf(seed)));
+    vec2 st = vec2(cd, R.y/R.x * cd) * ((fragCoord+jt)/R*2.-1.);
+    vec3 ro = vec3(vec2(.01),3.23),
+         g = normalize(vec3(.2, .1, .001) - ro),
+         u = normalize(cross(g, vec3(0, 1, 0))),
+         v = normalize(cross(u, g));
+    vec3 rd = normalize(g + st.x *u + st.y *v);
+    vec2 h = vec2(0);
+    //if(abs(st.x)<fract(R.y/R.x*cd)) //debug slow machine
+    for (int b = 1; b < 6 + min(iFrame, 0); ++b)
+    {
+
+        float t = 0.;
+        for (int i = 0; i < 60&&t<6.; i++)
+        {
+            h = f(ro + rd * t);
+            if (abs(h.x) < t * .001)
+                break;
+            t += h.x;
+        }
+
+        {
+            switch (int(h.y))
+            {
+            case 3:
+                m.alb = clamp(mix(vec3(.4, .2, .72), vec3(.86, .87, .1),fract(1.2*rd.z+t)), 0., 1.);
+                m.emi = vec3(1e-6);
+                m.rgh = .7;
+                break;
+            case 5:
+                m.alb = (vec3(.2, .9, .79));
+                m.emi = vec3(1e-6);
+                m.rgh = .5;
+                break;
+            case 7:
+                m.alb = vec3(.9);
+                m.rgh = 1e-3;
+                (b>4)?(m.emi = vec3(50.)):(m.emi = vec3(1e-3));
+                break;
+            case 11:
+                m.alb = vec3(1);
+                m.emi = vec3(100);
+                m.rgh = 1e-6;
+                break;
+            }
+            vec3 p = ro + t * rd;
+            vec3 N=normalize(e.yxx*f(p+e.yxx).x+e.xxy*f(p+e.xxy).x+e.xyx*f(p+e.xyx).x+e.yyy*f(p+e.yyy).x);
+            ro = p + N * .01;
+            specrd = mix(reflect(rd, N), obd(N, .2*p.z+vec2(6. + (2. * hashf(seed) - 1.), (6.28318 * hashf(seed)))) /*artistic*/, m.rgh * m.rgh);
+            rd = normalize(specrd);
+            col += m.emi * hput;
+            hput *= m.alb;
+        }
+    }
+    outColor +=vec4(sqrt(col),1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

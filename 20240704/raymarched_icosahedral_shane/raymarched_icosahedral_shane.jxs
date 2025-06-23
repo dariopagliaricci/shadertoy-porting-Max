@@ -1,0 +1,1180 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+</program>
+
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;
+uniform samplerCube iChannel1;
+uniform sampler2D iChannel2;
+
+/*
+
+    Raymarched Icosahedral Traversal
+    --------------------------------
+    
+    For a while, I've wanted to make some kind of random subdivided 3D 
+    polyhedral cell slice object, but it's taken a while to figure out how
+    I was going to make that happen on Shadertoy. Chances are that you've 
+    never come across a polyhedral cell traversal before, and if I'd never 
+    considered making this, I wouldn't have either. :) In fact, I couldn't
+    find any existance of polyhedral traversal online, so I'm not sure it's
+    even a thing.
+    
+    I wanted to find a simpler way, but I eventually and begrudgingly 
+    realized that spherical coordinate traversal was the only feasable method 
+    available that wouldn't set the GPU on fire. Regular raymarching using 
+    neighboring cell methods would be a prohibitively expensive book-keeping 
+    nightmare and boolean raytracing methods would probably be worse.
+
+    Interestingly, the subdivided icosahedral traversal didn't turn out to be 
+    as difficult as I thought it'd be, but it still wasn't fun, so I doubt 
+    it'll catch on as a new technique-du-jour amongst Minecraft coders or 
+    whoever. :)
+    
+    The scene design -- if you can call it that -- is pretty random. After 
+    completing the spherical object, I got bored and subdivided the background,
+    just to see if it was possible to have two conflicting traversal schemes
+    running concurrently. The background would look better plain, plus the 
+    framerate would improve considerably, but after all that work, I was 
+    insistent in on leaving it in... Anyway, for those who like novel 
+    approaches... and early 2000s hot pearlescent pink -- or whatever that 
+    color is, you're in luck. And for those with slower machines, my apologies. 
+    However, I'll return to this later and try to speed things up.
+ 
+
+	
+    Other examples:
+    
+  
+    // In terms of aesthetics and sheer technical ability, this would
+    // have to be one of my favorites.
+    heavy metal squiggle orb - mattz
+    https://www.shadertoy.com/view/wsGfD3
+    
+    // Very cool demonstration. Polyhedrons are more TDHoopers's domain. The
+    // example below relies on folding symmetry to work, so would be less 
+    // applicable in an asymmetric setting. Having said that TDHooper would 
+    // probably know of some clever ways to improve my hacky polyhedral code. :)
+    Geodesic tiling - tdhooper
+    https://www.shadertoy.com/view/llVXRd
+
+
+*/
+ 
+
+// Max ray distance.
+#define FAR 20.
+
+// Random icosahedral subdivision, if desired. Commenting this out 
+// will look cleaner and increase the frame rate, but I don't feel
+// it looks as interesting.
+#define ICOS_SUBDIV
+
+// Random back wall subdivision, if desired. Commenting this out 
+// will increase the frame rate.
+#define WALL_SUBDIV
+
+// Using the brick background. Commenting this out will display a 
+// dark matte wall, and free up some cycles.
+#define BRICKS
+
+// Color scheme -- Golden orange: 0, Pinkish purple: 1, Greenish blue: 2.
+#define COLOR 1
+
+
+// Scene object ID and individual ID storage.
+int objID;
+vec4 vID;
+
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+/*
+// IQ's vec2 to float hash.
+float hash21(vec2 p){  return fract(sin(dot(p, vec2(27.609, 57.583)))*43758.5453); }
+
+// IQ's vec3 to float hash.
+float hash31(in vec3 p){
+    return fract(sin(dot(p, vec3(91.537, 151.761, 72.453)))*435758.5453);
+}
+*/
+// Fabrice's fork of "Integer Hash - III" by IQ: https://shadertoy.com/view/4tXyWN
+float hash21(vec2 f){
+
+    // Depending on your machine, this should be faster than
+    // the block below it.
+    return texture(iChannel0, f*vec2(.2483, .3437)).x;
+    /* 
+    uvec2 p = floatBitsToUint(f);
+    p = 1664525U*(p>>1U^p.yx);
+    return float(1103515245U*(p.x^(p.y>>3U)))/float(0xffffffffU);
+    */
+}
+
+// IQ's "uint" based uvec3 to float hash.
+float hash31(vec3 f){
+
+    
+    return texture(iChannel0, f.xy*vec2(.2483, .1437) + f.z*vec2(.4865, .5467)).x;
+    // Volume noise texture.
+    //return texture(iChannel0, f*vec3(.2483, .4237, .4865)).x;
+    /* 
+    uvec3 p = floatBitsToUint(f);
+    p = 1103515245U*((p >> 2U)^(p.yzx>>1U)^p.zxy);
+    uint h32 = 1103515245U*(((p.x)^(p.y>>3U))^(p.z>>6U));
+
+    uint n = h32^(h32 >> 16);
+    return float(n & uint(0x7fffffffU))/float(0x7fffffff);
+    */ 
+}
+
+
+
+// mat3 rotation... I did this in a hurry, but I think it's right. :)
+// I have a much better version of this that I'll have to find.
+mat3 rot(vec3 ang){
+    
+    vec3 c = cos(ang), s = sin(ang);
+
+    return mat3(c.x*c.z - s.x*s.y*s.z, -s.x*c.y, -c.x*s.z - s.x*s.y*c.z,
+                c.x*s.y*s.z + s.x*c.z, c.x*c.y, c.x*s.y*c.z - s.x*s.z,
+                c.y*s.z, -s.y, c.y*c.z);
+    
+}
+
+ 
+vec3 rotObj(in vec3 p){
+
+    vec3 oP = p;
+    
+    float tm = iTime/4.;
+    p.yz *= rot2(tm/2.);
+    p.xz *= rot2(tm);
+   
+    if(iMouse.z>0.){
+        // Mouse movement.
+        vec2 ms = (iMouse.xy/viewPort.xy - .5)*vec2(3.14159);
+        p = oP;
+        p *= rot(vec3(0, ms.y, -ms.x));
+    } 
+
+    return p;
+}
+
+ 
+
+// Tri-Planar blending function. Based on an old Nvidia tutorial by Ryan Geiss.
+vec3 tex3D(sampler2D t, in vec3 p, in vec3 n){ 
+    
+    n = max(abs(n) - .2, .001); // max(abs(n), 0.001), etc.
+    //n /= dot(n, vec3(.8)); 
+    n /= length(n);
+    
+    // Texure samples. One for each plane.
+    vec3 tx = texture(t, p.yz).xyz;
+    vec3 ty = texture(t, p.zx).xyz;
+    vec3 tz = texture(t, p.xy).xyz;
+    
+    // Multiply each texture plane by its normal dominance factor.... or however you wish
+    // to describe it. For instance, if the normal faces up or down, the "ty" texture sample,
+    // represnting the XZ plane, will be used, which makes sense.
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear space 
+    // (squaring is a rough approximation) prior to working with them... or something like that. :)
+    // Once the final color value is gamma corrected, you should see correct looking colors.
+    return mat3(tx*tx, ty*ty, tz*tz)*n; // Equivalent to: tx*tx*n.x + ty*ty*n.y + tz*tz*n.z;
+
+}
+
+
+
+// Commutative smooth maximum function. Provided by Tomkh, and taken 
+// from Alex Evans's (aka Statix) talk: 
+// http://media.lolrus.mediamolecule.com/AlexEvans_SIGGRAPH-2015.pdf
+// Credited to Dave Smith @media molecule.
+float smax(float a, float b, float k){
+    
+   float f = max(0., 1. - abs(b - a)/k);
+   return max(a, b) + k*.25*f*f;
+}
+ 
+ 
+
+// IQ's box routine with added smoothing factor.
+float sBox(in vec2 p, in vec2 b, float r){
+
+  vec2 d = abs(p) - b + r;
+  return min(max(d.x, d.y), 0.) + length(max(d, 0.)) - r;
+}
+
+
+// IQ's box routine with added smoothing factor.
+float sBox(in vec3 p, in vec3 b, float r){
+
+  vec3 d = abs(p) - b + r;
+  return min(max(max(d.x, d.y), d.z), 0.) + length(max(d, 0.)) - r;
+}
+
+
+// IQ's extrusion formula with added smoothing factor.
+float opExtrusion(in float sdf, in float pz, in float h, in float sf){
+
+    // Slight rounding. A little nicer, but slower.
+    vec2 w = vec2( sdf, abs(pz) - h) + sf;
+  	return min(max(w.x, w.y), 0.) + length(max(w, 0.)) - sf;
+}
+
+
+
+/////////
+// Normalizing and scaling. If there's a clever way to do this, feel
+// free to let me know.
+mat3x3 nrmSclMat(mat3x3 m, float rad){
+    
+    return mat3x3(normalize(m[0]), normalize(m[1]), normalize(m[2]))*rad;
+}
+
+// A concatinated spherical coordinate to world coordinate conversion.
+vec3 sphericalToWorld(vec3 sphCoord){
+   
+    vec4 cs = vec4(cos(sphCoord.xy), sin(sphCoord.xy));
+    return vec3(cs.w*cs.x, cs.y, cs.w*cs.z)*sphCoord.z;
+}
+  
+
+// Useful polyhedron constants. 
+//#define PI 3.14159265359
+#define TAU 6.283185307179586
+#define PI TAU*.5 // To avoid numerical wrapping problems... Sigh! :)
+#define PHI  1.6180339887498948482 // (1. + sqrt(5.))/2.
+
+//
+// Since all triangles are the same size, etc, any triangles on
+// a known icosahedron will do. The angles we need to determine are
+// the angle from the top point to one of the ones below, the top
+// point to the mid point below, and the angle from the top point
+// to the center (centroid) of the triangle.
+const vec3 triV0 = normalize(vec3(-1, PHI,  0));
+const vec3 triV1 = normalize(vec3(-PHI, 0,  1));
+const vec3 triV2 = normalize(vec3(0,  1,  PHI));
+const vec3 mid = normalize(mix(triV1, triV2, .5));
+const vec3 cntr = normalize(triV0 + triV1 + triV2);
+
+// Angle between vectors: cos(a) = u.v/|u||v|. 
+// U and V are normalized. Therefore, a = acos(u.v).
+const float ang = acos(dot(triV0, triV1)); // Side length angle.
+const float mAng = acos(dot(triV0, mid)); // Height angle.
+const float cAng = acos(dot(triV0, cntr)); // Centroid angle.
+
+// The latitude (in radians) of each of the top and bottom blocks is
+// the angle between the top point (north pole) and one of the points below, 
+// or the bottom point (south pole) and one of the ones above.
+const float latBlock = ang;
+const vec2 lat = vec2(cAng, mAng*2. - cAng);
+
+//
+// Direction vector and sector ID.
+//vec3 dir;
+//int sID;
+
+// Returns the local world coordinates to the nearest triangle and the three
+// triangle vertices in spherical coordinates.
+vec3 getIcosTri(inout vec3 q, inout mat3x3 gVertID, const float rad){
+       
+
+    // The sphere is broken up into two sections. The top section 
+    // consists of the top row, and half the triangle in the middle
+    // row that sit directly below. The bottom section is the same,
+    // but on the bottome and rotated at PI/5 relative to the top. 
+    // The half triangle rows perfectly mesh together to form the 
+    // middle row or section.
+
+    // Top and bottom section coordinate systems. The bottom section is 
+    // rotated by PI/5 about the equator.
+
+    // Converting to spherical coordinates.
+    // X: Longitudinal angle -- around XZ, in this case.
+    // Y: Latitudinal angle -- rotating around XY.
+    // Z: The radius, if you need it.
+
+    // Longitudinal angle for the top and bottom sections.
+    const float scX = 5.; // Longitudinal scale.
+    vec4 sph = atan(q.z, q.x) + vec4(0, 0, PI/5., PI/5.);
+    sph = fract((floor(sph*scX/TAU) + vec4(.5, .5, 0, 0))/scX)*TAU;
+    //sph = mod((floor(sph*scX/TAU) + vec4(.5, .5, 0, 0))/scX*TAU, TAU);
+
+
+    float dist = 1e5;
+
+
+    // Top and bottom block latitudes for each of the four groups of triangle to test.
+    const vec4 ayT4 = vec4(0, PI - latBlock, PI, latBlock);
+    const vec4 ayB4 = vec4(latBlock, latBlock, PI - latBlock, PI - latBlock);
+    float ayT, ayB;
+
+    int id;
+
+    // Skip the top or bottom strip, depending on whether we're in the
+    // northern or southern hemisphere.
+    ivec3 iR = q.y<0.? ivec3(1, 2, 3) : ivec3(0, 1, 3);
+
+    // Iterating through the four triangle group strips and determining the 
+    // closest one via the closest central triangle point. Usually, only one
+    // two strips are normally checked, but three are checked here on account 
+    // of faux shadow rendering.
+    for(int k = 0; k<3; k++){ 
+
+        int i = iR[k];
+
+        // Central vertex postion for this triangle.        
+        int j = i/2;
+        // The spherical coordinates of the central vertex point for this 
+        // triangle. The middle mess is the lattitudes for each strip. In order,
+        // they are: lat[0], lat[1], PI - lat[0], PI - lat[1]. The longitudinal
+        // are just the polar coordinates. The bottom differ by PI/5. The final
+        // spherical coordinate ranges from the sphere core to the surface.
+        // On the surface, all distances are set to the radius.                
+        vec3 sc = vec3(sph[i], float(j)*PI - float(j*2 - 1)*lat[i&1], rad);
+ 
+        // Spherical to world, or cartesian, coordinates.
+        vec3 wc = sphericalToWorld(sc);
+
+
+        float vDist = length(q - wc);
+        if(vDist<dist){
+           dist = vDist;
+           ayT = ayT4[i]; // Top triangle vertex latitude.
+           ayB = ayB4[i]; // Bottom triangle vertex latitude.
+           id = i;
+        }
+
+
+    }
+
+
+    // Flip base vertex postions on two blocks for clockwise order.
+    float baseFlip = (id==0 || id==3)? 1. : -1.;
+    
+    // X - coordinates for all three vertices.
+    vec3 ax = mod(vec3(0, -PI/5.*baseFlip, PI/5.*baseFlip) + TAU + sph[id], TAU);
+
+    // The three vertices in spherical coordinates. I can't remember why
+    // I didn't convert these to world coordinates prior to returning, but
+    // I think it had to do with obtaining accurate IDs... or something. :)
+    gVertID = mat3x3(vec3(ax.x, ayT, rad), vec3(ax.y, ayB, rad), vec3(ax.z, ayB, rad));
+    
+   
+    // Top and bottom poles have a longitudinal coordinate of zero.
+    if ((id&1)==0) gVertID[0].x = 0.;
+
+    /*
+    // Direction and section ID stuff. Not used here.
+    dir = vec3(1);
+    if(id == 1 || id == 2) dir *= -1.;
+    if(id == 0 || id == 2) dir.x *= -1.;
+    
+    sID = id;
+    */
+    
+    return q;
+}
+
+
+// Unsigned distance to the segment joining "a" and "b".
+float distLine(vec3 p, vec3 a, vec3 b){
+
+    p -= a; b -= a;
+    float h = clamp(dot(p, b)/dot(b, b), 0., 1.);
+    return length(p - b*h);
+}
+
+/*
+/////////
+// Nimitz's simple basis function. I'll take people's word for it that it
+// fails at the negative one Z point, so I've attempted to put in a hacky fix.
+mat3 basis(in vec3 n){
+    
+    float a = min(1./(1. + n.z), 1e6);
+    float b = -n.x*n.y*a;
+    return mat3(1. - n.x*n.x*a, b, n.x, b, 1. - n.y*n.y*a, n.y, -n.x, -n.y, n.z);
+}
+
+
+
+// Sphere intersection: Pretty standard, and adapted from one
+// of IQ's formulae.
+vec2 sphereIntersect(in vec3 ro, in vec3 rd, in vec4 sph){
+
+    vec3 oc = ro - sph.xyz;
+	float b = dot(oc, rd);
+    if(b > 0.) return vec2(1e8, 0.);
+	float c = dot(oc, oc) - sph.w*sph.w;
+	float h = b*b - c;
+	if(h<0.) return vec2(1e8, 0.);
+	return vec2(-b - sqrt(h), 1.); 
+    
+}
+*/
+
+// Ray origin, ray direction, point on the line, normal. 
+float rayLine(vec3 ro, vec3 rd, vec3 p, vec3 n){
+
+   
+   // This it trimmed down, and can be trimmed down more. Note that 
+   // "1./dot(rd, n)" can be precalculated outside the loop. However,
+   // this isn't a GPU intensive example, so it doesn't matter here.
+   //return max(dot(p - ro, n), 0.)/max(dot(rd, n), 1e-8);
+   float dn = dot(rd, n);
+   return dn>0.? dot(p - ro, n)/dn : 1e8;   
+   //return dn>0.? max(dot(p - ro, n), 0.)/dn : 1e8;   
+
+}
+
+// Plane distance function. Probably from IQ's page.
+float plane(vec3 p0, vec4 p) {
+	return dot(p.xyz, p0 + p.xyz*p.w);
+}
+
+
+vec3 gDir2; // Cell traversing direction.
+vec3 gRd2; // Global ray variable.
+
+vec3 gRd; // Global ray variable.
+float gCD; // Global cell boundary distance.
+vec3 gP;
+
+// Sphere position: A little redundant, in this case.
+vec3 sphPos = vec3(0);
+ 
+// Individual icosahedral cell ID and wall panel cell ID.
+// I'm also storing the moving height values in the final slot.
+vec4 icosCellID;
+vec3 wallCellID;
+
+ 
+
+// Scene distance function.
+float map(vec3 p){
+    
+    
+    
+    // Rotate the sphere.
+    vec3 q = rotObj(p - sphPos);
+
+            
+    // Icosahedron vertices and vertex IDs for the current cell.
+    mat3x3 v, vertID;
+
+    // Obtaining the local cell coordinates and spherical coordinates
+    // for the icosahedron cell.
+    const float rad = .5;
+    vec3 lq = getIcosTri(q, vertID, rad);
+    
+    // Converting the cell triangle vertices to world coordinates.
+    v[0] = sphericalToWorld(vertID[0]);
+    v[1] = sphericalToWorld(vertID[1]);
+    v[2] = sphericalToWorld(vertID[2]);
+         
+ 
+    
+    // Edge mid points.
+    mat3x3 vE = (v + mat3x3(v[1], v[2], v[0]));
+    vE = nrmSclMat(vE, rad);
+    /*
+    // The above is equivalent to the following.
+    vE[0] = normalize(mix(v[0], v[1], .5))*rad;
+    vE[1] = normalize(mix(v[1], v[2], .5))*rad;
+    vE[2] = normalize(mix(v[2], v[0], .5))*rad;
+    */
+    
+
+    /////
+
+    // Triangle subdivision, if desired.
+    #ifdef ICOS_SUBDIV
+    int subDivNum = 2;
+    #else
+    int subDivNum = 1;
+    #endif
+
+    int subs = 0;
+
+    if(length(lq)>.8) subDivNum = 0;
+
+    //float midTri = 0.;
+    //
+    // There'd be faster ways to do this, but this is
+    // relatively cheap, and it works well enough.
+    for(int i = 0; i<subDivNum; i++){
+
+        #ifdef ICOS_SUBDIV
+        if(i>=1){
+            vec3 rC = v[0] + v[1] + v[2];
+            float sRnd = hash31(rC + float(i + 1)/8.);
+            if(sRnd<.65) break;
+        }
+        #endif
+        subs++;
+
+
+        // Create three line boundaries within the triangle to 
+        // partition into four triangles. Pretty standard stuff.
+        // By the way, there are other partitionings, but this 
+        // is the most common. At some stage, I'll include some
+        // others, like the three triangle version connecting the 
+        // center to the vertices.
+        //
+        if(dot(lq, cross(vE[0], vE[1]))>0.){
+            v[0] = vE[0]; v[2] = vE[1];                    
+        }
+        else if(dot(lq, cross(vE[1], vE[2]))>0.){
+            v[0] = vE[2]; v[1] = vE[1];
+        }
+        else if(dot(lq, cross(vE[2], vE[0]))>0.){
+            v[1] = vE[0]; v[2] = vE[2];
+        }
+        else {
+            v[0] = vE[2]; v[1] = vE[0]; v[2] = vE[1];
+            //midTri = 1.;
+        }
+
+        // Recalculating the edge mid-vectors for the next iteration.
+        vE = (v + mat3x3(v[1], v[2], v[0]));
+        vE = nrmSclMat(vE, rad); 
+    }
+  
+            
+    /////  
+ 
+
+     // The cell center, which doubles as a cell ID,
+    // due to its uniqueness, which can be used for 
+    // randomness, etc.
+    //vec3 tCntr = sSize(v[0] + v[1] + v[2], rad);
+    vec3 cntrID = (v[0] + v[1] + v[2]);
+ 
+
+     // Icosahedral cell boundary.
+    mat3 mEdge = mat3(cross(v[1], v[0]), cross(v[2], v[1]), cross(v[0], v[2]));
+    // Normals at each of the triangle sides.
+    mat3x3 sNrm = nrmSclMat(mEdge, 1.); 
+    //mat3x3 sNrm = mat3x3(normalize(mEdge[0]), normalize(mEdge[1]), normalize(mEdge[2]));
+    
+    // Icosahedral triangle face cell boundary.
+    vec3 ep = (normalize(lq)*mEdge)/
+              vec3(length(v[1] - v[0]), length(v[2] - v[1]), length(v[0] - v[2]));  
+    float triF = min(min(ep.x, ep.y), ep.z);   
+ 
+    ////////////
+ 
+    // Random animated radius.
+    float r = hash31(cntrID + .16);
+    r = (smoothstep(.9, .95, sin(6.2831589*r + iTime))*.2 + .95)*rad;
+    // Storing the center ID and radius for later.
+    icosCellID = vec4(cntrID, r);
+    
+    
+    // The main polyhedral object.
+    float object = 1e5;
+
+    // Edge smoothing factor. Hacky, but it works well enough.
+    float eSm = 1./float(subs + 1);
+
+    // Creating the triangle wedge object for this cell by simply
+    // obtaining the maximum of all inner boundary planes.
+    float gap = .005; // Cell gap.
+    float side = plane(lq, vec4(-sNrm[0], gap)); // Normal facing plane.
+    side = smax(side, plane(lq, vec4(-sNrm[1], gap)), .06*eSm);
+    side = smax(side, plane(lq, vec4(-sNrm[2], gap)), .06*eSm);
+    //side = abs(side + .025*eSm) - .025*eSm; // Thin sides.
+
+    // The top of the triangle cell wedge.
+    float top = length(lq) - r; // Round surface.
+    //float top = -plane(lq, vec4(normalize(-cntrID), r));
+    object = abs(top + .02) - .02; // Thin slice, instead of solid.
+    //object = top; // Standard solid chunk.
+
+    // The triangle cell object consists of a top moved out from the center
+    // of the spherical opject with three triangular sides cut out. The
+    // last factor (triF) is the 2D triangle distance, which we're using to
+    // make the object look pointy on top. Removing it will return a flat
+    // surface.
+    object = smax(object, side, .015) - triF*.3;
+
+    // Inner ball.
+    object = min(object, length(lq) - .35);
+
+    // The tubes eminating from the center of the polygon.
+    float tube = distLine(lq, vec3(0), normalize(cntrID)*(r + .06*eSm)) - .04*eSm; 
+    // Other failed experiments. :)
+    //float tube = distLine(lq, vec3(0), normalize(cntrID)*8.);
+    //tube = max(tube, top) - .035*eSm;
+    //tube = min(tube, length(lq - normalize(cntrID)*(r + .06*eSm)) - .04*eSm);
+    //float tube = max(top - .05, -line + length(vE[2] - normalize(cntrID)*rad)*.8); 
+     
+ 
+ 
+    ///////////
+    // Icosahedral traversal section: Setup wasn't fun, but the execution
+    // is incredibly simple. Trace the ray to the outer walls, and note
+    // the minimum distance.
+    // Ray to triangle prism wall distances.
+    vec4 rC = vec4(1e5);
+    rC.x = rayLine(lq, gRd, vec3(0), -sNrm[0]);
+    rC.y = rayLine(lq, gRd, vec3(0), -sNrm[1]);
+    rC.z = rayLine(lq, gRd, vec3(0), -sNrm[2]);
+
+    // Minimum of all distances, plus not allowing negative distances, which
+    // stops the ray from tracing backwards... or something like that.
+    gCD = max(min(min(rC.x, rC.y), min(rC.z, rC.w)), 0.);
+    
+ 
+    ///////////
+    
+ 
+    // Standard rectangle subdivision with offset rows.
+    float wBlock = 1e5;
+    
+    // Not using bricks will return a flat dark background and free up
+    // some cycles.
+    #ifdef BRICKS
+    // Trying to speed things up by not calculating pixels we don't have to.
+    if(p.z>0. && length(p)>1.){ 
+  
+        // Scale and row offset.
+        vec2 sc2 = vec2(1.5, 1)*.36;
+        vec2 p2 = p.xy - vec2(0, iTime/8.);
+        vec2 offs = vec2(0);
+        vec2 ii = mod(floor(p2/sc2), 3.)/3.;
+        p2.x -= ii.y*sc2.x;
+        offs.x += ii.y;
+   
+        vec2 svP2 = p2;
+        // Local cell position and ID. 
+        vec2 ip2 = floor(p2/sc2) + .5;
+        p2 -= ip2*sc2;
+        subs = 1; // Subdivision number.
+        #ifdef WALL_SUBDIV
+        // One subdivision level.
+        if(hash21(ip2 + .2)<.35){
+            sc2 /= 2.;
+            p2 = svP2;
+            ip2 = floor(p2/sc2) + .5;
+            p2 -= ip2*sc2;
+            subs++;
+        }
+        #endif
+        ip2 = (ip2 + offs)*sc2; // Cell ID.
+     
+     
+        // Outer blocks.
+        float x = ip2.x/1.5/.36;
+        int outer = (x>3. || x<-3.)? 1 : 0;
+
+        // Height based on X-distance... I'm not even sure what the "crv" reference
+        // is... It makes the wall look curved on the ends. Fair enough. :D
+        float crvH = .3*max(abs(ip2.x), 0.); 
+        float h = hash21(ip2 + .22); // Random height.
+
+        // Moving outer walls, and static in the middle.
+        if(outer == 1) h = smoothstep(.9, .95, sin(6.2831589*h + iTime))*.25 + crvH;
+        else h = crvH; 
+
+        // Save the wall ID and height for later.
+        wallCellID = vec3(ip2, h);
+
+        vec3 p3 = vec3(p2, p.z - 2. - .04);
+        //float wBlock = sBox(vec3(p2, -(p.z + h/2.) + 3.), vec3(sc2/2., h/2.), .01);
+        float d2D = sBox(p2, sc2/2., .1*sqrt(min(sc2.x, sc2.y)));
+        //float wBlock = opExtrusion(d2D, p.z - 3., h, .015) + d2D*.2;
+        float sphCrv = length(p2/sc2/2.)*.02;
+        float blockFce = (outer == 1)? min(-d2D, .2)*.15 : 0.;
+        if(outer == 0 && hash21(ip2)<.5) d2D = abs(d2D + .04) - .04;
+        wBlock = opExtrusion(d2D, p3.z + h, .04, .025) - blockFce + sphCrv;
+
+        // The wall tube... I should look for a faster way to do this, but it'll
+        // do for now.
+        float tube2 = distLine(p3, vec3(0), 
+                      vec3(0, 0, -1)*(h + .18/float(subs + 1))) - .08/float(subs + 1); 
+
+        // Only connecting tubes on the outer bricks. It's not mandatory, but I
+        // wanted the inner brick to look cleaner.
+        if(outer == 1) tube = min(tube, tube2);
+
+
+        // Directional ray collision with the square cell boundaries.
+        vec2 rC2 = (gDir2.xy*sc2 - p2)/gRd2.xy; // For 2D, this will work too.
+
+        // Minimum of all distances, plus not allowing negative distances.
+        gCD = min(gCD, max(min(rC2.x, rC2.y), 0.)); // Adding a touch to advance to the next cell.
+    
+    }
+    #endif
+    
+    // Advancing the traversal distance the next cell.
+    gCD += .0001;
+    
+    
+   
+
+    //////////////////
+    // The background wall.
+    //
+    // Using a large sphere to create a slightly curved back wall.
+    //float wall = -(length(p - sphPos - vec3(0, 0, -(48. - 3.))) - 48.);
+    // Flat plane back wall.
+    float wall = -p.z + 2.5;
+    
+
+    // Overall object ID -- There in one rundundant slot there.
+    vID = vec4(tube, wall, wBlock, object);
+
+    // Shortest distance to a scene object.
+    return min(min(tube, wall), min(wBlock, object));
+ 
+}
+
+ 
+// Basic raymarcher.
+float trace(in vec3 ro, in vec3 rd){
+
+    // Closest and total distance.
+    float d, t = hash31(ro + rd)*.15;// Jittering to alleviate glow artifacts.
+    
+    gRd = rd; // Set the global icosadral ray direction varible.
+    // It needs to match the object rotation. Performing this in the
+    // "map" function will rotate it multiple times per loop, so 
+    // won't work... I found that out the hard way. :)
+    gRd = rotObj(gRd); 
+    
+    // Back wall unit direction ray. Not rotated. 
+    // We need the direction itself for the standard cube
+    // traversal trickery.
+    gDir2 = sign(rd)*.5;
+    gRd2 = rd;
+    
+    for(int i = min(iFrame, 0); i<80; i++){
+    
+        d = map(ro + rd*t);
+        // Note the "t*b + a" addition. Basically, we're putting less emphasis on accuracy, as
+        // "t" increases. It's a cheap trick that works in most situations... Not all, though.
+        if(abs(d)<.001 || t>FAR) break; // Alternative: 0.001*max(t*.25, 1.), etc.
+
+        t += min(d*.8, gCD);
+    }
+
+    return min(t, FAR);
+}
+
+
+
+// Cheap shadows are hard. In fact, I'd almost say, shadowing particular scenes with 
+// limited iterations is impossible... However, I'd be very grateful if someone could 
+// prove me wrong. :)
+float softShadow(vec3 ro, vec3 lp, vec3 n, float k){
+
+    // More would be nicer. More is always nicer, but not really affordable. 
+    // machine anyway.
+    const int maxIterationsShad = 32; 
+    
+    ro += n*.0015;
+    vec3 rd = lp - ro; // Unnormalized direction ray.
+    
+
+    float shade = 1.;
+    float t = 0.;//.0015; // Coincides with the hit condition in the "trace" function.  
+    float end = max(length(rd), .0001);
+    //float stepDist = end/float(maxIterationsShad);
+    rd /= end;
+    
+
+    gRd = rd; // Icosahedral direction ray.
+    gRd = rotObj(gRd);
+    
+    gDir2 = sign(rd)*.5; // Back wall direction ray. Not rotated.
+    gRd2 = rd;
+
+    // Max shadow iterations - More iterations make nicer shadows, but slow things down. 
+    // Obviously, the lowest number to give a decent shadow is the best one to choose. 
+    for (int i = min(iFrame, 0); i<maxIterationsShad; i++){
+
+        float d = map(ro + rd*t);
+        shade = min(shade, k*d/t);
+        //shade = min(shade, smoothstep(0., 1., k*d/t)); // Thanks to IQ for this tidbit.
+        // So many options here, and none are perfect:  dist += clamp(h, .01, stepDist), 
+        // etc.
+        //t += clamp(d, .01, .25); // Normally this.
+        t += clamp(min(d, gCD), .01, .25); 
+        
+        
+        // Early exits from accumulative distance function calls tend to be a good thing.
+        if (d<0. || t>end) break; 
+    }
+
+    // Sometimes, I'll add a constant to the final shade value, which lightens the shadow a bit --
+    // It's a preference thing. Really dark shadows look too brutal to me. Sometimes, I'll add 
+    // AO also just for kicks. :)
+    return max(shade, 0.); 
+}
+
+
+// Normal function. It's not as fast as the tetrahedral calculation, but more symmetrical.
+vec3 getNormal(in vec3 p, float t) {
+	
+    //return normalize(vec3(map(p + e.xyy) - map(p - e.xyy), 
+    //                      map(p + e.yxy) - map(p - e.yxy),	
+    //                      map(p + e.yyx) - map(p - e.yyx)));
+    
+    // This mess is an attempt to speed up compiler time by contriving a break... It's 
+    // based on a suggestion by IQ. I think it works, but I really couldn't say for sure.
+    float sgn = 1.;
+    vec3 e = vec3(.001, 0, 0), mp = e.zzz; // Spalmer's clever zeroing.
+    for(int i = min(iFrame, 0); i<6; i++){
+		mp.x += map(p + sgn*e)*sgn;
+        sgn = -sgn;
+        if((i&1)==1){ mp = mp.yzx; e = e.zxy; }
+    }
+    
+    return normalize(mp);
+}
+
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original.
+float calcAO(in vec3 p, in vec3 n)
+{
+	float sca = 2., occ = 0.;
+    for( int i = min(0, iFrame); i<5; i++ ){
+    
+        float hr = float(i + 1)*.15/5.;        
+        float d = map(p + n*hr);
+        occ += (hr - d)*sca;
+        sca *= .7;
+        if(occ>1e5) break;
+    }
+    
+    return clamp(1. - occ, 0., 1.);  
+}
+
+
+void main(){
+
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Screen coordinates.
+	vec2 uv = (fragCoord - viewPort.xy*.5)/viewPort.y;
+	
+	// Camera Setup.
+	vec3 lk = vec3(0, 0, 0); // Camera position, doubling as the ray origin.
+	vec3 ro = lk + vec3(cos(iTime/3.)*.15, .3, -2);//vec3(0, -.25, iTime);  // "Look At" position.
+ 
+    // Light positioning. One is just in front of the camera, and the other is in front of that.
+ 	vec3 lp = ro + vec3(.25, .75, -1);// Put it a bit in front of the camera.
+	
+
+    // Using the above to produce the unit ray-direction vector.
+    float FOV = .75; // FOV - Field of view.
+    vec3 fwd = normalize(lk - ro);
+    vec3 rgt = normalize(vec3(fwd.z, 0., -fwd.x)); 
+    // "right" and "forward" are perpendicular, due to the dot product being zero. Therefore, I'm 
+    // assuming no normalization is necessary? The only reason I ask is that lots of people do 
+    // normalize, so perhaps I'm overlooking something?
+    vec3 up = cross(fwd, rgt); 
+
+    // rd - Ray direction.
+    //vec3 rd = normalize(fwd + FOV*uv.x*rgt + FOV*uv.y*up);
+    vec3 rd = normalize(uv.x*rgt + uv.y*up + fwd/FOV);
+    
+ 	 
+    
+    // Raymarch to the scene.
+    float t = trace(ro, rd);
+    
+    
+    // Object identification: For two objects only, this is overkill,
+    // but handy when using more.
+    objID = 0;
+    float obD = vID[0];
+    for(int i = 0; i<4; i++){ 
+        if(vID[i]<obD){ obD = vID[i]; objID = i; }
+    }
+    
+    
+    vec4 iCellID = icosCellID; // Icosahedron cell ID with radius.
+    vec3 wCellID = wallCellID; // Wall cell ID with height.
+  
+    
+	
+    // Initiate the scene color to black.
+	vec3 col = vec3(0);
+	
+	// The ray has effectively hit the surface, so light it up.
+	if(t < FAR){
+        
+  	
+    	// Surface position and surface normal.
+	    vec3 sp = ro + rd*t;
+	    //vec3 sn = getNormal(sp, edge, crv, ef, t);
+        vec3 sn = getNormal(sp, t);
+        
+        
+            	// Light direction vector.
+	    vec3 ld = lp - sp;
+
+        // Distance from respective light to the surface point.
+	    float lDist = max(length(ld), .001);
+    	
+    	// Normalize the light direction vector.
+	    ld /= lDist;
+
+        
+        
+        // Shadows and ambient self shadowing.
+    	float sh = softShadow(sp, lp, sn, 8.);
+    	float ao = calcAO(sp, sn); // Ambient occlusion.
+       
+	    
+	    // Light attenuation, based on the distances above.
+	    float atten = 1./(1. + lDist*.05);
+
+    	
+    	// Diffuse lighting.
+	    float diff = max( dot(sn, ld), 0.);
+        // Sharper diffus... iveness... Diffusivity. :)
+        diff = pow(diff, 4.)*2.; 
+    	
+    	// Specular lighting.
+	    float spec = pow(max(dot(reflect(ld, sn), rd ), 0.), 32.); 
+	    
+	     
+        
+		// Schlick approximation. I use it to tone down the specular term. It's pretty 
+        // subtle, so could almost be aproximated by a constant, but I prefer it. Here, 
+        // it's being used to give a hard clay consistency... It "kind of" works.
+		float Schlick = pow( 1. - max(dot(rd, normalize(rd + ld)), 0.), 5.);
+		float freS = mix(.2, 1., Schlick);  //F0 = .2 - Glass... or close enough.        
+        
+        
+        float refF = 1.; // Reflection factor.
+         
+        // Texel color. 
+	    vec3 texCol = vec3(0); 
+         
+        // Texturing position and normal.
+        vec3 txP = sp, txN = sn;
+
+        // Object patterns, coloring, etc.        
+        if(objID==1){ 
+        
+           
+            // The background itself. Mostly hidden behind the bricks,
+            // but there nonetheless.
+            txP /= 3.;
+            txP.xy *= rot2(3.14159/4.);
+            txP += .25;
+         
+             // Color and reflection.
+            texCol = vec3(.0175); // Black.
+     
+            // Virtually no specular reflection.
+            refF = .0125;
+
+            
+        }
+        else if(objID==2 || (objID==0 && sp.z>1.)){ 
+        
+            // Wall blocks and vertices.
+        
+            // Texture positio.
+            txP.xy -= vec2(0, iTime/8.);
+            txP.z += wCellID.z;
+            txP /= 3.;
+            txP.xy *= rot2(3.14159/4.);
+            
+            // Random color.
+            float iRnd = hash21(wCellID.xy + .06);
+            texCol = .5 + .45*cos(6.2831*iRnd/10. + vec3(0, 1, 2) + .5);
+            
+            // Darkening the bricks in the center and some on the
+            // left and right sides, and reducing the reflection factor.
+            float x = wCellID.x/1.5/.36; // Scale in distance function.
+            
+            // Darkening the back end of all poles... It was a last minute thing.
+            int back = 0;//((sp.z - 2.04) + wCellID.z - .08>0. && objID==0)? 1 : 0;
+            
+            if(((x<3. && x>-3.) || hash21(wCellID.xy + .38)<.5) || back==1){
+            //if(hash21(wCellID.xy + .38)<.8 || tip==1){
+              texCol = mix(texCol/4., vec3(.13)*dot(texCol, vec3(.299, .587, .114)), .9);
+              refF = .25;
+            }
+            
+            // Tubes and vertices on the outer bricks.
+            if(objID==0){
+                texCol = mix(texCol*2., vec3(.5)*dot(texCol, vec3(.299, .587, .114)), .65);
+            }
+           
+            #if COLOR >= 1
+            texCol = mix(texCol.xzy, texCol.yzx, 
+                         1. - smoothstep(0., 1., rd.x*.5+rd.y*2. + .9));
+            #endif
+
+            #if COLOR == 2
+            texCol = texCol.yzx;  // Other colors.    
+            #endif
+ 
+
+        }
+        else { 
+        
+            // Icosahedral color.
+        
+            // Texture position and normal.
+            float rad = .5;
+            txP = sp - sphPos;
+            txP += normalize(txP)*(rad - iCellID.w);
+            
+             
+            // Rotation to match the scene movement.
+            txP = rotObj(txP);
+            txN = rotObj(txN);
+            
+            // Color and reflection.
+            float iRnd = hash31(iCellID.xyz + .07);
+            texCol = .5 + .45*cos(6.2831*iRnd/10. + vec3(0, 1, 2) + .5);
+             
+               
+            // Coloring the tube and vertices.
+            if(objID==0){
+                texCol = mix(texCol*2., vec3(.5)*dot(texCol, vec3(.299, .587, .114)), .65);
+            }
+            
+            // Darkening the back end of all poles... It was a last minute thing.
+            int back = 0;//(length(sp - sphPos.xyz) - iCellID.w + .02<0. && objID==0)? 1 : 0;
+            
+            
+            // Dark inner sphere.
+            if(length(sp - sphPos.xyz)<.42 || back==1){ 
+                texCol = mix(texCol/4., vec3(.13)*dot(texCol, vec3(.299, .587, .114)), .9); 
+                refF = .25; // Less reflection.
+            } 
+            
+            #if COLOR >= 1
+            texCol = mix(texCol.xzy, texCol.yzx, 
+                         1. - smoothstep(0., 1., rd.x*.5 + rd.y*2. + .9));
+            #endif
+            
+            #if COLOR == 2
+            texCol = texCol.yzx; 
+            #endif
+
+        }
+        
+        
+        
+        
+        // Specular reflection.
+        vec3 hv = normalize(-rd + ld); // Half vector.
+        vec3 ref = reflect(rd, sn); // Surface reflection.
+        vec3 refTx = texture(iChannel1, ref).xyz; refTx *= refTx; // Cube map.
+        float spRef = pow(max(dot(hv, sn), 0.), 16.); // Specular reflection.
+        vec3 rCol = spRef*refTx*1.; //smoothstep(.03, 1., spRef)  
+
+        
+        // Adding the specular reflection here.
+        texCol += rCol*refF;
+ 
+        // Metal and powder coat enamel.
+        vec3 tx = tex3D(iChannel2, txP + .5, txN);
+        texCol *= tx*2. + .3;
+       
+        
+        
+        // This is probably a good example for a BRDF scheme, but things look
+        // OK as is, so I'll keep things more simple.
+        
+        // Combining the above terms to procude the final color.
+        col = texCol*(diff*sh + .3 + vec3(1, .7, .4)*spec*freS*sh*2.);
+ 
+        // Shading.
+        col *= ao*atten;
+        
+       
+	
+	}
+    
+    // Background fog: Not need here.
+    //col = mix(col, vec3(0), smoothstep(0., .99, t/FAR));
+
+
+    // Subtle vignette.
+    //uv = fragCoord/viewPort.xy;
+    //col *= pow(16.*uv.x*uv.y*(1. - uv.x)*(1. - uv.y) , 1./32.);
+
+    // Rough gamma correction and screen presentation.
+    outColor = vec4(pow(max(col, 0.), vec3(1./2.2)), 1); 
+	
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,1990 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec4" default="0.0 0.0 0.0 0.0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outCol;
+
+uniform vec2 viewPort;
+uniform samplerCube iChannel0;
+uniform sampler2D iChannel1;
+uniform int iFrame;
+uniform vec4 iMouse;
+
+// Lincense: CC0 (https://creativecommons.org/publicdomain/zero/1.0/)
+
+/*
+Basic implementation of Frostbite's material + relevant sampling strategies.
+Camera controls via mouse + shift key.
+
+References:
+	https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+	https://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf
+
+The bulk of the material specific code is in the Common tab; direct light sampling routines + rendering in BufferA. Tonemapping in Image.
+*/
+
+// render with sharp primaries so bounce light colors behave reasonably well ( https://www.shadertoy.com/view/WltSRB ):
+#define USE_ACESCG
+
+//#define USE_BLOOM
+
+// use low-discrepancy sequences for the first direct light sampling and scattered ray direction sampling (doesn't improve quality all that much)
+//#define USE_LDS
+
+// LDS sequences don't work when bloom is active since the bloom kernel use LDS sequences themselves
+#ifdef USE_BLOOM
+ #undef USE_LDS
+#endif
+
+
+#define Frame float(iFrame)
+#define rsqrt inversesqrt
+#define clamp01(x) clamp(x, 0.0, 1.0)
+#define If(cond, resT, resF) mix(resF, resT, cond)
+
+const float Pi = 3.14159265359;
+const float RcpPi = 1.0 / Pi;
+const float Pi05 = Pi * 0.5;
+
+float Pow2(float x) {return x*x;}
+float Pow3(float x) {return x*x*x;}
+float Pow4(float x) {return Pow2(Pow2(x));}
+
+vec2 AngToVec(float ang)
+{	
+	return vec2(cos(ang), sin(ang));
+}
+
+
+vec3 AngToVec(vec2 ang)
+{
+    float sinPhi   = sin(ang.x);
+    float cosPhi   = cos(ang.x);
+    float sinTheta = sin(ang.y);
+    float cosTheta = cos(ang.y);    
+
+    return vec3(cosPhi * cosTheta, 
+                         sinTheta, 
+                sinPhi * cosTheta); 
+}
+
+
+float SqrLen(float v) {return v * v;}
+float SqrLen(vec2  v) {return dot(v, v);}
+float SqrLen(vec3  v) {return dot(v, v);}
+float SqrLen(vec4  v) {return dot(v, v);}
+
+
+
+uint  asuint2(float x) { return x == 0.0 ? 0u : floatBitsToUint(x); }
+uvec2 asuint2(vec2 x) { return uvec2(asuint2(x.x ), asuint2(x.y)); }
+uvec3 asuint2(vec3 x) { return uvec3(asuint2(x.xy), asuint2(x.z)); }
+uvec4 asuint2(vec4 x) { return uvec4(asuint2(x.xy), asuint2(x.zw)); }
+
+float Float01(uint x) { return float(    x ) * (1.0 / 4294967296.0); }
+float Float11(uint x) { return float(int(x)) * (1.0 / 2147483648.0); }
+
+vec2 Float01(uvec2 x) { return vec2(      x ) * (1.0 / 4294967296.0); }
+vec2 Float11(uvec2 x) { return vec2(ivec2(x)) * (1.0 / 2147483648.0); }
+
+vec3 Float01(uvec3 x) { return vec3(      x ) * (1.0 / 4294967296.0); }
+vec3 Float11(uvec3 x) { return vec3(ivec3(x)) * (1.0 / 2147483648.0); }
+
+vec4 Float01(uvec4 x) { return vec4(      x ) * (1.0 / 4294967296.0); }
+vec4 Float11(uvec4 x) { return vec4(ivec4(x)) * (1.0 / 2147483648.0); }
+
+const uint rPhi1  = 2654435761u;
+
+const uint rPhi2a = 3242174893u;
+const uint rPhi2b = 2447445397u;
+
+const uint rPhi3a = 3518319149u;
+const uint rPhi3b = 2882110339u;
+const uint rPhi3c = 2360945581u;
+
+const uint rPhi4a = 3679390609u;
+const uint rPhi4b = 3152041517u;
+const uint rPhi4c = 2700274807u;
+const uint rPhi4d = 2313257579u;
+
+const uvec2 rPhi2 = uvec2(rPhi2a, rPhi2b);
+const uvec3 rPhi3 = uvec3(rPhi3a, rPhi3b, rPhi3c);
+const uvec4 rPhi4 = uvec4(rPhi4a, rPhi4b, rPhi4c, rPhi4d);
+
+uint  Roberts(uint  off, uint n) { return off + rPhi1 * n; }
+uvec2 Roberts(uvec2 off, uint n) { return off + rPhi2 * n; }
+uvec3 Roberts(uvec3 off, uint n) { return off + rPhi3 * n; }
+uvec4 Roberts(uvec4 off, uint n) { return off + rPhi4 * n; }
+
+#define _SEED uvec4(0xCAF0FC2Eu, 0xEA18994Au, 0x4D86D399u, 0x10EB49F0u)
+
+uvec4 PhiHash(uint  v, uint seed) { return ((v   * rPhi2a)                                                    ^ (_SEED ^ uvec4(seed))) * rPhi1; }
+uvec4 PhiHash(uvec2 v, uint seed) { return ((v.x * rPhi2a) ^ (v.y * rPhi2b)                                   ^ (_SEED ^ uvec4(seed))) * rPhi1; }
+uvec4 PhiHash(uvec3 v, uint seed) { return ((v.x * rPhi3a) ^ (v.y * rPhi3b) ^ (v.z * rPhi3c)                  ^ (_SEED ^ uvec4(seed))) * rPhi1; }
+uvec4 PhiHash(uvec4 v, uint seed) { return ((v.x * rPhi4a) ^ (v.y * rPhi4b) ^ (v.z * rPhi4c) ^ (v.w * rPhi4d) ^ (_SEED ^ uvec4(seed))) * rPhi1; }
+
+vec4 PhiHash01(float v, uint seed) { return Float01(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash01(vec2  v, uint seed) { return Float01(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash01(vec3  v, uint seed) { return Float01(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash01(vec4  v, uint seed) { return Float01(PhiHash(asuint2(v), seed)); }
+
+vec4 PhiHash11(float v, uint seed) { return Float11(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash11(vec2  v, uint seed) { return Float11(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash11(vec3  v, uint seed) { return Float11(PhiHash(asuint2(v), seed)); }
+vec4 PhiHash11(vec4  v, uint seed) { return Float11(PhiHash(asuint2(v), seed)); }
+
+uint MixHash(uvec2 h)
+{
+    return ((h.x ^ (h.y >> 16u)) * rPhi2.x) ^ 
+           ((h.y ^ (h.x >> 16u)) * rPhi2.y);
+}
+
+uint MixHash(uvec3 h)
+{
+    return ((h.x ^ (h.y >> 16u) ^ (h.z << 15u)) * rPhi3.x) ^ 
+           ((h.y ^ (h.z >> 16u) ^ (h.y << 15u)) * rPhi3.y) ^
+           ((h.z ^ (h.y >> 16u) ^ (h.x << 15u)) * rPhi3.z);
+}
+
+uint MixHash(uvec4 h)
+{
+    return ((h.x ^ (h.y >> 16u) ^ (h.z << 15u)) * rPhi4.x) ^ 
+           ((h.y ^ (h.z >> 16u) ^ (h.w << 15u)) * rPhi4.y) ^
+           ((h.z ^ (h.w >> 16u) ^ (h.x << 15u)) * rPhi4.z) ^
+           ((h.w ^ (h.x >> 16u) ^ (h.y << 15u)) * rPhi4.w);
+}
+
+// low bias version https://nullprogram.com/blog/2018/07/31/
+uint WellonsHash(uint x)
+{
+    x ^= x >> 16u;
+    x *= 0x7feb352dU;
+    x ^= x >> 15u;
+    x *= 0x846ca68bU;
+    x ^= x >> 16u;
+
+    return x;
+}
+
+uvec2 WellonsHash(uvec2 h) { return uvec2(WellonsHash(h.x), WellonsHash(h.y)); }
+uvec3 WellonsHash(uvec3 h) { return uvec3(WellonsHash(h.x), WellonsHash(h.y), WellonsHash(h.z)); }
+uvec4 WellonsHash(uvec4 h) { return uvec4(WellonsHash(h.x), WellonsHash(h.y), WellonsHash(h.z), WellonsHash(h.w)); }
+
+uvec4 WellonsHash(uint  v, uint seed) { return WellonsHash(        v  ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash(uvec2 v, uint seed) { return WellonsHash(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash(uvec3 v, uint seed) { return WellonsHash(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash(uvec4 v, uint seed) { return WellonsHash(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+
+// minimal bias version https://nullprogram.com/blog/2018/07/31/
+uint WellonsHash2(uint x)
+{
+    x ^= x >> 17u;
+    x *= 0xed5ad4bbU;
+    x ^= x >> 11u;
+    x *= 0xac4c1b51U;
+    x ^= x >> 15u;
+    x *= 0x31848babU;
+    x ^= x >> 14u;
+
+    return x;
+}
+
+uvec2 WellonsHash2(uvec2 h) { return uvec2(WellonsHash2(h.x), WellonsHash2(h.y)); }
+uvec3 WellonsHash2(uvec3 h) { return uvec3(WellonsHash2(h.x), WellonsHash2(h.y), WellonsHash2(h.z)); }
+uvec4 WellonsHash2(uvec4 h) { return uvec4(WellonsHash2(h.x), WellonsHash2(h.y), WellonsHash2(h.z), WellonsHash2(h.w)); }
+
+uvec4 WellonsHash2(uint  v, uint seed) { return WellonsHash2(        v  ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash2(uvec2 v, uint seed) { return WellonsHash2(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash2(uvec3 v, uint seed) { return WellonsHash2(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+uvec4 WellonsHash2(uvec4 v, uint seed) { return WellonsHash2(MixHash(v) ^ (_SEED ^ uvec4(seed))); }
+
+#undef _SEED
+
+
+// https://en.wikipedia.org/wiki/Linear_congruential_generator
+uint LCG(uint x) { return x * 22695477u + 1u; }
+
+float Hash01(inout uint h)
+{
+    h = LCG(h);
+
+    return Float01(h * rPhi1);
+}
+
+float Hash11(inout uint h)
+{
+    h = LCG(h);
+
+    return Float11(h * rPhi1);
+}
+
+uint HashU(inout uint h)
+{
+    h = LCG(h);
+
+    return h * rPhi1;
+}
+
+vec2 Hash01x2(inout uint h) { return vec2(Hash01(h), Hash01(h)); }
+vec3 Hash01x3(inout uint h) { return vec3(Hash01(h), Hash01(h), Hash01(h)); }
+vec4 Hash01x4(inout uint h) { return vec4(Hash01(h), Hash01(h), Hash01(h), Hash01(h)); }
+
+vec2 Hash11x2(inout uint h) { return vec2(Hash11(h), Hash11(h)); }
+vec3 Hash11x3(inout uint h) { return vec3(Hash11(h), Hash11(h), Hash11(h)); }
+vec4 Hash11x4(inout uint h) { return vec4(Hash11(h), Hash11(h), Hash11(h), Hash11(h)); }
+
+uvec2 HashUx2(inout uint h) { return uvec2(HashU(h), HashU(h)); }
+uvec3 HashUx3(inout uint h) { return uvec3(HashU(h), HashU(h), HashU(h)); }
+uvec4 HashUx4(inout uint h) { return uvec4(HashU(h), HashU(h), HashU(h), HashU(h)); }
+
+/* http://tksharpless.net/vedutismo/Pannini/panini.pdf */
+vec3 Pannini(vec2 tc, float fov, float d)
+{
+    float d2 = d*d;
+
+    {
+        float fo = Pi05 - fov * 0.5;
+
+        float f = cos(fo)/sin(fo) * 2.0;
+        float f2 = f*f;
+
+        float b = (sqrt(max(0.0, Pow2(d+d2)*(f2+f2*f2))) - (d*f+f)) / (d2+d2*f2-1.0);
+
+        tc *= b;
+    }
+    
+    float h = tc.x;
+    float v = tc.y;
+    
+    float h2 = h*h;
+    
+    float k = h2/Pow2(d+1.0);
+    float k2 = k*k;
+    
+    float discr = max(0.0, k2*d2 - (k+1.0)*(k*d2-1.0));
+    
+    float cosPhi = (-k*d+sqrt(discr))/(k+1.0);
+    float S = (d+1.0)/(d+cosPhi);
+    float tanTheta = v/S;
+    
+    float sinPhi = sqrt(max(0.0, 1.0-Pow2(cosPhi)));
+    if(tc.x < 0.0) sinPhi *= -1.0;
+    
+    float s = inversesqrt(1.0+Pow2(tanTheta));
+    
+    return vec3(sinPhi, tanTheta, cosPhi) * s;
+}
+
+/*
+SOURCE: 
+	"Building an Orthonormal Basis from a 3D Unit Vector Without Normalization"
+		http://orbit.dtu.dk/files/126824972/onb_frisvad_jgt2012_v2.pdf
+		
+	"Building an Orthonormal Basis, Revisited" 
+		http://jcgt.org/published/0006/01/01/
+	
+	- modified for right-handedness here
+	
+DESCR:
+	Constructs a right-handed, orthonormal coordinate system from a given vector of unit length.
+
+IN:
+	n  : normalized vector
+	
+OUT:
+	ox	: orthonormal vector
+	oz	: orthonormal vector
+	
+EXAMPLE:
+	float3 ox, oz;
+	OrthonormalBasis(N, OUT ox, oz);
+*/
+void OrthonormalBasisRH(vec3 n, out vec3 ox, out vec3 oz)
+{
+	float sig = n.z < 0.0 ? 1.0 : -1.0;
+	
+	float a = 1.0 / (n.z - sig);
+	float b = n.x * n.y * a;
+	
+	ox = vec3(1.0 + sig * n.x * n.x * a, sig * b, sig * n.x);
+	oz = vec3(b, sig + n.y * n.y * a, n.y);
+}
+
+// s0 [-1..1], s1 [-1..1]
+// samples spherical cap for s1 [cosAng05..1]
+// samples hemisphere if s1 [0..1]
+vec3 Sample_Sphere(float s0, float s1)
+{
+    float ang = Pi * s0;
+    float s1p = sqrt(1.0 - s1*s1);
+    
+    return vec3(cos(ang) * s1p, 
+                           s1 , 
+                sin(ang) * s1p);
+}
+
+// s0 [-1..1], s1 [-1..1]
+// samples spherical cap for s1 [cosAng05..1]
+vec3 Sample_Sphere(float s0, float s1, vec3 normal)
+{	 
+    vec3 sph = Sample_Sphere(s0, s1);
+
+    vec3 ox, oz;
+    OrthonormalBasisRH(normal, ox, oz);
+
+    return (ox * sph.x) + (normal * sph.y) + (oz * sph.z);
+}
+
+// s0 [-1..1], s1 [-1..1]
+vec3 Sample_Hemisphere(float s0, float s1, vec3 normal)
+{
+    vec3 smpl = Sample_Sphere(s0, s1);
+
+    if(dot(smpl, normal) < 0.0)
+        return -smpl;
+    else
+        return smpl;
+}
+
+// s0 [-1..1], s1 [0..1]
+vec2 Sample_Disk(float s0, float s1)
+{
+    return vec2(cos(Pi * s0), sin(Pi * s0)) * sqrt(s1);
+}
+
+// s0 [-1..1], s1 [0..1]
+vec3 Sample_ClampedCosineLobe(float s0, float s1)
+{	 
+    vec2 d  = Sample_Disk(s0, s1);
+    float y = sqrt(clamp01(1.0 - s1));
+    
+    return vec3(d.x, y, d.y);
+}
+
+// s0 [-1..1], s1 [0..1]
+vec3 Sample_ClampedCosineLobe(float s0, float s1, vec3 normal)
+{	 
+    vec2 d  = Sample_Disk(s0, s1);
+    float y = sqrt(clamp01(1.0 - s1));
+
+    vec3 ox, oz;
+    OrthonormalBasisRH(normal, ox, oz);
+
+    return (ox * d.x) + (normal * y) + (oz * d.y);
+}
+
+// s [-1..1]
+float Sample_Triangle(float s) 
+{ 
+    float v = 1.0 - sqrt(1.0 - abs(s));
+    
+    return s < 0.0 ? -v : v; 
+}
+
+// Box-Muller Transform: 
+// https://en.wikipedia.org/wiki/Box%E2%80%93Muller_transform
+// u (0..1] | v [-1..1]
+vec2 Sample_Gauss2D(float u, float v)
+{
+    float l = sqrt(-2.0 * log(u));
+    
+    return vec2(cos(v * Pi), sin(v * Pi)) * l;
+}
+
+const float pi      = 3.14159274;
+const float rpi     = 0.31830989;
+				   
+const float pi2     = 6.28318530;
+const float rpi2    = 0.15915494;
+				   
+const float pi05    = 1.57079632;
+const float rpi05   = 0.63661977;
+
+const float sqrt05  = 0.70710678;
+const float rsqrt05 = 1.41421356;
+
+const float phi     = 1.61803398;
+const float rphi    = 0.61803398;
+
+
+float OrenNayar(vec3 V, vec3 N, vec3 L, float sigma)
+{
+    float NoL = clamp01(dot(N, L));
+    float NoV = clamp01(dot(N, V));
+    
+	float sigma2 = sigma * sigma;
+
+	float A = 1.0 - 0.5  * sigma2 / (sigma2 + 0.33);
+	float B =       0.45 * sigma2 / (sigma2 + 0.09);
+
+	float term0 = sqrt((1.0 - NoV * NoV) * (1.0 - NoL * NoL)) / max(NoL, NoV);
+
+	vec3 V_proj = normalize(V - N * NoV);
+	vec3 L_proj = normalize(L - N * NoL);
+
+	float term1 = clamp01(dot(V_proj, L_proj));
+
+	return (A + (B * term1 * term0)) * NoL * rpi;
+}
+
+
+// float ct, sang; vec3 Lc, L;
+// Sample_SolidAngle(s, p, lp, lr2, /*out*/ ct, /*out*/ Lc, /*out*/ L, /*out*/ sang)
+// s [0..1]
+void Sample_SolidAngle(vec2 s, vec3 p, vec3 lp, float lr2, 
+                       out float ct, out vec3 Lc, out vec3 L, out float sang)
+{
+    vec3 lvec = lp - p;
+    
+   	float len2 = dot(lvec, lvec);
+    
+    if(len2 == 0.0)
+    {
+        ct = 0.0;
+        Lc = vec3(0.0, 1.0, 0.0);
+        L  = vec3(0.0, 1.0, 0.0);
+        sang = pi2;
+        
+        return;
+    }
+    
+	float rlen = rsqrt(len2);
+
+    Lc = lvec * rlen;
+    
+    ct = sqrt(clamp01(1.0 - lr2 * (rlen * rlen)));
+    
+    L = Sample_Sphere(s.x * 2.0 - 1.0, mix(ct, 1.0, s.y), Lc);
+
+    sang = ct * -pi2 + pi2;
+}
+
+
+float FresnelSchlick(float ct, float f0)
+{
+	float x = 1.0 - ct;
+    float w = (x*x) * (x*x) * x;
+
+    return f0 * (1.0 - w) + w;
+}
+
+vec3 FresnelSchlick(float ct, vec3 f0)
+{
+    float x = 1.0 - ct;
+    float w = (x*x) * (x*x) * x;
+
+    return f0 * (1.0 - w) + w;
+}
+
+float FresnelSchlick(float ct, float f0, float f90)
+{
+	float x = 1.0 - ct;
+    float w = (x*x) * (x*x) * x;
+
+    return mix(f0, f90, w);
+}
+
+vec3 FresnelSchlick(float ct, vec3 f0, vec3 f90)
+{
+    float x = 1.0 - ct;
+    float w = (x*x) * (x*x) * x;
+
+    return mix(f0, f90, w);
+}
+
+
+float GGX_V(float NoL, float NoV, float alpha)
+{
+	float aa = alpha*alpha;
+    
+	float t0 = NoL * sqrt((-NoV * aa + NoV ) * NoV + aa);
+	float t1 = NoV * sqrt((-NoL * aa + NoL ) * NoL + aa);
+	
+    return 0.5 / (t0 + t1);
+}
+
+float GGX_G(float NoL, float NoV, float alpha)
+{
+	float aa = alpha * alpha;
+    
+	float t0 = NoL * sqrt((-NoV * aa + NoV ) * NoV + aa);
+	float t1 = NoV * sqrt((-NoL * aa + NoL ) * NoL + aa);
+	
+    return (NoL * NoV * 2.0) / (t0 + t1);
+}
+
+float GGX_D(float NoH, float alpha)
+{
+    float aa = alpha * alpha;
+    
+    float t = (NoH * aa - NoH) * NoH + 1.0;
+
+	return aa / (pi * (t * t));
+}
+
+/*
+#elif 0
+float GGX_D(float NoH, float a)
+{
+    //float t = (NoH * (a*a) - NoH) * NoH + 1.0;
+	//return (a*a-1.0) / (log(a*a) * pi * (t));
+    
+    float t = (NoH * (a*a) - NoH) * NoH + 1.0;
+	return (a*a-1.0) / (log(a*a*2.0/(1.0+a*a)) * pi * (t))*0.5;
+}
+#else
+float GGX_D(float NoH, float a)
+{
+    float t = (NoH * (a*a) - NoH) * NoH + 1.0;
+	float n = (a*a-1.0) / (log(a*a) * pi * (t));
+    
+    float t2 = (NoH * (a*a) - NoH) * NoH + 1.0;
+	float n2 = (a*a) / (pi * (t2 * t2));
+    
+    return mix(n, n2, 0.99);
+}
+#endif
+*/
+
+float GGX_G(float ct, float alpha)
+{
+    float aa = alpha * alpha;
+    float ct2 = ct * ct;
+    
+    return 2.0 * ct / (ct + sqrt(aa + ct2 - aa * ct2));
+}
+
+vec3 GGX_BRDF(vec3 N, vec3 V, vec3 L, float alpha, vec3 f0)
+{
+    vec3 H  = normalize(V + L);
+    float VoH = clamp01(dot(V, H));
+    float NoH = clamp01(dot(N, H));
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    
+    float denom = NoV * NoL;
+
+    if (denom == 0.0) return vec3(0.0);
+
+    float D = GGX_D(NoH, alpha);
+    float G = GGX_G(NoL, NoV, alpha);
+    vec3  F = FresnelSchlick(VoH, f0);
+
+    return (F * G * D) * 0.25 / denom;
+}
+
+vec3 GGX_R(vec3 N, vec3 V, vec3 L, float alpha, vec3 f0)
+{
+    vec3 H  = normalize(V + L);
+    float VoH = clamp01(dot(V, H));
+    float NoH = clamp01(dot(N, H));
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    
+    float denom = NoV;
+
+    if (denom == 0.0) return vec3(0.0);
+
+    float D = GGX_D(NoH, alpha);
+    float G = GGX_G(NoL, NoV, alpha);
+    vec3  F = FresnelSchlick(VoH, f0);
+
+    return (F * G * D) * 0.25 / denom;
+}
+
+
+float GGXAlphaFromRoughness(float roughness) 
+{
+    return roughness * roughness;
+}
+
+float F0FromReflectance(float reflectance)
+{
+    return reflectance * reflectance * 0.16;
+}
+
+void ConvertMtlParams(vec3 color, float reflectance, float metalness, out vec3 albedo, out vec3 F0)
+{
+    F0 = mix(vec3(F0FromReflectance(reflectance)), color, metalness);
+    
+    albedo = color * (1.0 - metalness);
+}
+                      
+
+/* https://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf */ 
+/* https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf */
+float DisneyDiffuse_BRDF(float NoV, float NoL, float HoL, float linearRoughness)
+{
+	float energyBias   = mix(0.0,     0.5 , linearRoughness);
+	float energyFactor = mix(1.0, 1.0/1.51, linearRoughness);
+    
+	float fd90 = energyBias + 2.0 * (HoL*HoL) * linearRoughness;
+    
+	const float f0 = 1.0;
+    
+	float lightScatter = FresnelSchlick(NoL, f0, fd90);
+	float viewScatter  = FresnelSchlick(NoV, f0, fd90);
+	
+	return lightScatter * viewScatter * energyFactor * rpi;
+}
+
+/* https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf */
+vec3 Frostbite_R(vec3 V, vec3 N, vec3 L, vec3 albedo, float roughness, vec3 F0)
+{    
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 H = normalize(V + L);
+    
+    float NoH = clamp01(dot(N, H));
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    float HoV = clamp01(dot(H, V));
+    
+    if(NoL == 0.0 || NoV == 0.0) return vec3(0.0);
+    
+    float D   = GGX_D(NoH,      alpha);
+    float Vis = GGX_V(NoL, NoV, alpha);
+    float G   = GGX_G(NoV, NoL, alpha);
+    
+    vec3 F = FresnelSchlick(HoV, F0);
+
+    vec3 diffuse = albedo * DisneyDiffuse_BRDF(NoV, NoL, HoV, roughness);
+
+    return (diffuse + D * F * Vis) * NoL;
+}
+
+
+/* Eric Heitz | Sampling the GGX Distribution of Visible Normals | http://jcgt.org/published/0007/04/01/ */
+// Input Ve: view direction
+// Input alpha_x, alpha_y: roughness parameters
+// Input U1, U2: uniform random numbers
+// Output Ne: normal sampled with PDF D_Ve(Ne) = G1(Ve) * max(0, dot(Ve, Ne)) * D(Ne) / Ve.z
+vec3 Sample_GGX_VNDF(vec3 Ve, float alpha_x, float alpha_y, float U1, float U2)
+{
+	// Section 3.2: transforming the view direction to the hemisphere configuration
+	vec3 Vh = normalize(Ve * vec3(alpha_x, alpha_y, 1.0));
+	
+    // Section 4.1: orthonormal basis (with special case if cross product is zero)
+	float lensq = (Vh.x*Vh.x) + (Vh.y*Vh.y);
+	vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+	vec3 T2 = cross(Vh, T1);
+	
+    // Section 4.2: parameterization of the projected area
+	float r = sqrt(U1);
+	float phi = 2.0 * pi * U2;
+	float t1 = r * cos(phi);
+	float t2 = r * sin(phi);
+	float s = 0.5 * (1.0 + Vh.z);
+	t2 = (1.0 - s)*sqrt(1.0 - t1*t1) + s*t2;
+    
+	// Section 4.3: reprojection onto hemisphere
+	vec3 Nh = t1*T1 + t2*T2 + sqrt(max(0.0, 1.0 - t1*t1 - t2*t2))*Vh;
+    
+	// Section 3.4: transforming the normal back to the ellipsoid configuration
+	vec3 Ne = normalize(vec3(Nh.xy, max(0.0, Nh.z)) * vec3(alpha_x, alpha_y, 1.0));
+    
+	return Ne;
+}
+
+#if 1
+// routines that sample the visible distribution of microfacet normals
+
+// s [0..1]
+void Sample_GGX_R(vec2 s, vec3 V, vec3 N, float alpha, vec3 F0, out vec3 L, out vec3 w)
+{
+    vec3 H;
+    {
+    	vec3 ox, oz;
+		OrthonormalBasisRH(N, /*out*/ ox, oz);
+    	
+    	vec3 Vp = vec3(dot(V, ox), dot(V, oz), dot(V, N));
+    	
+        vec3 Hp = Sample_GGX_VNDF(Vp, alpha, alpha, s.x, s.y);
+    	
+        H = ox*Hp.x + N*Hp.z + oz*Hp.y;
+    }
+    
+    vec3 F = FresnelSchlick(dot(H, V), F0);
+
+    L = 2.0 * dot(V, H) * H - V;
+    
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    
+    float G2 = GGX_G(NoV, NoL, alpha);
+    float G1 = GGX_G(NoV, alpha);
+    
+    w = G1 == 0.0 ? vec3(0.0) : F * G2 / G1;
+}
+
+// s [0..1]
+void Sample_GGX_R(vec2 s, vec3 V, vec3 N, float alpha, vec3 F0, out vec3 L, out vec3 f, out float pdf)
+{
+    vec3 H;
+    {
+    	vec3 ox, oz;
+		OrthonormalBasisRH(N, /*out*/ ox, oz);
+    	
+    	vec3 Vp = vec3(dot(V, ox), dot(V, oz), dot(V, N));
+    	
+        vec3 Hp = Sample_GGX_VNDF(Vp, alpha, alpha, s.x, s.y);
+    	
+        H = ox*Hp.x + N*Hp.z + oz*Hp.y;
+    }
+    
+    vec3 F = FresnelSchlick(dot(H, V), F0);
+
+    L = 2.0 * dot(H, V) * H - V;
+    
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    float HoV = clamp01(dot(H, V));
+    float NoH = clamp01(dot(N, H));
+    
+    float G1 = GGX_G(NoV, alpha);
+    float G2 = GGX_G(NoV, NoL, alpha);
+    float D  = GGX_D(NoH, alpha);
+    
+    f   = NoV == 0.0 ? vec3(0.0) : (F * G2 * D) * 0.25 / NoV;
+    pdf = NoV == 0.0 ?      0.0  : (    G1 * D) * 0.25 / NoV;
+}
+
+float EvalPDF_GGX_R(vec3 V, vec3 N, vec3 L, float alpha)
+{
+    vec3 H = normalize(V + L);
+    float NoH = clamp01(dot(N, H));
+    float NoV = clamp01(dot(N, V));
+    
+    /*
+    float G1 = GGX_G(NoV, alpha);
+    float D  = GGX_D(NoH, alpha);
+    
+    return (G1 * D) * 0.25 / NoV;
+    /*/
+    float alpha2 = alpha*alpha;
+    float NoV2 = NoV*NoV;
+    
+    float t0 =     (NoH  *  alpha2 - NoH) * NoH + 1.0;
+    float t1 = sqrt(NoV2 * -alpha2 + NoV2 + alpha2) + NoV;
+    
+    float denom = (t0*t0) * t1;
+    
+    return denom == 0.0 ? 0.0 : (alpha2 * rpi2) / denom;
+    //*/
+}
+
+#else
+// routines that sample the distribution of microfacet normals (ignoring visibility)
+
+// s [0..1]
+void Sample_GGX_R(vec2 s, vec3 V, vec3 N, float alpha, vec3 F0, out vec3 L, out vec3 w)
+{
+    float l = rsqrt((alpha*alpha)/s.y + 1.0 - (alpha*alpha));
+    
+    vec3 H = Sample_Sphere(s.x * 2.0 - 1.0, l, N);
+
+    L = 2.0 * dot(V, H) * H - V;
+    
+    float HoV = clamp01(dot(H, V));
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    float NoH = clamp01(dot(N, H));
+
+    vec3  F = FresnelSchlick(HoV, F0);  
+    float G = GGX_G(NoV, NoL, alpha);
+    
+    float denom = NoV * NoH;
+    
+    w = denom == 0.0 ? vec3(0.0) : F * G * HoV / denom;
+}
+
+// s [0..1]
+void Sample_GGX_R(vec2 s, vec3 V, vec3 N, float alpha, vec3 F0, out vec3 L, out vec3 f, out float pdf)
+{
+    float l = rsqrt((alpha*alpha)/s.y + 1.0 - (alpha*alpha));
+    
+    vec3 H = Sample_Sphere(s.x * 2.0 - 1.0, l, N);
+
+    L = 2.0 * dot(V, H) * H - V;
+    
+    float HoV = clamp01(dot(H, V));
+    float NoV = clamp01(dot(N, V));
+    float NoL = clamp01(dot(N, L));
+    float NoH = clamp01(dot(N, H));
+
+    vec3 F = FresnelSchlick(HoV, F0);  
+    float G = GGX_G(NoL, NoV, alpha);
+    float D = GGX_D(NoH, alpha);
+    
+    f   = NoV == 0.0 ? vec3(0.0) : (F * G  * D) * 0.25 / NoV;
+    pdf = HoV == 0.0 ?      0.0  : (   NoH * D) * 0.25 / HoV;
+}
+
+float EvalPDF_GGX_R(vec3 V, vec3 N, vec3 L, float alpha)
+{
+    vec3 H = normalize(V + L);
+    float NoH = clamp01(dot(N, H));
+    float HoV = clamp01(dot(H, V));
+    
+    float D  = GGX_D(NoH, alpha);
+    
+    return HoV == 0.0 ? 0.0 : (NoH * D) * 0.25 / HoV;
+}
+#endif
+
+
+// s0 [0..1], s1 [0..1], s2 [0..1]
+void Sample_ScatteredDir(vec2 s0, vec2 s1, float s2, inout vec3 rd, inout vec3 W, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 V = -rd;
+
+    vec3 L0, w0;
+    {
+        vec3 L = Sample_ClampedCosineLobe(s0.x * 2.0 - 1.0, s0.y, N);
+        
+        vec3 H = normalize(V + L);
+        
+        float HoV = clamp01(dot(H, V));
+    	float NoV = clamp01(dot(N, V));
+    	float NoL = clamp01(dot(N, L));
+        
+    	w0 = albedo * DisneyDiffuse_BRDF(NoV, NoL, HoV, roughness) * pi;
+        L0 = L;
+    }
+    
+    vec3 L1, w1;
+    {
+        vec3 L, w;
+    	Sample_GGX_R(s1, V, N, alpha, F0, /*out*/ L1, /*out*/ w1);
+    }
+
+    float w0s = dot(w0, vec3(0.2, 0.7, 0.1));
+    float w1s = dot(w1, vec3(0.2, 0.7, 0.1));
+    
+    if(w0s == 0.0 && w1s == 0.0)
+    {
+        W = vec3(0.0);
+        rd = L0;
+        
+        return;
+    }
+    
+    #if 0
+    w0s = 0.5;
+    w1s = 1.0 - w0s;
+    #elif 0
+    float wn = (w0s*w0s) / ((w0s*w0s) + (w1s*w1s));
+    #else
+    float wn = w0s / (w0s + w1s);
+	#endif
+    
+    bool doUseSmpl0 = s2 <= wn;
+
+    float denom = doUseSmpl0 ? wn : (1.0 - wn);
+
+    rd = doUseSmpl0 ? L0 : L1;
+    W *= doUseSmpl0 ? w0 : w1;
+
+    W /= denom == 0.0 ? 1.0 : denom;
+}
+
+// s0 [0..1], s1 [0..1], s2 [0..1]
+void Sample_ScatteredDirMIS(vec2 s0, vec2 s1, float s2, inout vec3 rd, inout vec3 W, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 V = -rd;
+
+    vec3 L0; float pdf00;
+    {
+        L0 = Sample_ClampedCosineLobe(s0.x * 2.0 - 1.0, s0.y, N);
+		pdf00 = dot(N, L0) * rpi;        
+    }
+
+    vec3 L1; vec3 f1; float pdf11;
+    Sample_GGX_R(s1, V, N, alpha, F0, /*out*/ L1, /*out*/ f1, /*out*/ pdf11);
+
+    vec3 f0 = Frostbite_R(V, N, L0, albedo, roughness, F0);
+         f1 = Frostbite_R(V, N, L1, albedo, roughness, F0);
+
+    float pdf01 = dot(N, L1) * rpi;
+    float pdf10 = EvalPDF_GGX_R(V, N, L0, alpha);
+
+    float w0, w1;
+    #if 0
+    w0 = 0.5; 
+    w1 = 1.0 - w1;
+    #elif 1
+    w0 = Pow2(pdf00) / (Pow2(pdf00) + Pow2(pdf10));
+    w1 = Pow2(pdf11) / (Pow2(pdf11) + Pow2(pdf01));        
+    #else
+    w0 = (pdf00) / ((pdf00) + (pdf10));
+    w1 = (pdf11) / ((pdf11) + (pdf01));  
+    #endif
+
+    #if 0
+    if(albedo.r == 0.0 && albedo.g == 0.0 && albedo.b == 0.0)
+    {
+    	w0 = 0.0;
+    	w1 = 1.0;
+    }
+    #endif
+    
+    float wn = w0 / (w0 + w1);
+
+    bool doUseSmpl0 = s2 <= wn;
+
+    float denom = doUseSmpl0 ? pdf00 *        wn : 
+                               pdf11 * (1.0 - wn);
+
+    rd = doUseSmpl0 ? L0 : L1;
+
+    if(denom == 0.0)
+    {
+        W = vec3(0.0);
+        
+        return;
+    }
+    
+    if(doUseSmpl0)
+        W *= f0 * w0;
+    else
+        W *= f1 * w1;
+
+    W /= denom;
+}
+
+
+
+float Intersect_Ray_Sphere(
+vec3 rp, vec3 rd, 
+vec3 sp, float sr2, 
+out vec2 t)
+{	
+	rp -= sp;
+	
+	float a = dot(rd, rd);
+	float b = 2.0 * dot(rp, rd);
+	float c = dot(rp, rp) - sr2;
+	
+	float D = b*b - 4.0*a*c;
+	
+	if(D < 0.0) return 0.0;
+	
+	float sqrtD = sqrt(D);
+	// t = (-b + (c < 0.0 ? sqrtD : -sqrtD)) / a * 0.5;
+	t = (-b + vec2(-sqrtD, sqrtD)) / a * 0.5;
+	
+	// if(start == inside) ...
+	if(c < 0.0) t.xy = t.yx;
+
+	// t.x > 0.0 || start == inside ? infront : behind
+	return t.x > 0.0 || c < 0.0 ? 1.0 : -1.0;
+}
+
+float Intersect_Ray_Cube(vec3 rp, vec3 rd, vec3 cth, out vec2 t)
+{	
+	vec3 m = 1.0 / -rd;
+	vec3 o = If(lessThan(rd, vec3(0.0)), -cth, cth);
+	
+	vec3 uf = (rp + o) * m;
+	vec3 ub = (rp - o) * m;
+	
+	t.x = max(uf.x, max(uf.y, uf.z));
+	t.y = min(ub.x, min(ub.y, ub.z));
+	
+	bool inside = t.x < 0.0 && t.y > 0.0;
+    
+	if(inside) {return 0.0;}
+	
+	return t.y < t.x ? -1.0 : (t.x > 0.0 ? 1.0 : -1.0);
+}
+
+//-----------------------------------------------------------------------
+
+// Lincense: CC0 (https://creativecommons.org/publicdomain/zero/1.0/)
+
+/*
+Basic implementation of Frostbite's material + relevant sampling strategies.
+Camera controls via mouse + shift key.
+
+References:
+	https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+	https://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf
+
+The bulk of the material specific code is in the Common tab; direct light sampling routines + rendering in BufferA. Tonemapping in Image.
+*/
+
+
+////////////////////////////////////////////////////////////
+//--------------------------------------------------------//
+#define KEY_LEFT  37
+#define KEY_UP    38
+#define KEY_RIGHT 39
+#define KEY_DOWN  40
+
+#define KEY_SHIFT 0x10
+#define KEY_A 0x41
+#define KEY_D 0x44
+#define KEY_S 0x53
+#define KEY_W 0x57
+
+#define KeyBoard iChannel1
+
+float ReadKey(int keyCode) {return texelFetch(KeyBoard, ivec2(keyCode, 0), 0).x;}
+
+
+#define VarTex iChannel0
+#define OutCol outCol
+#define OutChannel w
+
+#define WriteVar(v, cx, cy) {if(uv.x == float(cx) && uv.y == float(cy)) OutCol.OutChannel = v;}
+#define WriteVar4(v, cx, cy) {WriteVar(v.x, cx, cy) WriteVar(v.y, cx, cy + 1) WriteVar(v.z, cx, cy + 2) WriteVar(v.w, cx, cy + 3)}
+
+// float ReadVar(int cx, int cy) {return texelFetch(VarTex, ivec2(cx, cy), 0).OutChannel;}
+
+float ReadVar(int face, int cx, int cy) {
+    // Convert the face index and (cx, cy) coordinates into a direction vector.
+    vec3 direction;
+    
+    // Normalize cx and cy to be in the range [-1, 1]
+    float s = 2.0 * (float(cx) / textureSize(VarTex, 0).x) - 1.0;
+    float t = 2.0 * (float(cy) / textureSize(VarTex, 0).y) - 1.0;
+
+    // Map to a cube map face
+    if (face == 0) {        // Positive X
+        direction = vec3(1.0, t, -s);
+    } else if (face == 1) { // Negative X
+        direction = vec3(-1.0, t, s);
+    } else if (face == 2) { // Positive Y
+        direction = vec3(s, 1.0, -t);
+    } else if (face == 3) { // Negative Y
+        direction = vec3(s, -1.0, t);
+    } else if (face == 4) { // Positive Z
+        direction = vec3(s, t, 1.0);
+    } else if (face == 5) { // Negative Z
+        direction = vec3(-s, t, -1.0);
+    } else {
+        // Invalid face, return 0 or some error value
+        return 0.0;
+    }
+
+    // Fetch the texel color from the cube map
+    return texture(VarTex, normalize(direction)).r; // .r accesses the red channel
+}
+
+
+// vec4 ReadVar4(int cx, int cy) {return vec4(ReadVar(face, cx, cy), ReadVar(face, cx, cy + 1), ReadVar(face, cx, cy + 2), ReadVar(face, cx, cy + 3));}
+
+// Read four consecutive channels from the given face of the cube map
+vec4 ReadVar4(int face, int cx, int cy) {
+    return vec4(
+        ReadVar(face, cx, cy),
+        ReadVar(face, cx, cy + 1),
+        ReadVar(face, cx, cy + 2),
+        ReadVar(face, cx, cy + 3)
+    );
+}
+
+//--------------------------------------------------------//
+////////////////////////////////////////////////////////////
+
+
+// settings for the spherical light sources:
+const vec3 LightPos = vec3(0.0, 8.0, 0.0);
+const float R2 = 16.1;// squared radius
+const float Flux = 512.0;
+
+const float A = R2 * 4.0 * Pi;
+
+const float HemiSphProjOmega = Pi;
+const float SphOmega = 4.0 * Pi;
+
+const float Radiance = Flux / A / HemiSphProjOmega;
+const float Intensity = Flux / SphOmega; // = Radiance * (HemiSphProjOmega * R2);
+
+
+// voxel-based, Cornell box-like scene:
+bool map(vec3 p)
+{
+    p += 0.5;
+    vec3 b = abs(p);
+    
+    bool r;
+    
+    r =      b.x < 8.0;
+    r = r && b.y < 8.0;
+    r = r && b.z < 8.0;
+    
+    r = r && !(b.x < 7.0 && b.y < 7.0 && p.z > -7.0);
+   
+    r = r || (p.x > 1.0 && p.x < 5.0 && p.z > 1.0 && p.z < 5.0 && p.y > -8.0 && p.y < -3.0);
+    r = r || (p.x >-5.0 && p.x <-1.0 && p.z > -5.0 && p.z <-1.0 && p.y > -8.0 && p.y < 0.0);
+    
+    float ws = 2.0;
+    //if(p.y > 7.0 && b.x < ws && b.z < ws) r = false;
+    
+    return r;
+}
+
+// albedo:
+vec3 mapC(vec3 p)
+{
+    p += 0.5;
+    vec3 b = abs(p);
+    
+    vec3 c = vec3(1.0);
+    
+    if(b.y < 7.0 && p.z > -7.0) 
+        if(p.x < -7.0) 
+            c = vec3(1.0, 0.2, 0.01);//orange wall
+        else if(p.x > 7.0) 
+            c = vec3(0.01, 0.3, 1.0);// blue wall
+        
+
+    return c;
+}
+
+vec3 minmask(vec3 v)
+{
+    return vec3(v.x <= v.y && v.x <= v.z,
+                v.y <  v.z && v.y <  v.x,
+                v.z <  v.x && v.z <= v.y);
+}
+
+// modified version of iq's DDA implementation: https://www.shadertoy.com/view/4dfGzs
+bool VoxelRayCast(vec3 rp, vec3 rd, /**/ out vec3 vp, out vec3 n, out float t)
+{
+	vec3 pos = floor(rp);
+	vec3 ri = 1.0/rd;
+	vec3 rs = sign(rd);
+	vec3 off = (-rp + (rs * 0.5 + 0.5)) * ri;
+
+	vec3 mm = vec3(0.0);
+    
+	if(map(pos)) { t = 0.0; n = vec3(0.0); vp = pos; return true; }
+    
+	bool hit = false;
+	for(int i = 0; i < 128; i++) 
+	{        
+        vec3 dis = pos * ri + off;
+
+        mm = minmask(dis);
+            
+        pos += mm * rs;
+        
+		if(map(pos)) { hit = true; break; }
+	}
+	
+    // intersect the cube	
+    vec3 mini = (pos - rs) * ri + off;   
+	t = max(mini.x, max(mini.y, mini.z));
+
+	n = -mm * rs;
+	vp = pos;
+
+	return hit;
+}
+
+
+bool Intersect_Scene(vec3 rp, vec3 rd, bool isPrimaryRay,
+                     out float t, out vec3 n, out vec3 a, inout bool hitLight)
+{
+    bool doTestLight = hitLight;
+    hitLight = false;
+        
+    vec3 vp;
+    bool hit = VoxelRayCast(rp, rd, /*out*/ vp, n, t);
+    
+    //a = vec3(1.0);
+    a = mapC(vp);
+    
+	if(doTestLight)    
+    {
+        vec2 t0;
+		float hit0 = Intersect_Ray_Sphere(rp, rd, LightPos, R2, /*out*/ t0);
+        
+        if(hit0 == 1.0)
+        {
+            if(!hit || t0.x < t)
+            {
+                t = t0.x;
+                n = normalize(rp + rd * t0.x - LightPos);
+                a = vec3(1.0);
+                
+                hitLight = true;
+            }
+            
+            hit = true;
+        }
+    }
+    
+    return hit;
+}
+
+// --------------------------------------------------------------------------------------------------------------------------
+vec3 Sample_PointLight(vec3 V, vec3 p, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 pl = LightPos;
+    vec3 vecl = pl - p;
+    vec3 L = normalize(vecl);
+    float d2 = dot(vecl, vecl);
+
+    float t2; vec3 n2; vec3 a2; bool hitLight2 = false;
+    bool hit = Intersect_Scene(p, L, false, /*out*/ t2, n2, a2, hitLight2);
+
+    if(hit && t2*t2 < d2) return vec3(0.0);
+        
+    float att = 1.0 / d2;
+
+    return Frostbite_R(V, N, L, albedo, roughness, F0) * att * Intensity;
+}
+
+vec3 Sample_DirLight(vec3 V, vec3 p, vec3 N, vec3 L, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    float t2; vec3 n2; vec3 a2; bool hitLight2 = false;
+    bool hit = Intersect_Scene(p, L, false, /*out*/ t2, n2, a2, hitLight2);
+
+    if(hit) return vec3(0.0);
+
+    return Frostbite_R(V, N, L, albedo, roughness, F0) * (Intensity * Pow2(0.125));// just set brightness heuristically here based on point light intensity
+}
+
+
+vec3 Sample_SphLight_HemiSph(vec3 V, vec3 p, vec3 N, inout uint h, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 L;
+    {
+        float h0 = Hash11(h);
+        float h1 = Hash01(h);
+        	  
+        L = Sample_Sphere(h0, h1, N);
+    }
+
+    float t2; vec3 n2; vec3 a2; bool isLight2 = true;
+    bool hit = Intersect_Scene(p, L, false, /*out*/ t2, n2, a2, isLight2);
+
+    if(!isLight2) return vec3(0.0);
+    
+    float NoL = clamp01(dot(N, L));
+    
+    return Frostbite_R(V, N, L, albedo, roughness, F0) * Radiance * NoL * pi2;
+}
+
+vec3 Sample_SphLight_ClmpCos(vec3 V, vec3 p, vec3 N, inout uint h, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    vec3 L;
+    {
+        float h0 = Hash11(h);
+        float h1 = Hash01(h);
+
+        L = Sample_ClampedCosineLobe(h0, h1, N);
+    }
+
+    float t2; vec3 n2; vec3 a2; bool isLight2 = true;
+    bool hit = Intersect_Scene(p, L, false, /*out*/ t2, n2, a2, isLight2);
+
+    if(!isLight2) return vec3(0.0);
+    
+    return Frostbite_R(V, N, L, albedo, roughness, F0) * Radiance * pi;
+}
+
+// s [0..1]
+vec3 Sample_SphLight_SolidAngle(vec2 s, vec3 V, vec3 p, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    float ct; vec3 Lc, L; float sang;
+    Sample_SolidAngle(s, p, LightPos, R2, /*out*/ ct, /*out*/ Lc, /*out*/ L, /*out*/ sang);
+
+    float NoL = dot(N, L);
+
+    if(NoL <= 0.0) return vec3(0.0);
+    
+    float t2; vec3 n2; vec3 a2; bool isLight2 = true;
+    bool hit = Intersect_Scene(p, L, false, /*out: */ t2, n2, a2, isLight2);
+
+    if(!isLight2 && t2 < dot(LightPos-p, Lc)) return vec3(0.0);
+    
+    vec3 f = Frostbite_R(V, N, L, albedo, roughness, F0);
+    float rpdf = sang;
+
+    return f * rpdf * Radiance;
+}
+
+// s0 [0..1], s1 [0..1]
+vec3 Sample_SphLight_MIS(vec2 s0, vec2 s1, vec3 V, vec3 p, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    float ct; vec3 Lc, L0; float sang;
+    Sample_SolidAngle(s0, p, LightPos, R2, /*out*/ ct, /*out*/ Lc, /*out*/ L0, /*out*/ sang);
+    float pdf00 = 1.0/sang;
+
+    vec3 L1; vec3 f1; float pdf11;
+    Sample_GGX_R(s1, V, N, alpha, F0, /*out*/ L1, /*out*/ f1, /*out*/ pdf11);
+
+    bool couldL1HitLight = dot(L1, Lc) > ct;
+    
+    vec3 f0 = Frostbite_R(V, N, L0, albedo, roughness, F0);
+         f1 = Frostbite_R(V, N, L1, albedo, roughness, F0);
+
+    float pdf01 = couldL1HitLight ? pdf00 : 0.0;
+    float pdf10 = EvalPDF_GGX_R(V, N, L0, alpha);
+
+    float w0, w1;
+    #if 1
+    w0 = (pdf00) / (Pow2(pdf00) + Pow2(pdf10));
+    w1 = (pdf11) / (Pow2(pdf11) + Pow2(pdf01));        
+    #else
+    w0 = 1.0 / (pdf00 + pdf23);
+    w1 = 1.0 / (pdf11 + pdf32);
+    #endif
+
+    float t2; vec3 n2; vec3 a2; bool isLight2 = true;
+    bool hit2 = Intersect_Scene(p, L0, false, /*out*/ t2, n2, a2, isLight2);
+
+    float t3; vec3 n3; vec3 a3; bool isLight3 = true;
+    bool hit3 = Intersect_Scene(p, L1, false, /*out*/ t3, n3, a3, isLight3);
+
+    if((isLight2 == false && t2 < dot(LightPos-p, Lc)) || dot(N, L0) <= 0.0) f0 = vec3(0.0);
+    if(couldL1HitLight == false || isLight3 == false) f1 = vec3(0.0);
+
+    vec3 res  = pdf00 == 0.0 ? vec3(0.0) : f0 * w0;
+         res += pdf11 == 0.0 ? vec3(0.0) : f1 * w1;
+
+    return res * Radiance;       
+}
+
+// single sample version of Sample_SphLight_MIS; use this if intersecting the scene is expensive
+// s0 [0..1], s1 [0..1], s2 [0..1]
+vec3 Sample_SphLight_MIS2(vec2 s0, vec2 s1, float s2, vec3 V, vec3 p, vec3 N, vec3 albedo, float roughness, vec3 F0)
+{
+    float alpha = GGXAlphaFromRoughness(roughness);
+    
+    float ct; vec3 Lc, L0; float sang;
+    Sample_SolidAngle(s0, p, LightPos, R2, /*out*/ ct, /*out*/ Lc, /*out*/ L0, /*out*/ sang);
+    float pdf00 = 1.0/sang;
+
+    vec3 L1; vec3 f1; float pdf11;
+    Sample_GGX_R(s1, V, N, alpha, F0, /*out*/ L1, /*out*/ f1, /*out*/ pdf11);
+
+    bool couldL1HitLight = dot(L1, Lc) > ct;
+    
+    vec3 f0 = Frostbite_R(V, N, L0, albedo, roughness, F0);
+         f1 = Frostbite_R(V, N, L1, albedo, roughness, F0);
+
+    float pdf01 = couldL1HitLight ? pdf00 : 0.0;
+    float pdf10 = EvalPDF_GGX_R(V, N, L0, alpha);
+
+    float w0, w1;
+    #if 1
+    w0 = Pow2(pdf00) / (Pow2(pdf00) + Pow2(pdf10));
+    w1 = Pow2(pdf11) / (Pow2(pdf11) + Pow2(pdf01));        
+    #elif 1
+    w0 = (pdf00) / ((pdf00) + (pdf10));
+    w1 = (pdf11) / ((pdf11) + (pdf01)); 
+    #else
+    w0 = 0.5; 
+    w1 = 1.0 - w1;
+    #endif
+
+    float wn = couldL1HitLight == false ? 1.0 : w0 / (w0 + w1);
+
+    bool doUseSmpl0 = s2 <= wn;
+
+    float denom = doUseSmpl0 ? pdf00 * wn : pdf11 * (1.0 - wn);
+
+    vec3 L = doUseSmpl0 ? L0 : L1;
+
+    if(dot(N, L) <= 0.0 || denom == 0.0) return vec3(0.0);
+    
+    float t2; vec3 n2; vec3 a2; bool isLight2 = true;
+    bool hit2 = Intersect_Scene(p, L, false, /*out*/ t2, n2, a2, isLight2);
+
+    if(hit2 && isLight2)
+    {
+        if(doUseSmpl0)
+            return f0 / denom * w0 * Radiance;
+        else
+            return f1 / denom * w1 * Radiance;
+    }
+}
+
+
+// sRGB => XYZ => D65_2_D60 => AP1
+const mat3 sRGBtoAP1 = mat3
+(
+	0.613097, 0.339523, 0.047379,
+	0.070194, 0.916354, 0.013452,
+	0.020616, 0.109570, 0.869815
+);
+
+vec3 MapColor(vec3 srgb)
+{
+    #ifdef USE_ACESCG
+    return srgb * sRGBtoAP1;
+    #else
+    return srgb;
+    #endif
+}
+
+vec3 UnitDiskToHemisphere(vec2 p)
+{
+    float s = dot(p, p);
+    float l = sqrt(2.0 - s);
+    
+    return vec3(p.x * l, 1.0 - s, p.y * l);
+}
+
+
+void main()
+{     
+    
+	vec2 uvO = jit_in.uv * viewPort.xy;
+
+    float aspect = viewPort.x / viewPort.y;
+    
+    vec2 iResolution2 = viewPort.xy;
+    vec2 uv0 = uvO;
+    
+    bool isRight = false;
+    
+    #if 0
+    if(uv0.x >= iResolution.x * 0.5)
+    {
+       uv0.x -= iResolution.x * 0.5;
+       isRight = true;
+    }
+    
+    iResolution2.x = iResolution.x * 0.5;
+    #endif
+    
+    vec2 uv = uv0.xy - 0.5;
+	vec2 tex = uv0.xy / iResolution2.xy;
+    vec2 tex21 = tex * 2.0 - vec2(1.0);
+    
+    vec4 mouseAccu  = ReadVar4(0, 1, 0);
+    vec4 wasdAccu   = ReadVar4(0, 2, 0);
+    float frameAccu = ReadVar (0, 3, 0);
+
+
+    vec2 ang = vec2(-0.42 * Pi, -Pi * 0.08);
+    ang += mouseAccu.xy * 0.008;
+    
+    mat3 cmat;
+    {
+        float sinPhi   = sin(ang.x);
+        float cosPhi   = cos(ang.x);
+        float sinTheta = sin(ang.y);
+        float cosTheta = cos(ang.y);    
+
+        vec3 front = vec3(cosPhi * cosTheta, 
+                                   sinTheta, 
+                          sinPhi * cosTheta);
+
+        vec3 right = vec3(-sinPhi, 0.0, cosPhi);
+        
+        vec3 up    = vec3(-cosPhi * sinTheta,
+                                    cosTheta,
+                          -sinPhi * sinTheta);
+        
+        cmat = mat3(right, up, front);
+    }
+    
+    float cdist = exp2(2.5 + mouseAccu.w * 0.02);
+    vec3 cpos = -cmat[2] * cdist;
+    
+
+    uint frameNum = uint(frameAccu);
+    
+    uint h = WellonsHash(uvec3(uv, frameNum), 0u).x;
+    uvec2 hh = WellonsHash(uvec2(uv), 0u).xy;
+    uint hh1 = WellonsHash(uvec2(uv), 0u).z;
+    
+    vec2 tc;
+    {
+        vec2 off;
+        {
+            // filter kernel:
+            float h0 = Hash11(h);
+            float h1 = Hash11(h);
+            
+        	off = vec2(Sample_Triangle(h0), 
+                       Sample_Triangle(h1));
+        }
+
+       #ifdef USE_BLOOM
+       //if(false)
+        {
+            // heavy tail bloom kernel:
+            vec2 h01 = Float01(Roberts(hh, frameNum));
+            float h0 = h01.x*2.0-1.0;
+            float rr = h01.y;
+            
+            vec2 dir = AngToVec(h0 * Pi);
+            float r = sqrt(rr);
+            
+           #if 0
+           
+            r = sqrt(2.0*rr-rr*rr) / (1.0 - rr);
+            
+           #elif 0
+           
+            r = tan(r*Pi*0.5)/(Pi)*2.0;
+            r=r*r;
+            r*=0.125*0.125;
+            
+           #elif 1
+           
+            r = rr / (1.0 - rr);
+            
+            float s = 0.5;
+            r = (sqrt(s*s+r*r)-s)*(s+sqrt(1.0+s*s));
+            
+            r*= 0.0001 * iResolution.x;
+           
+           #elif 1
+           
+            r = log((1.0+r)/(1.0-r))*0.3;
+            r*=r;
+            r*=r;
+            r*=r;
+           
+           #endif
+           
+        	off += AngToVec(h0 * Pi) * r;
+        }
+       #endif
+        
+       #ifdef USE_BLOOM
+       //if(false)
+        if(((frameNum + hh1) % 16u) == 0u) 
+        {
+            // blobby bloom kernel:
+            vec2 h01 = Float01(Roberts(uvec2(0u), (frameNum + hh1) / 16u));
+            float h0 = h01.x*2.0-1.0;
+            float rr = h01.y;
+            
+            vec2 dir = AngToVec(h0 * Pi);
+            float r = sqrt(rr);
+            
+           #if 0
+           
+           float s = 64.0*(rr+.5);// * (rr*rr);
+           
+           float bump = pow(clamp01(1.0-Pow2(r*2.0-1.0)), 32.0);
+           //bump = 0.0;
+           
+           //rr = mix((cos(rr*s)+rr*s-1.0)/s, rr, 0.5);
+           
+           r = (sqrt(1.0/pow(1.0-rr, 8.0) - 1.0)-0.75*bump)*0.5;
+           
+           #elif 0
+           
+           r = sqrt(1.0/((rr*rr) * (rr*rr)) - 1.0)*0.25;
+           //r = sqrt(1.0/pow(rr, 8.0) - 1.0)*0.5;
+            //r = sqrt((2.0*rr-rr*rr)*(2.0-(2.0*rr-rr*rr))) / Pow2(rr - 1.0)*0.5;
+            
+           #elif 0
+           
+            r = sqrt(2.0*rr-rr*rr) / (1.0 - rr)*0.5;
+            
+           #elif 0
+           
+            r = sqrt(rr / sqrt(1.0 - rr*rr));
+           
+           #elif 1
+           
+            r = log((1.0+r)/(1.0-r));
+            r*=r;
+            r *= 0.125;
+            //r = pow(r, 1.25);
+           #endif           
+           
+        	off += AngToVec(h0 * Pi) * r * (0.125 * viewPort.x);
+            
+           //vec2 gauss = Sample_Gauss2D(h01.x, h01.y*2.0-1.0);
+            
+            //off += gauss * (0.125*0.5  * iResolution.x);
+        }
+       #endif
+        
+        tc = (uv0.xy + off - iResolution2.xy * 0.5) / (iResolution2.xx * 0.5);
+    }
+    
+    vec3 lpos = vec3(0.0);
+    #if 0
+    {
+        // lens pos / dof:
+        float h0 = Hash11(h);
+        float h1 = Hash01(h);
+		
+        vec2 lpos0 = Sample_Disk(h0, h1) * 0.1;
+        
+        lpos = cmat * vec3(lpos0, 0.0);
+    }
+    #endif
+
+    float focalLen = 0.6;// = 0.5 * tan(Pi05 - fov * 0.5)
+
+    #if 0
+    {
+        float c = 0.5;
+        float s = 0.7;
+        
+        tc.y *= c;
+        tc *= s;
+        
+        vec3 u = UnitDiskToHemisphere(tc);
+        tc = u.xz;
+        focalLen = u.y*0.9;
+        
+        tc /= s;
+        tc.y/=c;
+    }
+    #endif
+
+    float S1 = max(18.0, cdist);// focus plane dist / focalLen
+    S1 = 1.0;
+    vec3 rdir = normalize(cmat * (vec3(tc, focalLen) * S1) - lpos); 
+ 
+    rdir = cmat * Pannini(tc, Pi*0.6, 0.5);
+    
+    #if 0
+    vec2 lightAng = vec2(Pi * 0.7, Pi * 0.1);
+    lightAng.x += (wasdAccu.y - wasdAccu.w) * 0.06; 
+    lightAng.y += (wasdAccu.x - wasdAccu.z) * 0.04;    
+    
+    vec3 light0 = AngToVec(lightAng);
+    light0 = vec3(0.49292178644304296, 0.7169771439171534, 0.49292178644304296);
+    
+    vec3 light = light0;
+    {
+        float h0 = Hash11(h);
+        float h1 = Hash01(h);
+
+        h1 = mix(0.999, 1.0, h1);
+        h1 = 1.0;
+        
+        light = Sample_Sphere(h0, h1, light);
+    }
+    #endif
+    
+    vec3 W = vec3(1.0);
+    vec3 col = vec3(0.0);
+    
+    float t; vec3 N; vec3 color;
+    vec3 p = cpos + lpos;
+    vec3 dir = rdir;
+
+    vec2 tt; 
+    float res = Intersect_Ray_Cube(p, dir, vec3(16.0) + vec3(1e-5), /*out:*/ tt);   
+    
+    if(res == 1.0)
+    {
+    	p += dir * tt.x;
+    }
+    
+    if(res != -1.0)
+    {
+        uint GIBounceCount = 3u;
+        
+        for(uint i = 0u; i < GIBounceCount; ++i)
+        {
+            bool hitLight = true;
+            if(Intersect_Scene(p, dir, i == 0u, /*out:*/ t, N, color, hitLight))
+            {
+                if(t == 0.0) break;
+                
+                p += dir * t;
+                p += N * 0.0001;
+                p -= dir * min(t*0.5, 0.0001);
+
+                vec3 V = -dir;
+
+                vec3 albedo, F0; float roughness;
+                {
+                    float metalness = 0.0;
+                    float reflectance = 0.5;
+                    
+                   #if 0
+                    vec3 fp = fract(p);
+                    
+                    float s = 0.01;
+                    bool m;
+                    m =      (fp.x < s || fp.x > 1.0 - s || fp.y < s || fp.y > 1.0 - s);   
+                    m = m && (fp.x < s || fp.x > 1.0 - s || fp.z < s || fp.z > 1.0 - s);   
+                    m = m && (fp.z < s || fp.z > 1.0 - s || fp.y < s || fp.y > 1.0 - s);   
+
+                    color *= m ? 0.0 : 1.0;
+				   #endif
+                    
+                    vec3 fp2 = fract((p - N * 0.001) * 0.5);
+                    bvec3 m2 = greaterThan(fp2, vec3(0.5));
+
+                    bool checker = m2.x != m2.y != m2.z;
+
+                    if((p.x > 0.0) != (p.y > 0.0) != (p.z > 0.0))
+                    {
+                        metalness = 1.0;
+                        //color = mix(color, vec3(1.0), 0.2);
+                        //roughness *= 0.5;
+                        roughness = 0.7;
+
+                        roughness = checker ? 0.4 : 0.1;
+
+                    }
+                    else
+                    {
+                        roughness = checker ? 0.6 : 0.1;
+                    }
+                    //alpha = 0.02;
+					color = MapColor(color);
+                    
+					ConvertMtlParams(color, reflectance, metalness, /*out*/ albedo, /*out*/ F0);
+                }
+                
+                // -------------------------------------------------------------------------------------------------------------
+
+               #if 0
+                // implicit light sampling (for verification)
+                if(hitLight == true)
+                {
+                    col += W * Radiance;
+
+                    break;
+                }
+
+               #else
+
+                if(hitLight == true)
+                {
+                    if(i == 0u) 
+                    col += W * Radiance;
+
+                    break;
+                }
+
+               #if 0
+
+                // make sure LightPos is not inside scene geometry when using this
+                col += Sample_PointLight(V, p, N, albedo, roughness, F0) * W;
+
+               #elif 0
+
+                col += Sample_DirLight(V, p, N, normalize(vec3(1.0, 1.0, 1.0)), albedo, roughness, F0) * W;
+
+               #elif 0
+
+                //col += Sample_SphLight_HemiSph(V, p, N, /*inout*/ h, albedo, roughness, F0) * W;      
+                col += Sample_SphLight_ClmpCos(V, p, N, /*inout*/ h, albedo, roughness, F0) * W;      
+
+               #elif 0
+
+                col += Sample_SphLight_SolidAngle(Hash01x2(h), V, p, N, albedo, roughness, F0) * W;      
+
+               #elif 1
+                {
+                    vec2  s0 = Hash01x2(h);
+                    vec2  s1 = Hash01x2(h);
+                    
+                   #ifdef USE_LDS
+                    if(i == 0u)
+                    {
+                        s0 = Float01(Roberts(hh ^ 0xFA760509u, frameNum));
+                        s1 = Float01(Roberts(hh ^ 0x82DD24D6u, frameNum));
+                    }
+                   #endif
+                    
+                	col += Sample_SphLight_MIS(s0, s1, V, p, N, albedo, roughness, F0) * W;      
+                }   
+               #elif 1
+                {
+                    vec2  s0 = Hash01x2(h);
+                    vec2  s1 = Hash01x2(h);
+                    float s2 = Hash01(h);
+                    
+                   #ifdef USE_LDS
+                    if(i == 0u)
+                    {
+                        s0 = Float01(Roberts(hh   ^ 0xFA760509u, frameNum));
+                        s1 = Float01(Roberts(hh   ^ 0x82DD24D6u, frameNum));
+                        s2 = Float01(Roberts(hh.x ^ 0x2FE84799u, frameNum));
+                    }
+                   #endif
+                    
+                	col += Sample_SphLight_MIS2(s0, s1, s2, V, p, N, albedo, roughness, F0) * W;      
+                }
+               #endif
+               #endif
+
+
+                {
+                    vec2  s0 = Hash01x2(h);
+                    vec2  s1 = Hash01x2(h);
+                    float s2 = Hash01(h);
+                    
+                   #ifdef USE_LDS
+                    if(i == 0u)
+                    {
+                        s0 = Float01(Roberts(hh   ^ 0x8CF64DC5u, frameNum));
+                        s1 = Float01(Roberts(hh   ^ 0xFED0592Du, frameNum));
+                        s2 = Float01(Roberts(hh.x ^ 0xAEDF2BF3u, frameNum));
+                    }
+                   #endif
+                    
+                   #if 1
+                    // appears to work better than the MIS version
+                    Sample_ScatteredDir(s0, s1, s2, /*inout*/dir, /*inout*/W, N, albedo, roughness, F0);
+                   #else
+                    Sample_ScatteredDirMIS(s0, s1, s2, /*inout*/dir, /*inout*/W, N, albedo, roughness, F0);
+                   #endif
+                }
+            } 
+            else 
+            {
+				// sample sky box
+
+                break;
+            }
+        }
+    } 
+    else 
+    {
+		// sample sky box
+    }
+    
+    // vec3 colLast = textureLod(iChannel0, uvO.xy / viewPort.xy, 0.0).rgb;
+    vec3 colLast = textureLod(iChannel0, vec3(uv0.xy / viewPort.xy, 0.0), 0.0).rgb;
+
+
+    col = mix(colLast, col, 1.0 / (frameAccu + 1.0));    
+    
+    outCol = vec4(col, 0.0);
+    
+    
+    {
+        // persistent state stuff:
+        vec4 iMouseLast     = ReadVar4(0, 0, 0);
+        vec4 iMouseAccuLast = ReadVar4(0, 1, 0);
+        vec4 wasdAccuLast   = ReadVar4(0, 2, 0);
+        float frameAccuLast = ReadVar (0, 3, 0);
+
+
+        bool shift = ReadKey(KEY_SHIFT) != 0.0;
+
+        float kW = ReadKey(KEY_W);
+        float kA = ReadKey(KEY_A);
+        float kS = ReadKey(KEY_S);
+        float kD = ReadKey(KEY_D);
+
+        float left  = ReadKey(KEY_LEFT);
+        float right = ReadKey(KEY_RIGHT);
+        float up    = ReadKey(KEY_UP);
+        float down  = ReadKey(KEY_DOWN);
+        
+        
+        bool anyK = false;
+        
+        anyK = anyK || iMouse.z > 0.0;
+        anyK = anyK || shift;
+        anyK = anyK || kW != 0.0;
+        anyK = anyK || kA != 0.0;
+        anyK = anyK || kS != 0.0;
+        anyK = anyK || kD != 0.0;
+        anyK = anyK || left  != 0.0;
+        anyK = anyK || right != 0.0;
+        anyK = anyK || up    != 0.0;
+        anyK = anyK || down  != 0.0;
+        
+        
+        frameAccuLast += 1.0;
+        if(anyK) frameAccuLast = 0.0;
+        
+
+        vec4 wasdAccu = wasdAccuLast;
+        wasdAccu += vec4(kW, kA, kS, kD);
+        wasdAccu += vec4(up, left, down, right);        
+
+        
+        vec2 mouseDelta = iMouse.xy - iMouseLast.xy;
+
+        bool cond0 = iMouse.z > 0.0 && iMouseLast.z > 0.0;
+        vec2 mouseDelta2 = cond0 && !shift ? mouseDelta.xy : vec2(0.0);
+        vec2 mouseDelta3 = cond0 &&  shift ? mouseDelta.xy : vec2(0.0);
+
+        vec4 iMouseAccu = iMouseAccuLast + vec4(mouseDelta2, mouseDelta3);
+
+        
+        WriteVar4(iMouse,        0, 0);
+        WriteVar4(iMouseAccu,    1, 0);
+        WriteVar4(wasdAccu,      2, 0);
+        WriteVar (frameAccuLast, 3, 0);
+    }
+}
+]]>
+</program>
+</language>
+</jittershader>

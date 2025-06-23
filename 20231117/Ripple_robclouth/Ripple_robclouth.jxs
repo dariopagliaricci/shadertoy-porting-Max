@@ -1,0 +1,128 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+/*
+@title Ripple
+@author robclouth
+*/
+
+const float xScale = 0.1; // @param min 0, max 1
+const float yScale = 0.1; // @param min 0, max 1
+
+
+float prand(vec2 uv) {
+    return fract(sin(dot(mod(uv,153.789),vec2(12.9898,78.233)))*43758.5453) - 0.5;
+}
+
+float fprand(vec2 uv, float f){
+    vec2 sp = uv*f;
+    vec2 isp = floor(sp);
+    vec2 fsp = fract(sp);
+    
+    float a = prand(isp+0.5);
+    float b = prand(isp+0.5+vec2(1.0,0.0));
+    float c = prand(isp+0.5+vec2(0.0,1.0));    
+    float d = prand(isp+0.5+vec2(1.0,1.0));
+    float wx = smoothstep(0.0, 1.0, fsp.x);
+    float wy = smoothstep(0.0, 1.0, fsp.y);
+    return mix(mix(a,b,wx), mix(c,d,wx), wy);
+    
+}
+
+float perlin(vec2 uv, int octaves, float f0, float fmul, float v0, float vmul){
+    float val = 0.0;
+    float frq = f0;
+    float wei = v0;
+    float time = mod(iTime, 1000.0);
+    
+    for (int i=0; i<octaves; i++) {
+        val += wei * texture(iChannel1, uv*vec2(xScale, yScale)*frq*0.1 + vec2(time*0.001)).r;
+        frq *= fmul;
+        wei *= vmul;
+    }
+   
+    return val;
+}
+
+float pdef(vec2 uv) {
+    //return perlin(uv, 11, 0.8, 1.7, 1.5, 0.65);
+    return perlin(uv, 7, 1.0, 1.9, 0.3,0.8);
+}
+
+vec2 warped(vec2 uv) {
+    return uv + vec2(vec2(pdef(uv+pdef(uv)), pdef(uv+pdef(uv+3.145)+1.25)));
+}
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 uv = fragCoord/max(viewPort.x, viewPort.y);
+    outColor = texture(iChannel0, warped(uv));
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,439 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec4 iMouse;
+
+/*
+
+Simple path tracer
+
+Based on http://www.realtimerendering.com/raytracing/Ray%20Tracing%20in%20a%20Weekend.pdf
+
+baldand/2019
+*/
+
+// Some settings you can tweak
+
+//#define SAMPLES 50 // Bigger GPUs
+#define SAMPLES 1 // Smaller GPUs, noisier
+
+#define APERTURE 0.08 // A little out of focus in background
+//#define APERTURE 0.0 // All in focus
+
+const float M_PI = 3.141592653589793;
+
+struct random_state {
+    uint z0;
+    uint z1;
+    uint z2;
+    uint z3;
+};
+
+    
+uint tst(in uint z, int S1, int S2, int S3, uint M) {
+    uint b = (((z << S1) ^ z) >> S2);
+    return (((z & M) << S3) ^ b);
+}
+
+uint lcg(in uint z, uint A, uint C) {
+    return (A*z+C);
+}
+
+void update_random(inout random_state rs) {
+    rs.z0 = tst(rs.z0, 13, 19, 12, 4294967294u);
+    rs.z1 = tst(rs.z1,  2, 25, 4,  4294967288u);
+    rs.z2 = tst(rs.z2, 3, 11, 17, 4294967280u);
+    rs.z3 = lcg(rs.z3, 1664525u, 1013904223u);
+    uint zt = rs.z3;
+    rs.z3 ^= rs.z2;
+    rs.z2 ^= rs.z1;
+    rs.z1 ^= rs.z0;
+    rs.z0 ^= zt;
+}
+
+void init_random(vec2 fragCoord, float time, inout random_state rs) {
+    rs.z0 = floatBitsToUint(fragCoord.y*0.1234567);
+    rs.z1 = floatBitsToUint(fragCoord.x*0.1234567);
+    rs.z2 = floatBitsToUint(time*0.1234567);
+    rs.z3 = floatBitsToUint(0.1234567);
+    // Mix up a bit
+    update_random(rs);
+    update_random(rs);
+    update_random(rs);
+    update_random(rs);
+}
+
+float random0(in random_state rs) {
+    return fract(0.00002328 * float(rs.z0));
+}
+float random1(in random_state rs) {
+    return fract(0.00002328 * float(rs.z1));
+}
+float random2(in random_state rs) {
+    return fract(0.00002328 * float(rs.z2));
+}
+
+vec3 random_in_unit_disk(inout random_state rs) {
+    update_random(rs);
+    vec3 r,p;
+    r.x = random0(rs);
+    r.y = random1(rs);
+    r.z = 0.0;
+    p =2.0 * r - vec3(1.0,1.0,0.0);
+    while (dot(p,p)>1.0) p *= 0.7;
+    return p;
+}
+
+const uint Lambertian = 0u;
+const uint Metal = 1u;
+const uint Dielectric = 2u;
+const uint DiffuseLight = 3u;
+
+struct sphere {
+    vec3 center;
+    float radius2;
+    float radiusi;
+    uint mat_type;
+    vec3 albedo;
+    vec3 albedo2;
+    float fuzz;
+    float ref_idx;
+};
+    
+const sphere world[] = sphere[]( 
+    sphere(vec3(0.0,-1001.0,0.0), 1000.0*1000.0, 1.0/1000.0, Metal, vec3(0.2,0.2,0.2),vec3(0.2,0.4,0.2),0.05,0.0),
+    sphere(vec3(0.0,-0.5,0.0), 0.5*0.5, 1.0/0.5, Dielectric, vec3(1.0,1.0,1.0),vec3(1.0,1.0,1.0),0.0,1.7),
+    sphere(vec3(0.0,-0.5,0.0), 0.4*0.4, -1.0/0.4, Dielectric, vec3(1.0,1.0,1.0),vec3(1.0,1.0,1.0),0.0,1.7),
+
+    sphere(vec3(2.0,0.0,0), 1.0*1.0, 1.0/1.0, Lambertian, vec3(0.5,0.5,0.5),vec3(0.5,0.5,0.5),0.0,0.0),
+    sphere(vec3(-2.0,0.0,0), 1.0*1.0, 1.0/1.0, Metal, vec3(1.0,1.0,1.0),vec3(1.0,1.0,1.0),0.1,0.0),
+    sphere(vec3(0.0,0.0,2.0), 1.0*1.0, 1.0/1.0, Dielectric, vec3(1.0,1.0,1.0),vec3(1.0,1.0,1.0),0.0,1.5),
+    sphere(vec3(0.0,0.0,-2.0), 1.0*1.0, 1.0/1.0, Metal, vec3(1.0,0.25,0.25),vec3(1.0,0.25,0.25),0.01,0.0),
+
+    sphere(vec3(4.0,-0.5,2.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(1.0,0.0,0.0),vec3(1.0,0.0,0.0),0.0,0.0),
+    sphere(vec3(2.0,-0.5,-4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.0,1.0,0.0),vec3(0.0,1.0,0.0),0.0,0.0),
+    sphere(vec3(4.0,-0.5,4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.0,0.0,1.0),vec3(0.0,0.0,1.0),0.0,0.0),
+    sphere(vec3(-4.0,-0.5,-2.0), 0.5*0.5, 1.0/0.5, Metal, vec3(1.0,1.0,0.0),vec3(1.0,1.0,0.0),0.0,0.0),
+    sphere(vec3(-2.0,-0.5,4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.0,1.0,1.0),vec3(0.0,1.0,1.0),0.0,0.0),
+    sphere(vec3(-4.0,-0.5,-4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(1.0,0.0,1.0),vec3(1.0,0.0,1.0),0.0,0.0),
+    sphere(vec3(-4.0,-0.5,2.0), 0.5*0.5, 1.0/0.5, Metal, vec3(1.0,0.5,0.5),vec3(1.0,0.5,0.5),0.0,0.0),
+    sphere(vec3(-2.0,-0.5,-4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.5,1.0,0.5),vec3(0.5,1.0,0.5),0.0,0.0),
+    sphere(vec3(-4.0,-0.5,4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.5,0.5,1.0),vec3(0.5,0.5,1.0),0.0,0.0),
+    sphere(vec3(4.0,-0.5,-2.0), 0.5*0.5, 1.0/0.5, Metal, vec3(1.0,1.0,0.5),vec3(1.0,1.0,0.5),0.0,0.0),
+    sphere(vec3(2.0,-0.5,4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(0.5,1.0,1.0),vec3(0.5,1.0,1.0),0.0,0.0),
+    sphere(vec3(4.0,-0.5,-4.0), 0.5*0.5, 1.0/0.5, Lambertian, vec3(1.0,0.5,1.0),vec3(1.0,0.5,1.0),0.0,0.0)
+
+);
+
+void get_sphere_uv(vec3 p, inout float u, inout float v) {
+    u = p.x;
+    v = p.z;
+}
+  
+struct hit_record {
+    float t;
+    vec3 p;
+    vec3 normal;
+    vec3 objcent;
+    float u;
+    float v;
+    int objidx;
+};
+
+
+bool sphere_hit(int i, vec3 ro, vec3 rd, float a, float ooa, float t_min, float t_max, inout hit_record rec) {
+    vec3 cen = world[i].center;
+    if (i==6) cen.y = 1.5*abs(sin(iTime*3.5));
+    vec3 oc = ro - cen; 
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - world[i].radius2;
+    float disc = b*b - a*c;
+    if (disc > 0.0) {
+        float sqdisc = sqrt(disc);
+        float temp = (-b -sqdisc)*ooa;
+        if (temp < t_max && temp > t_min) {
+            rec.t = temp;
+            rec.p = ro + rd*temp;
+            rec.objcent = cen;
+            rec.normal = (rec.p - rec.objcent) * world[i].radiusi;
+            rec.objidx = i;
+            get_sphere_uv(rec.p, rec.u, rec.v);
+            return true;
+        }
+        temp = (-b +sqdisc)*ooa;
+        if (temp < t_max && temp > t_min) {
+            rec.t = temp;
+            rec.p = ro + rd*temp;
+            rec.objcent = cen;
+            rec.normal = (rec.p - rec.objcent) * world[i].radiusi;
+            rec.objidx = i;
+            get_sphere_uv(rec.p, rec.u, rec.v);
+            return true;
+        }
+    }
+    return false;
+}
+   
+
+vec3 emitted(hit_record rec) {
+    if (world[rec.objidx].mat_type == DiffuseLight) {
+        return world[rec.objidx].albedo;
+    } else {
+        return vec3(0.0);
+    }
+}
+
+bool list_hit(vec3 ro, vec3 rd, float t_min, float t_max, inout hit_record rec) {
+    bool hit_anything = false;
+    rec.t = t_max;
+    float a = dot(rd, rd);
+    float ooa = 1.0/a;
+    for (int i = 0; i < world.length(); i++) {
+        if (sphere_hit(i, ro, rd, a, ooa, t_min, rec.t, rec)) {
+            hit_anything = true;
+        }
+    }
+    return hit_anything;
+}
+
+vec3 shade(hit_record rec) {
+    bool wu = fract(rec.u*0.5)>0.5;
+    bool wv = fract(rec.v*0.5)>0.5;
+    if (wu^^wv) {
+        return world[rec.objidx].albedo;
+    } else {
+        return world[rec.objidx].albedo2;
+    }
+}
+
+vec3 random_in_unit_sphere(vec3 r) {
+    vec3 p;
+    p = 2.0 * r - vec3(1.0);
+    while (dot(p,p) > 1.0) p *= 0.7;
+    return p;
+}
+
+
+bool refract2(vec3 v, vec3 n, float ni_over_nt, inout vec3 refracted) {
+    vec3 uv = normalize(v);
+    float dt = dot(uv, n);
+    float disc = 1.0 - ni_over_nt * ni_over_nt * (1.0-dt*dt);
+    if (disc > 0.0) {
+        refracted = ni_over_nt * (uv - n*dt) - n*sqrt(disc);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+float schlick(float csn, float idx) {
+    float r0 = (1.0-idx) / (1.0+idx);
+    r0 = r0*r0;
+    return r0 + (1.0-r0)*pow(1.0-csn,5.0);
+}
+
+bool scatter(hit_record rec, vec3 ro, vec3 rd, inout vec3 attenuation, inout vec3 scro, inout vec3 scrd, inout random_state rs) {
+   vec3 r;
+   update_random(rs);
+   r.x = random0(rs);
+   r.y = random1(rs);
+   r.z = random2(rs);
+   vec3 reflected = reflect(normalize(rd), rec.normal);
+   attenuation = shade(rec);
+   uint mt = world[rec.objidx].mat_type;
+   if (mt == Lambertian) {
+       vec3 target = normalize(rec.normal + random_in_unit_sphere(r));
+       scro = rec.p;
+       scrd = target;
+       return true;
+   } else if (mt == Metal) {
+       vec3 rius = random_in_unit_sphere(r);
+       scro = rec.p;
+       float fuzz = world[rec.objidx].fuzz;
+       scrd = ((1.0-fuzz)*reflected + fuzz*rius) + fuzz*(rec.normal + rius);
+       return dot(scrd,rec.normal) > 0.0; 
+   } else if (mt == Dielectric) {
+       vec3 outward_normal;
+       float ni_over_nt;
+       vec3 refracted;
+       float reflect_prob = 1.0;
+       float csn;
+       float il = 1.0/length(rd);
+       float drdnor = dot(rd, rec.normal);
+       float idx = world[rec.objidx].ref_idx;
+       if (drdnor > 0.0) {
+           outward_normal = -rec.normal;
+           ni_over_nt = idx;
+           csn = ni_over_nt * drdnor * il;
+       } else {
+           outward_normal = rec.normal;
+           ni_over_nt = 1.0/idx;
+           csn = -drdnor * il;
+       }
+       if (refract2(rd, outward_normal, ni_over_nt, refracted)) {
+           reflect_prob = schlick(csn, idx);
+       }
+       if (r.x < reflect_prob) {
+           scro = rec.p;
+           scrd = reflected;
+       } else {
+           scro = rec.p;
+           scrd = refracted;
+       }
+       return true;
+   } else if (mt == DiffuseLight) {
+       return false;
+   }
+}
+
+vec3 color(vec3 ro, vec3 rd, inout random_state rs) {   
+    vec3 emit_accum = vec3(0.0);
+    vec3 attenuation_accum = vec3(1.0);
+    vec3 albedo = vec3(0.0);
+    int depth = 0;
+    bool done = false;
+    while (!done) {
+        hit_record rec;
+        if (list_hit(ro, rd, 0.001, 1E9, rec)) {
+            vec3 scro, scrd;
+            vec3 attenuation;
+            vec3 emitcol = emitted(rec);
+            emit_accum += emitcol * attenuation_accum;
+            if (depth < 50 && scatter(rec, ro, rd, attenuation, scro, scrd, rs)) {
+                attenuation_accum *= attenuation;
+                ro = scro;
+                rd = scrd;
+                depth += 1;
+            } else {
+                done = true;
+            }
+        } else {
+            vec3 unit_direction = normalize(rd);
+            float t = 0.5 * (unit_direction.y + 1.0);
+            albedo = ((1.0-t)*vec3(1.0) + t*vec3(0.25,0.5,1.0));
+            emit_accum += attenuation_accum * albedo * 0.7;
+            done = true;
+        }    
+    }
+    
+    return emit_accum; //vec3(random0(rs), random1(rs), 0.0);
+}
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    // Initialize pseudo random number gen 
+    random_state rs;
+    float time = iTime + 25.0*iMouse.x/viewPort.x;
+    init_random(fragCoord, time+iMouse.y, rs);
+    
+    vec3 col = vec3(0.0);
+    
+    // Sample
+    int ns = SAMPLES;
+    for (int s=0; s<ns; s++) {
+        //world[6].center.y = 1.0+sin(time);
+        // Camera init
+        float orbit_radius = 6.0;
+        vec3 look_from = vec3(orbit_radius * sin(0.1*time), 1.5+cos(time*0.1)+5.0*iMouse.y/viewPort.y, orbit_radius*cos(0.1*time));
+        vec3 look_at = vec3(0.0);
+        float focus_dist = length(look_from - look_at) - 2.0;
+        float aspect = viewPort.x/viewPort.y;
+        vec3 vup = vec3(0.0,1.0,0.0);
+        float aperture = APERTURE; 
+        float lens_radius = aperture * 0.5;
+        float vfov = 35.0;
+        float theta = vfov*M_PI/180.0;
+        float half_height = tan(theta*0.5);
+        float half_width = aspect * half_height;
+        vec3 origin = look_from;
+        vec3 w = normalize(look_from - look_at);
+        vec3 u = normalize(cross(vup, w));
+        vec3 v = cross(w, u);
+        vec3 lower_left_corner = origin - half_width * focus_dist * u - half_height*focus_dist*v - focus_dist*w;
+        vec3 horizontal = 2.0 * half_width * focus_dist* u;
+        vec3 vertical = 2.0 * half_height * focus_dist *v;
+        
+        // Generate a ray
+        vec2 st = vec2(fragCoord.x/viewPort.x + 1.0*random0(rs)/viewPort.x,
+                      fragCoord.y/viewPort.y + 1.0*random1(rs)/viewPort.y);
+        vec3 rd = lens_radius * random_in_unit_disk(rs);
+        vec3 offset = u*rd.x + v*rd.y;
+        vec3 ro = origin + offset;
+        rd = lower_left_corner + st.x*horizontal + st.y*vertical - origin - offset;
+        
+        // Sample from the scene along that ray
+        col += color(ro, rd, rs);
+        
+        time += 1.0/(30.0*float(ns)); // Motion blur        
+    }
+    col *= (1.0/float(ns));
+    col = pow(col, vec3(1.0/2.4)); // Gamma
+    
+    // Output to screen
+    outColor = vec4(col,1.0);
+}
+
+
+// void main(void) {
+// 	outColor = vec4(1, 0, 0, 1);
+// }
+]]>
+</program>
+</language>
+</jittershader>

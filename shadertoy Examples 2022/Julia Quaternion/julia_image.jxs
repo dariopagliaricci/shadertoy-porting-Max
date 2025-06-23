@@ -1,0 +1,104 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" default="1920.0 1080.0" />
+    <param name="iTime" type="float" default="0" />
+    <param name="iChannel0" type="int" default="0" />
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+			
+			uniform vec2 iResolution;
+			uniform float iTime;
+			uniform sampler2D iChannel0;
+
+						// Copyright Inigo Quilez, 2020 - https://iquilezles.org/
+			// I am the sole copyright owner of this Work.
+			// You cannot host, display, distribute or share this Work in any form,
+			// including physical and digital. You cannot use this Work in any
+			// commercial or non-commercial product, website or project. You cannot
+			// sell this Work and you cannot mint an NFTs of it.
+			// I share this Work for educational purposes, and you can link to it,
+			// through an URL, proper attribution and unmodified screenshot, as part
+			// of your educational material. If these conditions are too restrictive
+			// please contact me and we'll definitely work it out.
+			// The Julia set of f(z) = z³ + c, as rendered for the Youtube
+			// video called "Geodes": https://www.youtube.com/watch?v=rQ2bnU4dkso
+			//
+			// I simplified a few things, reduced the number of GI bounces
+			// and did some temporal reprojection to keep it more or less
+			// real-time while looking similar to the one in the video.
+			//
+			// Explanations:
+			//  https://iquilezles.org/articles/distancefractals
+			//  https://iquilezles.org/articles/orbittraps3d
+			//
+			// Related shaders:
+			//
+			// Julia - Quaternion 1 : https://www.shadertoy.com/view/MsfGRr
+			// Julia - Quaternion 2 : https://www.shadertoy.com/view/lsl3W2
+			// Julia - Quaternion 3 : https://www.shadertoy.com/view/3tsyzl
+
+
+			void main()
+			{
+				vec2 fragCoord = jit_in.texcoord;
+				vec2 p = fragCoord / iResolution.xy;
+
+			    vec3 col = texture( iChannel0, p ).xyz;
+
+			    // color grade
+			    col = col*2.0/(1.0+col);
+			    col = pow( col, vec3(0.4545) );
+			    col = pow(col,vec3(0.85,0.97,1.0));
+			    col = col*0.5 + 0.5*col*col*(3.0-2.0*col);
+
+			    // vignette
+			    col *= 0.5 + 0.5*pow( 16.0*p.x*p.y*(1.0-p.x)*(1.0-p.y), 0.1 );
+			    
+			    fragColor = vec4( col, 1.0 );
+			}
+		]]>
+		</program>
+	</language>
+</jittershader>

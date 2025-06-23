@@ -1,0 +1,938 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform float iTime;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+/*
+CC0 1.0
+*/
+
+// can switch temporal antialiasing on (1) or off (0) in which case it reverts to supersampling
+#define TAA 0
+// the TAA introduces minor artifacts which I didn't want to deal with
+
+/*
+float hash12(vec2 p)
+{
+    uint m = 1597334673u;
+	uvec2 q = uvec2(ivec2(p)) * uvec2(m, 3812015801u);
+	uint n = (q.x ^ q.y) * m;
+	return 1. / float(~0u) * float(n);
+}
+*/
+/*
+mat2 mrot(float ra)
+{
+    float c = cos(ra), s = sin(ra);
+	return mat2( c, -s,
+                 s,  c);
+}
+*/
+
+/*
+Creative Commons CC0 1.0 Universal (CC-0)  http://creativecommons.org/publicdomain/zero/1.0
+
+by spalmer http://shadertoy.com/view/lcjyzD
+fork of Area Lights by piyushslayer http://shadertoy.com/view/3dsBD4  (2020, 16449 total ch)
+
+piyushslayer had implemented 3 types of area light sources (sphere, line, and rectangle).
+Based on most representative point techniques by Brian Karis (Epic) and Sébastien Lagarde (Unity).
+Calculates the location of nearest point on light surface angularly to the reflection ray
+and use that for the light direction to calculate the diffuse and specular components.
+
+https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
+Karis fixed up Iñigo's sphere light, did tubes.  Lagarde added rect lights and disc lights.
+https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+
+so far spalmer refactored bunch of stuff into shared areaLight function,
+ and some other stuff (combining diffuse*albedo + specular) into the shapeLight functions
+ so that it doesn't have to be done once per light source ad-hoc anymore.
+spalmer allowed each light to have its own color and sub-id, moved the brightnesses into a table of colors,
+ discovered missing normalization factor from Karis' work,
+ retuned the attenuation inverse distance squared falloff,
+ clamped output (kind of a hack actually) to prevent specular from seeming too bright.
+
+Plus, I have saved almost 5000 characters!
+The TAA is currently disabled in Common, could save more by trimming Buffer B, or re-enable.
+
+TODO should add support for disc lights; still working thru Sebastien's paper.
+TODO may try to implement roundbox lights  :)
+*/
+
+// enable/disable for floor normal map and roughness map
+#define FLOOR_BUMP
+//#define FLOOR_ROUGHNESS
+
+#define DRAW_LIGHTS
+
+const int // perf / quality tuning
+    REFLECTION_TRACES = 8,
+    SOFTSHADOW_STEPS = 32,
+    RAYMARCH_STEPS = 128,
+    REFLECTION_TRACE_STEPS = 32;
+
+vec2 oUnion(vec2 a, vec2 b)
+{
+ 	return a.x < b.x ? a : b;  
+}
+
+float dPlaneNoDisplacement(vec3 q, float h)
+{
+	return q.y - h;
+}
+
+float dPlane(vec3 q, float h)
+{
+	float d = dPlaneNoDisplacement(q, h);
+  #ifdef FLOOR_BUMP
+    d -= textureLod(iChannel0, q.xz * .04, 0.).r * .01; // wood texture  
+  #endif
+    return d;
+}
+
+float dSphere(vec3 q, vec3 center, float radius)
+{
+	return length(q - center) - radius;   
+}
+
+
+#define saturate(x) clamp(x, 0., 1.)
+            
+#define sqr(x) dot(x, x)
+
+
+float dCapsule(vec3 q, vec3 end0, vec3 end1, float poof)
+{
+    q -= end0; vec3 e = end1 - end0;
+    float h = saturate(dot(q, e) / sqr(e));
+    return length(q - h * e) - poof;
+}
+
+float dRect(vec3 p, vec3 a, vec3 b, vec3 c, vec3 d)
+{
+    vec3 ba = b - a, pa = p - a,
+         cb = c - b, pb = p - b,
+         dc = d - c, pc = p - c,
+         ad = a - d, pd = p - d,
+        nor = cross(ba, ad);
+    return sqrt(
+        (sign(dot(cross(ba, nor), pa)) +
+         sign(dot(cross(cb, nor), pb)) +
+         sign(dot(cross(dc, nor), pc)) +
+         sign(dot(cross(ad, nor), pd)) < 3.)
+        ? min(min(min(
+                sqr(ba * clamp(dot(ba, pa) / sqr(ba), 0., 1.) - pa),
+                sqr(cb * clamp(dot(cb, pb) / sqr(cb), 0., 1.) - pb)),
+                sqr(dc * clamp(dot(dc, pc) / sqr(dc), 0., 1.) - pc)),
+                sqr(ad * clamp(dot(ad, pd) / sqr(ad), 0., 1.) - pd))
+        : dot(nor, pa) * dot(nor, pa) / sqr(nor) 
+      );
+}
+// spalmer just hacked something together but it seems to be working; there's probably some slight optimizations to be had
+float dDisc(vec3 q, vec3 p, float r, vec3 d)
+{
+    p -= q;
+    float pd = dot(p, d);
+    return length(vec2(max(0.,  length(p - pd * d) - r), pd));
+}
+ 
+vec2 SceneSmooth(vec3 q)
+{
+    // ball id = 1. + fraction = roughness
+	vec2 r =      vec2(dSphere(q, vec3(-4.5, .75, 0.), 1.5), 1.1);
+    r = oUnion(r, vec2(dSphere(q, vec3(-1.5, .75, 0.), 1.5), 1.3));
+    r = oUnion(r, vec2(dSphere(q, vec3( 1.5, .75, 0.), 1.5), 1.5));
+    r = oUnion(r, vec2(dSphere(q, vec3( 4.5, .75, 0.), 1.5), 1.7));
+    return r;
+}
+// wood floor id = 3
+// when computing discrete gradient, want extra details for bumpmaps
+vec2 SceneForGradient(vec3 q)
+{
+	return oUnion(SceneSmooth(q),
+        vec2(dPlane(q, -.75), 3.));
+}
+// most traces don't need bumpmap details
+vec2 SceneNoLights(vec3 q)
+{
+	return oUnion(SceneSmooth(q), 
+        vec2(dPlaneNoDisplacement(q, -.75), 3.));
+}
+
+vec3 SceneGradient(vec3 q, float eps)
+{
+    vec2 ep = vec2(eps, 0.);
+    return vec3(SceneForGradient(q + ep.xyy).x, 
+                SceneForGradient(q + ep.yxy).x, 
+                SceneForGradient(q + ep.yyx).x) 
+              - SceneForGradient(q         ).x; // / eps;
+}
+
+// animation key
+#define T (iTime * .25)
+
+#define SPHERE_LIGHT_POS \
+    vec3(9. * cos(T), 6. * abs(sin(T)) - .75 + SPHERE_LIGHT_RADIUS, 1.)
+#define SPHERE_LIGHT_RADIUS (sin(.9*T) * .5 + .7)
+ 
+#define SPHERE_LIGHT2_POS vec3(0, 4, -20-2)
+#define SPHERE_LIGHT2_RADIUS 5.
+           
+#define LINE_LIGHT_RADIUS (sin(T) * .075 + .125)
+// interestingly, if it gets much smaller, it just breaks
+#define RECT_LIGHT_SIZE 1.5
+
+#define DISC_LIGHT_POS (sin(vec3(.9,1.,.8)*T) * vec3(7,2.,4) + vec3(-2,8,4))
+#define DISC_LIGHT_RADIUS ((sin(1.9*T) * .5 + .7) * 4.)
+#define DISC_LIGHT_DIR vec3(1,0,0) //0,-1,0) //0,0,-1) // should animate it rotating
+
+struct Rect
+{
+	vec3 center, a, b, c, d; 
+	vec3 up, right, front;
+    vec2 halfSize;
+};
+
+// animated globals
+vec3 lineStart, lineEnd;
+Rect rect;
+
+vec2 Scene(vec3 q)
+{
+	vec2 h = SceneNoLights(q);
+  #ifdef DRAW_LIGHTS
+    // all lights are id 0; using fraction now to indicate which light
+	h = oUnion(h, vec2(dSphere(q, SPHERE_LIGHT_POS, SPHERE_LIGHT_RADIUS), 0.0));    
+    h = oUnion(h, vec2(dCapsule(q, lineStart, lineEnd, LINE_LIGHT_RADIUS), 0.1));
+    //h = oUnion(h, vec2(dSphere(q, SPHERE_LIGHT2_POS, SPHERE_LIGHT2_RADIUS), 0.2));
+    h = oUnion(h, vec2(dRect(q, rect.a, rect.b, rect.c, rect.d), 0.3));
+    h = oUnion(h, vec2(dDisc(q, DISC_LIGHT_POS, DISC_LIGHT_RADIUS, DISC_LIGHT_DIR), 0.4));
+  #endif
+    return h;
+}
+
+vec3 calcNormal(vec3 q)
+{
+    return normalize(SceneGradient(q, .0002));
+}
+
+// a = alpha = roughness²
+// aPrime is Karis' Specular D Modification stuff.
+// c is a cosine such as dot(N,H)
+float D_TrowbridgeReitz(float c, float a, float aPrime)
+{
+    float aa = a * a;
+    return aa * aPrime * pow(c * c * (aa - 1.) + 1., -2.);
+}
+
+// Schlick-Beckmann approximation
+float G_Schlick(float c, float k)
+{
+    return c / (c * (1. - k) + k);
+}
+    //const float SMOL_EPS = -1.; //.0000002; // just don't need it; roughness gets clamped elsewhere anyhow
+    //return c / max(c * (1. - k) + k, SMOL_EPS);
+
+float G_Smith(float nv, float nl, float rough)
+{
+ 	float r1 = rough + 1., // TODO refactor in terms of alpha; surely there's some way to accept alpha=rough² as argument, for uniformity
+        k = r1 * r1 / 8.; // divide by extra 2. for GGX
+    return G_Schlick(nv, k)
+         * G_Schlick(nl, k);
+} // Hable does this with nh²
+
+// Schlick's approximation for Fresnel equation
+vec3 F_Schlick(vec3 F0, float c)
+{
+    float rc5 = pow(max(0., 1. - c), 5.); // (1-c)^5
+    return F0 + (1. - F0) * rc5; //mix(F0, vec3(1), c5); //
+}
+
+// used for IBL specular only; I'd prefer to use the one main BRDF if possible, I dislike the exp2 'optimization'
+vec2 PrefilteredDFG_Karis(float roughness, float nv)
+{
+    // Karis 2014, "Physically Based Material on Mobile"
+    // http://unrealengine.com/en-US/blog/physically-based-shading-on-mobile
+    const vec4 c0 = vec4(-1., -.0275,  -.572,  .022),
+               c1 = vec4( 1.,  .0425,  1.040, -.040);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// the main BRDF is in specularCookTorrance/areaLight
+const float
+    pi = radians(360.),
+    tau = pi + pi;
+
+// TODO refactor in more traditional form:
+vec3 specularCookTorrance(float ra, float nl, float rl, float nh, float vh, float nv, 
+            vec3 f0, float roughness, float aPrime,
+            out vec3 fresnel)
+{
+    float alpha = roughness * roughness; // aka a
+    fresnel = F_Schlick(f0, vh);
+    float s = D_TrowbridgeReitz(nh, alpha, aPrime)
+        * G_Smith(nv, ra, roughness); // nl customizable here in this model
+    s /= pi * sqr(alpha);
+    //s /= 4. * nl * nv; //sqr(2. * nh); // FIXME missing - jacks things up though, something else must be wrong somewhere
+    return s * fresnel;
+}
+// caller can do aPrime normalization
+
+const float
+    lightFalloff = 50.;
+    
+// TODO seems that, provided a few key measurements,
+// we could refactor all this in a far more general way.
+
+// like, if we had the 'distance to nearest point on light'
+// and, 'angle of ray vs. closest edge of light' 
+// (some sine, clamp to 0 when aimed directly at the light source,
+// or a cosine, whichever) we could just compute some angular vs. distance falloffs
+// just multiply by softshadow to nearest point on light, and light color, afterward
+// multiply .a (diffuse response) by albedo (but isn't that related to f0?) and add .rgb (specular response)
+
+vec4 areaLight(float ra, float nl, float rl, float nh, float vh, float nv, 
+            float d, vec3 f0, float roughness, float aPrime, // d = light distance
+            float normalizationPower, // factored out common power alpha/aPrime gets raised to (2 for sphere lights, 1 for tube lights, due to anisotropy)
+            out vec3 fresnel) // out fresnel used for computing diffuse, is only to satisfy prior interface sphereLight, lineLight, rectLight; TODO simplify interface, maybe pass in albedo/cdiff
+{
+    float alpha = roughness * roughness; // aka a
+  #if 1
+    vec4 ret = vec4(specularCookTorrance(ra, nl, rl, nh, vh, nv, f0, roughness, aPrime, fresnel), nl);
+  #else
+    // this aPrime seems to be key to Karis' area lighting trick:  Specular D Modification
+    fresnel = F_Schlick(f0, vh);
+    float s = D_TrowbridgeReitz(nh, alpha, aPrime)
+        * G_Smith(nv, ra, roughness); // using ra instead of nl here is part of the trickery
+        // FIXME it seems the visibility term denominator / (4. * nl * nv) is missing
+    // combined, these two factors seem to fix the 'dimmer with distance' problem etc,
+    // but still wind up making the specular seem way too bright, for glossy materials anyway.
+    // when I dim the lights to compensate, the diffuse gets way too dim in comparison.  
+    // So seems specular needs corrected more.  Missing some factor, but just dividing by pi hurts rough materials and doesn't help enough.
+    s *= 1. / (pi * sqr(alpha)); // missing in parent fork
+    vec4 ret = vec4(s * fresnel, nl);
+  #endif
+    // "To derive an approximate normalization for the representative point operation we divide the new widened normalization factor by the original:" --Karis
+    ret.rgb *= pow(alpha / aPrime, normalizationPower); //sqr(alpha / aPrime); // normalization factor mentioned by Karis.
+    // inverse squared falloff attenuation (for diffuse only?)
+    ret/*.a*/ *= 1. / (sqr(d / lightFalloff) + 1.); // the +1. may not even be correct but I like it
+    // seems like we should limit so it doesn't become too glossy somehow
+    // we're supposed to at some point multiply by the solid angle, which would fix this infinity business.
+    // I'm unsure why I wound up needing to clamp spec to pi/2 (~ 1.57) instead of 1. to get it to match .. 1.5 works, can't tell difference
+    ret = clamp(ret, vec4(0.), vec4(vec3(.5), 1.) * pi); // HACK I'm tired of things getting brighter than the actual light color, I want to do something about it
+    // I suppose I can allow it to exceed 1.0 direct-viewed-color a little bit in cases where point is practically next to the light, when it would receive samples from multiple directions?
+    return ret;
+}
+// the caller then combines diffuse with result lc and lf:
+//   c += cLite * (lc.a * (1. - lf) * cdiff + lc.rgb);
+
+    //float attenuation = 1. //nl * nv //sqr(vh) // // 
+    //    ;
+    //ret/*.a*/ *= attenuation; // shadow
+// outputs fresnel for use by caller, which I should probably refactor somehow (this entire interface in fact)
+
+// http://shadertoy.com/view/XcXyDX
+void ShadingDotProducts(float vl, float nv, float nl,
+		out float nh, out float vh)
+{
+	float vl1 = vl + 1.,
+        q = inversesqrt(vl1 + vl1);
+    vh = q * vl1;
+    nh = q * (nv + nl);
+}
+// only clamp *afterward* or won't match
+void ClampDotProducts(inout float vl, inout float nv, inout float nl, inout float nh, inout float vh)
+{
+    //vl = max(vl, 0.); // unused actually
+    nv = max(nv, 2e-4); //0.);
+    nl = max(nl, 0.);
+    nh = max(nh, 2e-4); //0.);
+    vh = max(vh, 2e-4); //0.);
+}
+
+struct Ray
+{
+    vec3 org, dir;
+};
+
+#define IZERO min(0, iFrame)
+
+const float sEPS = .002;
+
+float softShadow(Ray ray)
+{
+ 	float shadow = 1., dist = 0.;
+    for (int i = 0 + IZERO; i < SOFTSHADOW_STEPS; ++i)
+    {
+        vec2 result = SceneNoLights(dist * ray.dir + ray.org);
+        if (result.y > 0.)
+        {
+            // iq's soft shadows
+            shadow = min(shadow, .5 + .5 * 32. * result.x / dist);
+            if (shadow < 0.) break;
+            dist += clamp(result.x, .005, .5);
+        }
+    }
+    return saturate(shadow); //smoothstep(0., 1., max(shadow, 0.));
+}
+
+
+// p = hit pos, r = reflect dir, n = surf normal, v = view dir
+// nv = dot(n, v) just happens to have been computed already
+// f0 = perpendicular rgb spec response, material roughness, metalness
+
+vec3 sphereLight(vec3 center, float radius, // of light
+            vec3 p, vec3 r, 
+            vec3 n, vec3 v, float nv, 
+            vec3 f0, vec3 cdiff, float roughness)
+{
+    vec3 L = center - p,
+        centerToRay = dot(L, r) * r - L;
+    L += saturate(radius / length(centerToRay)) * centerToRay;
+    float lightDist = length(L);
+    vec3 l = normalize(L);//,
+         //h = normalize(v + l); // can bypass :D
+    float vl = dot(v, l),
+        nl = dot(n, l), // epsilon?
+        nh, // = max(dot(n, h), 2e-4),
+        vh; // = max(dot(h, v), 2e-4);
+    ShadingDotProducts(vl, nv, nl, nh, vh);
+    ClampDotProducts(vl, nv, nl, nh, vh);
+
+    float attenuation = 1.; //nl * nv //sqr(vh) //
+	attenuation *= softShadow(Ray(sEPS * n + p, l));
+    
+    float alpha = roughness * roughness; // aka a
+    // this aPrime seems to be key to Karis' area lighting trick:  Specular D Modification
+    float aPrime = saturate(alpha + radius / (2. * lightDist));
+    //aPrime = sqr(aPrime); // why?!  aha this is what was breaking zero-radius sphere lights -- seems better without it
+    vec3 fresnel;
+    vec4 lc = areaLight(nl, nl, dot(r,l), nh, vh, nv, lightDist, f0, roughness, aPrime, 2., fresnel);
+  return attenuation * (lc.a * (1. - fresnel) * cdiff + lc.rgb);
+    /*
+    fresnel = F_Schlick(f0, vh);
+    float s = D_TrowbridgeReitz(nh, alpha, aPrime)
+        * G_Smith(nv, nl, roughness);
+    //s /= (4. * max(nl, 2e-4) * max(nv, 2e-4)); // seems to be missing somehow -- really makes the diffuse lit edge of the rough metal spheres pop, idk if I like it
+    // combined, these two factors seem to fix the 'dimmer with distance' problem etc,
+    // but still wind up making the specular seem way too bright, for glossy materials anyway.
+    // when I dim the lights to compensate, the diffuse gets way too dim in comparison.  
+    // So seems specular needs corrected more.  Missing some factor, but just dividing by pi hurts rough materials and doesn't help enough.
+    s *= sqr(alpha / aPrime); // Sphere normalization factor mentioned by Karis.  unsure where precisely it goes.
+    s *= 1. / (pi * sqr(alpha)); // missing
+    vec4 ret = vec4(s * fresnel, nl);
+    // inverse squared falloff attenuation (for diffuse only)
+    ret.a *= 1. / (sqr(lightDist / lightFalloff) + 1.);
+    // we're supposed to at some point multiply by the solid angle, which would fix this infinity business.
+    // I'm unsure why I wound up needing to clamp spec to pi/2 (~ 1.57) instead of 1. to get it to match
+    ret = clamp(ret, vec4(0.), vec4(vec3(.5), 1.) * pi); // HACK I'm tired of things getting brighter than the actual light color, I want to do something about it
+    ret *= attenuation;
+    return ret;
+    */
+}
+// returns attenuated specular in rgb and attenuation factor for diffuse, including shading and distance falloff, in a
+
+/* // experimenting; got pretty close
+vec3 snapSeg(vec3 q, vec3 end0, vec3 end1)
+{
+    q -= end0; vec3 e = end1 - end0;
+    float h = saturate(dot(q, e) / sqr(e));
+    return e * h + end0;
+}
+
+vec3 snapCapsule(vec3 q, vec3 end0, vec3 end1, float poof)
+{
+    q -= end0; vec3 e = end1 - end0;
+    float h = saturate(dot(q, e) / sqr(e));
+    e *= h;
+    return poof * normalize(q - e) + e + end0;
+}
+*/
+
+vec3 lineLight(vec3 end0, vec3 end1, float radius, // of light
+            vec3 p, vec3 r, 
+            vec3 n, vec3 v, float nv, 
+            vec3 f0, vec3 cdiff, float roughness)
+{
+    // according to Karis it's finding closest point on segment to ray, an alternative to Picott's smallest angle method
+    vec3 l0 = end0 - p, l1 = end1 - p, ld = l1 - l0;
+    float rl0 = dot(r, l0),
+          rld = dot(r, ld),
+         l0ld = dot(l0, ld),
+         ldld = dot(ld, ld);
+    float t = (rl0 * rld - l0ld) / (ldld - rld * rld + 2.); // index of most representative location on segment
+    // @Zavie mentions Karis had a + 2 in the denominator, I had overlooked.  parent fork didn't have it.  seems to help slightly.
+    vec3 L = saturate(t) * ld + l0; // most representative point on line segment
+    // can *almost* get away with just using the sphereLight function here, except it uses a different aPrime and ra and correctionFactor, shadow direction
+    //return sphereLight(L + p, radius, p, r, n, v, nv, f0, roughness, fresnel);
+    // point on tube based on radius, from pt on seg
+    vec3 centerToRay = dot(L, r) * r - L;
+    // closest point on light source relative query
+    L += saturate(radius / length(centerToRay)) * centerToRay;
+    float lightDist = length(L);
+    vec3 l = normalize(L);//,
+         //h = normalize(v + l);
+    float vl = dot(v, l),
+        nl = dot(n, l),
+        nh,// = max(dot(n, h), 0.),
+        vh;// = dot(h, v);
+    ShadingDotProducts(vl, nv, nl, nh, vh);
+    ClampDotProducts(vl, nv, nl, nh, vh);
+
+    float lenL0 = length(l0), lenL1 = length(l1),
+        nl0 = dot(n, l0) / (2. * lenL0),
+        nl1 = dot(n, l1) / (2. * lenL1);
+    // similar to NdotL but only used for specular correction, definitely not for diffuse lighting
+    float ra = (2. * saturate(nl0 + nl1)) / 
+        	 (lenL0 * lenL1 + dot(l0, l1) + 2.);
+
+    float attenuation = 1.; //nl * nv; //
+	attenuation *= softShadow(Ray(sEPS * n + p, normalize(l0 + ld * .5))); //l)); // use middle of tube to assess 'average' occlusion
+    
+    float alpha = roughness * roughness,
+        aPrime = saturate(alpha + (radius / (2. * lightDist)));
+    vec3 fresnel;  
+    vec4 lc = areaLight(ra, nl, dot(r,l), nh, vh, nv, lightDist, f0, roughness, aPrime, 1., fresnel);
+  return attenuation * (lc.a * (1. - fresnel) * cdiff + lc.rgb);
+    /*
+    fresnel = F_Schlick(f0, vh);
+    float s = D_TrowbridgeReitz(nh, alpha, aPrime)
+        * G_Smith(nv, ra, roughness);        
+    s *= (alpha / aPrime); // tube normalization factor mentioned by Karis
+    s *= 1. / (pi * sqr(alpha)); // missing
+    vec4 ret = vec4(s * fresnel, nl); //, ra); //
+    //ret.a *= 1. / (sqr(lightDist / lightFalloff) + 1.);
+    ret = clamp(ret, vec4(0.), vec4(vec3(.5), 1.)*pi); // HACK
+    ret *= attenuation;
+    return ret;
+    */
+}
+
+// Based on technique in EA's frostbite engine
+float rectSolidAngle(vec3 p, vec3 v0, vec3 v1, vec3 v2, vec3 v3)
+{
+    vec3 n0 = normalize(cross(v0, v1)),
+         n1 = normalize(cross(v1, v2)),
+         n2 = normalize(cross(v2, v3)),
+         n3 = normalize(cross(v3, v0));    
+    float g0 = acos(dot(-n0, n1)),
+	      g1 = acos(dot(-n1, n2)),
+	      g2 = acos(dot(-n2, n3)),
+	      g3 = acos(dot(-n3, n0));    
+    return g0 + g1 + g2 + g3 - tau;
+}
+
+vec3 rayPlaneIntersect(Ray ray, Rect rct)
+{
+   return ray.org + ray.dir * (dot(rct.front, rct.center - ray.org)
+							/  dot(rct.front, ray.dir));
+}
+
+vec3 rectLight(Rect rect,
+            vec3 p, vec3 r, 
+            vec3 n, vec3 v, float nv, 
+            vec3 f0, vec3 cdiff, float roughness)
+{
+ 	vec3 ret = vec3(0);
+    
+    // facing side check -- good for spot lights, not for 'an actual glowing rectangle' which would be 2-sided
+    //float windingCheck = dot(cross(rect.right, rect.up), rect.center - p);
+    //if (windingCheck > 0.)
+    //    return ret;
+    
+    vec3 v0 = rect.a - p,
+         v1 = rect.b - p,
+         v2 = rect.c - p,
+         v3 = rect.d - p;
+    float solidAngle = rectSolidAngle(p, v0, v1, v2, v3),
+        ra = solidAngle * .2 * (
+            saturate(dot(normalize(v0), n)) +
+            saturate(dot(normalize(v1), n)) +
+            saturate(dot(normalize(v2), n)) +
+            saturate(dot(normalize(v3), n)) +
+            saturate(dot(normalize(rect.center - p), n)));    
+    ra = abs(ra); //-ra; // ???! backward?  was causing strange glitches around rough metal spheres
+    ra = min(ra, 1.); //saturate(ra); //ra = max(ra, 0.); //
+    // specular
+	Ray rectRay = Ray(p, r);
+    vec3 planePointCenter = rayPlaneIntersect(rectRay, rect) - rect.center;
+    // project point on the plane on which the rectangle lies
+    vec2 planePointProj = vec2(dot(planePointCenter, rect.right), 
+                               dot(planePointCenter, rect.up));
+    // translate the point to the top-right quadrant of the rectangle, project it on
+    // the rectangle or its edge and translate back using sign of the original point.
+    vec2 c = min(abs(planePointProj), rect.halfSize) * sign(planePointProj);
+    vec3 L = rect.center + rect.right * c.x + rect.up * c.y - p;
+    float lightDist = length(L);
+    
+    vec3 l = normalize(L);
+    //vec3 h = normalize(v + l);
+    float vl = dot(v, l),
+        nl = dot(n, l),
+        nh,// = max(dot(n, h), 2e-4);
+        vh;// = max(dot(v, h), 2e-4);
+    ShadingDotProducts(vl, nv, nl, nh, vh);
+    ClampDotProducts(vl, nv, nl, nh, vh);
+//nl = max(nl, 0.);
+    
+    float attenuation = softShadow(Ray(sEPS * sign(nl) * n + p, normalize(rect.center - p))); //l)); //1.; //
+    
+    float alpha = roughness * roughness;
+    float aPrime = saturate(alpha + 0. / (2. * lightDist)); // this rect has no thickness, so keep same aPrime as alpha
+    
+    vec3 fresnel;  
+    vec4 lc = areaLight(ra, nl, dot(r,l), nh, vh, nv, lightDist, f0, roughness, aPrime, 3., fresnel);
+
+  return attenuation * (lc.a * (1. - fresnel) * cdiff + lc.rgb);
+ /*
+    vec3 fresnel = F_Schlick(f0, vh);
+    ret.rgb = D_TrowbridgeReitz(nh, alpha, aPrime * sqr(aPrime)) //D_GGXRect(nh, alpha, aPrime)
+        * G_Smith(nv, ra, roughness)
+        * fresnel;
+    //float denom = lightDist / lightFalloff;
+    //attenuation *= 1. / (denom * denom + 1.);
+    ret *= attenuation;
+    return ret; */
+}
+
+
+vec3 snapDisc(vec3 q, vec3 dpos, float drad, vec3 ddir)
+{
+    vec3 to = q - dpos;
+    to -= dot(to, ddir) * ddir;
+    return saturate(drad / length(to + 1e-7)) * to + dpos;
+}
+
+// WIP - it's showing up and kinda working now
+// haven't finished reading that part of Lagarde's paper!!
+// but he does not use Most Representative Point method for disc lights!
+// So I'm trying something experimental.
+// so far it kind of works; not sure that it's correct yet
+vec3 discLight(vec3 discpos, float discradius, vec3 discdir, 
+            vec3 p, vec3 r, 
+            vec3 n, vec3 v, float nv, 
+            vec3 f0, vec3 cdiff, float roughness)
+{
+    vec3 L = discpos - p,
+        centerToRay = dot(L, r) * r - L; // on ray near disc center
+    //centerToRay -= dot(centerToRay, discdir) * discdir;
+    //vec3 O = saturate(discradius / length(centerToRay + 1e-7)) * centerToRay;
+    //L += O; //O - dot(O, discdir) * discdir; // fine, this isn't quite right, done here, actually; kind of cosine-weighted.
+    // I think I should try the snap algorithm way and just guess at the alphaPrime: 
+    L += snapDisc(centerToRay, vec3(0), discradius, discdir);
+    // no real horizon handling, just let shadowing handle it
+    float lightDist = length(L);
+    vec3 l = normalize(L);
+    //vec3 h = normalize(v + l);
+    float vl = dot(v, l),
+        nl = dot(n, l),
+        nh, // = max(dot(n, h), 2e-4);
+        vh; // = max(dot(v, h), 2e-4);
+    ShadingDotProducts(vl, nv, nl, nh, vh);
+    ClampDotProducts(vl, nv, nl, nh, vh);
+    //nl = max(nl, 0.);
+    
+    float ra = nl; // TEMP - not correcting for MRP yet
+    
+    float attenuation = softShadow(Ray(sEPS * sign(nl) * n + p, normalize(discpos - p))); //l)); //1.; //
+    
+    float alpha = roughness * roughness;
+    float aPrime = saturate(alpha + 0. / (2. * lightDist)); // disc has no thickness, so keep same aPrime as alpha? idk actually
+    vec3 fresnel;  
+    vec4 lc = areaLight(ra, nl, dot(r,l), nh, vh, nv, lightDist, f0, roughness, aPrime, 1., fresnel);
+    return attenuation * (lc.a * (1. - fresnel) * cdiff + lc.rgb);
+}
+
+const float mEPS = .001;
+
+vec2 rayMarch(Ray ray, float tmax, int iter)
+{
+	float t = 0.;
+    vec2 h = vec2(-1.);
+    for (int i = iter; i-- > 0; )
+    {  
+        h = Scene(t * ray.dir + ray.org);
+        if (h.x < mEPS * t || t >= tmax) break;
+        t += h.x;
+    }
+    if (t >= tmax) h.y = -1.;
+    return vec2(t, h.y);
+}
+// exact same raymarcher, different scene
+vec2 rayMarchNoLights(Ray ray, float tmax, int iter)
+{
+	float t = 0.;
+    vec2 h = vec2(-1.);
+    for (int i = iter; i-- > 0; )
+    {  
+        h = SceneNoLights(t * ray.dir + ray.org);
+        if (h.x < mEPS * t || t >= tmax) break;
+        t += h.x;
+    }
+    if (t >= tmax) h.y = -1.;
+    return vec2(t, h.y);
+}
+
+// spin v by radian angle around unit axis
+vec3 erot(vec3 v, vec3 ax, float ra)
+{
+    float c = cos(ra), s = sin(ra);
+    return c * v + s * cross(ax, v) + (1. - c) * dot(ax, v) * ax;
+}
+
+// TODO material parameters from id
+
+vec3 shadeSurface(Ray ray, vec2 hit)
+{
+    vec3 col = vec3(0);
+    if (hit.y >= 0.) // check id
+    {
+        const vec3 
+            SPHERE_ALBEDO = vec3(.2, .01, .6),
+            SILVER_F0 = vec3(.95, .93, .88),
+            PLASTIC_F0 = vec3(.05);
+
+        const vec3 cLight[] = vec3[] (
+            5. * vec3(2,2,2), //0,1,0), //
+            5. * vec3(0,2,1), //.1,3,.1), //3,2,1), //
+            .5 * vec3(1,1,0),
+            2. * vec3(.5,.1,0),
+            1. * vec3(1,.0,.0)
+        );
+
+        vec3 pos = hit.x * ray.dir + ray.org,
+            normal = calcNormal(pos),
+            viewDir = -ray.dir,
+            reflectDir = reflect(ray.dir, normal),
+            albedo = SPHERE_ALBEDO,
+            reflectance = SILVER_F0;
+
+        Ray reflectRay = Ray(pos, reflectDir); //, vec3(0));
+        float roughness = fract(hit.y), 
+            metalness = 1.; //.88; //
+
+        // FIXME material switch happens 2 places in here, should refactor
+        if (hit.y >= 3.) // floor
+        {
+            albedo = pow(textureLod(iChannel0, pos.xz * .18, 0.).rgb, vec3(2.2)); // gamma EOTF
+          #ifdef FLOOR_ROUGHNESS
+            roughness = albedo.r * .5;
+          #else
+            roughness = .08;
+          #endif
+            metalness = .0;
+            reflectance = PLASTIC_F0;
+        }
+        else if (hit.y < 1.)
+            return cLight[int(10. * fract(hit.y))];
+        
+        float nv = dot(normal, viewDir); //max(dot(normal, viewDir), 0.); // common to all lights - but don't clamp here?
+        vec3 F0 = mix(reflectance, albedo, metalness), // rgb spec response at perpendicular angle
+            cdiff = (1. - metalness) / pi * albedo;
+        // much refactored
+        col += cLight[0] * sphereLight(SPHERE_LIGHT_POS, SPHERE_LIGHT_RADIUS,
+                    pos, reflectDir, 
+                    normal, viewDir, nv, 
+                    F0, cdiff, roughness);
+        col += cLight[1] * lineLight(lineStart, lineEnd, LINE_LIGHT_RADIUS, 
+                    pos, reflectDir, 
+                    normal, viewDir, nv, 
+                    F0, cdiff, roughness);
+        col += 0. * cLight[2] * sphereLight(SPHERE_LIGHT2_POS, SPHERE_LIGHT2_RADIUS,
+                    pos, reflectDir, 
+                    normal, viewDir, nv, 
+                    F0, cdiff, roughness);
+        col += cLight[3] * rectLight(rect, 
+                    pos, reflectDir, 
+                    normal, viewDir, nv, 
+                    F0, cdiff, roughness);
+        col += 1. * cLight[4] * discLight(DISC_LIGHT_POS, DISC_LIGHT_RADIUS, DISC_LIGHT_DIR,
+                    pos, reflectDir, 
+                    normal, viewDir, nv, 
+                    F0, cdiff, roughness);
+        
+        //col += .025 * albedo; // global ambient
+        // TODO IBL cubemap - not main point of this toy
+        
+        // calculate glossy reflection + IBL
+        float alp = roughness * roughness;
+        vec3 indirectSpecular = .0 * vec3(.1125, .1875, .25) + .0 * reflectDir.y; // fake as little as possible
+        for (int i = 0; i < REFLECTION_TRACES; ++i)
+        {
+			float percentage = float(i) / float(REFLECTION_TRACES);
+            vec3 delta = erot(vec3(0, 1, 0), reflectDir, 
+                                      tau * percentage);
+			reflectRay.dir = normalize(alp * delta + reflectDir);
+        	vec2 hi = rayMarchNoLights(reflectRay, 10., REFLECTION_TRACE_STEPS + IZERO);
+            // another material id switch
+            if (floor(hi.y) == 3.)
+            { // wood floor
+                vec3 indirectPos = pos + hi.x * reflectRay.dir;
+                indirectSpecular += pow(textureLod(iChannel0, indirectPos.xz * .18, 0.).rgb, vec3(2.2)); // gamma srgb2lin EOTF
+            }  
+            else if (floor(hi.y) == 1.)
+                indirectSpecular += .4 * SPHERE_ALBEDO;
+        }
+        indirectSpecular /= float(REFLECTION_TRACES);
+        
+        vec2 dfg = PrefilteredDFG_Karis(roughness, nv);
+        vec3 specularColor = F0 * dfg.x + dfg.y;
+        vec3 ibl = indirectSpecular * specularColor
+            //+ Irradiance_SphericalHarmonics(normal) * PI_INV * albedo // TODO maybe do cubemap IBL instead
+            ;
+        // HACK the reflection+IBL lighting is basically ambient reflections
+        // from the lights, of mostly the table, but gives impression of nearby objects
+        col += ibl * .5; // ambient (why .5?)
+    }   
+    // dim brown-ish fog
+    return mix(col, .1 * vec3(.01, .006, .004),
+               		clamp(1. - exp(-hit.x * .06), 0., 1.));
+}
+
+vec3 renderScene(Ray ray, float tfar)
+{
+    vec2 hit = rayMarch(ray, tfar, RAYMARCH_STEPS + IZERO);
+    return shadeSurface(ray, hit);
+}
+
+void initScene()
+{ // animate global state
+    float t = T; // macro for iTime animation
+    // set line light endpoints
+    vec3 lineRot = erot(vec3(2.95, 0, 0), vec3(0,0,1), t),
+        linePos = vec3(6. * sin(t), 3., 5.);
+    lineStart = linePos - lineRot;
+    lineEnd = linePos + lineRot;
+	// set rect light parameters
+    rect.up = vec3(0, 0, 1);
+    rect.right = vec3(1, 0, 0);
+    rect.front = normalize(cross(rect.right, rect.up));
+    vec2 widthScale = vec2(cos(t), sin(t)) * .25 + .75;
+    rect.halfSize = vec2(2.5, 1.5) * widthScale * RECT_LIGHT_SIZE;    
+    rect.center = vec3(0., 6., sin(t) * 4. - 1.5);    
+    rect.a = rect.center + rect.halfSize.x * rect.right + rect.halfSize.y * rect.up;
+    rect.b = rect.center - rect.halfSize.x * rect.right + rect.halfSize.y * rect.up;
+    rect.c = rect.center - rect.halfSize.x * rect.right - rect.halfSize.y * rect.up;
+    rect.d = rect.center + rect.halfSize.x * rect.right - rect.halfSize.y * rect.up;
+}
+
+mat3 lookAt(vec3 origin, vec3 target)
+{
+    vec3 fw = normalize(target - origin),
+        rt = normalize(cross(fw, vec3(0, 1, 0))),
+        up = normalize(cross(rt, fw));
+    return mat3(rt, up, fw);
+}
+
+const vec3 CAMERA_POS = vec3(0., 9., 21.),
+        CAMERA_TARGET = vec3(0, 1, 0);
+const float CAMERA_FAR = 50.;
+
+Ray getCameraRay(vec2 uv, float zoom)
+{
+    mat3 camera = lookAt(CAMERA_POS, CAMERA_TARGET);
+    vec3 dir = normalize(camera * vec3(uv, zoom));
+    return Ray(CAMERA_POS, dir);
+}
+
+vec3 tonemap(vec3 c)
+{
+    return asinh(c) / asinh(2.);
+}
+
+const int SSAA = 2; // how many samples/pixel when supersampling
+
+void main()
+{
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 R = viewPort.xy,
+        blueNz = float(TAA) * (texelFetch(iChannel1, (iFrame * ivec2(113, 127)) & 63, 0).rg - .5),
+        q = (2. * (fragCoord + blueNz) - R) / R.y;
+    initScene();
+    const float phi = sqrt(1.25) + .5;
+    int nss = (1-TAA) * (SSAA + 1) + 1;
+    vec3 c = vec3(0);
+    for (int ss = IZERO + nss; ss-- > 0; ) {
+        float j = (float(ss) + .5) / float(nss);
+        vec2 jit = float(1-TAA) * 1. / R.y * sqrt(j) * sin(vec2(.5 * pi, 0) + j * tau * phi) + q;
+        vec3 rc = renderScene(getCameraRay(jit, 2.5), CAMERA_FAR);
+        c += sqrt(tonemap(rc)); // accumulating tonemapped samples with gamma really helps, otherwise bright lights dominate and won't AA
+    }
+    c /= float(nss);
+    outColor = vec4(c * c, 1.);
+}
+
+
+// see also:
+// Area Lights WIP: (SS10) by angelo12  http://shadertoy.com/view/ttGSW3
+// Light rod test by Zavie  http://shadertoy.com/view/XcdGRS
+// 3D Analytic Line Light Primitive by chronos  http://shadertoy.com/view/MfsGzS  is an independent derivation I should investigate
+// Simple Light Door by ParaBellum  http://shadertoy.com/view/tsKXzK
+// Approx Analytic Area Light by neoragex2002  http://shadertoy.com/view/4dVGDt
+// SDF Fake Area Light by XT95  http://shadertoy.com/view/llfBz7
+// and maybe search "linearly transformed cosines"
+// I haven't found iq's sphere light yet
+]]>
+</program>
+</language>
+</jittershader>

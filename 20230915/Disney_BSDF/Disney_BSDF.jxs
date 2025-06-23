@@ -1,0 +1,934 @@
+<jittershader name="default">
+    <description>Default Slab </description>
+
+    <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+    <param name="pos" type="vec3" state="POSITION" />
+    <param name="uv" type="vec2" state="TEXCOORD" />
+    <param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="eye" type="vec3" state="CAMERA_POSITION" />
+    <param name="sample" type="float" default="0.0" />
+    <param name="iMouse" type="vec3" default="0.0 0.0 0.0" />
+
+    <param name="envTex" type="int" default="0" />
+    <param name="tex01" type="int" default="1" />
+    // <param name="iFrame" type="int" default="1" />
+
+    // <param name="aperture" type="float" default="0.1" />
+    // <param name="DoFdist" type="float" default="0" />
+
+    <language name="glsl" version="1.5">
+
+        <bind param="MVP" program="vp" />
+
+        <bind param="pos" program="vp" />
+        <bind param="uv" program="vp" />
+        <bind param="viewPort" program="fp" />
+        <bind param="eye" program="fp" />
+        <bind param="sample" program="fp" />
+        <bind param="iFrame" program="fp" />
+        <bind param="iMouse" program="fp" />
+        <bind param="envTex" program="fp" />
+        <bind param="tex01" program="fp" />
+
+        // <bind param="aperture" program="fp" />
+        // <bind param="DoFdist" program="fp" />
+
+        <program name="vp" type="vertex"  >
+        <![CDATA[
+            #version 330 core
+            
+            in vec3 pos;
+            in vec2 uv;
+
+            out jit_PerVertex {
+                vec2 uv;
+            } jit_out;
+            uniform mat4 MVP;
+
+            
+            void main(void) {
+                gl_Position = vec4(pos, 1.);
+                jit_out.uv = uv;
+            }
+        ]]>
+        </program>
+        
+        <program name="fp" type="fragment"  >
+        <![CDATA[
+#version 330 core
+    
+in jit_PerVertex {
+    vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+
+
+uniform vec2 viewPort;
+uniform vec3 eye;
+uniform float sample;
+uniform vec3 iMouse;
+uniform samplerCube envTex;
+uniform sampler2D tex01;
+// uniform int iFrame;
+// uniform float aperture;
+// uniform float DoFdist;
+
+
+// ----------------------------------------------------------------
+// Defines
+// ----------------------------------------------------------------
+// - Scene can go from 0 to 2
+// - The furnace_test show the energy loss, the image should be
+//   all white in a perfect pathtracer
+//   
+// ----------------------------------------------------------------
+#define CAMERA_SENSITIVTY .01
+#define FOCAL_LENGTH 5.
+
+
+// ---------------------------------------------
+// Hash & Random - From iq
+// ---------------------------------------------
+int   seed = 1;
+int   rand(void) { seed = seed*0x343fd+0x269ec3; return (seed>>16)&32767; }
+float frand() { return float(rand())/32767.0; }
+vec2 frand2() { return vec2(frand(), frand()); }
+vec3 frand3() { return vec3(frand(), frand(), frand()); }
+// void  srand( ivec2 p, int frame )
+// {
+//     int n = frame;
+//     n = (n<<13)^n; n=n*(n*n*15731+789221)+1376312589; // by Hugo Elias
+//     n += p.y;
+//     n = (n<<13)^n; n=n*(n*n*15731+789221)+1376312589;
+//     n += p.x;
+//     n = (n<<13)^n; n=n*(n*n*15731+789221)+1376312589;
+//     seed = n;
+// }
+// vec3 hash3(vec3 p) {
+//     uvec3 x = uvec3(floatBitsToUint(p));
+//     const uint k = 1103515245U; 
+//     x = ((x>>8U)^x.yzx)*k;
+//     x = ((x>>8U)^x.yzx)*k;
+//     x = ((x>>8U)^x.yzx)*k;
+    
+//     return vec3(x)*(1.0/float(0xffffffffU));
+// }
+
+struct searchInfo {
+    float rngState;
+    vec3 finalColor;
+    vec3 through;
+};
+
+uint base_hash(uvec2 p) {
+    p = 1103515245U*((p >> 1U)^(p.yx));
+    uint h32 = 1103515245U*((p.x)^(p.y>>3U));
+    return h32^(h32 >> 16);
+}
+
+float g_seed = 0.;
+
+float hash1(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    return float(n)/float(0xffffffffU);
+}
+
+vec2 hash2(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec2 rz = uvec2(n, n*48271U);
+    return vec2(rz.xy & uvec2(0x7fffffffU))/float(0x7fffffff);
+}
+
+vec3 hash3(inout searchInfo search) {
+    uint n = base_hash(floatBitsToUint(vec2(search.rngState+=.1,search.rngState+=.1)));
+    uvec3 rz = uvec3(n, n*16807U, n*48271U);
+    return vec3(rz & uvec3(0x7fffffffU))/float(0x7fffffff);
+}
+
+// ---------------------------------------------
+// Maths
+// ---------------------------------------------
+#define saturate(x) clamp(x,0.,1.)
+#define PI 3.141592653589
+
+mat3 lookat(vec3 ro, vec3 ta)
+{
+    const vec3 up = vec3(0.,1.,0.);
+    vec3 fw = normalize(ta-ro);
+    vec3 rt = normalize( cross(fw, normalize(up)) );
+    return mat3( rt, cross(rt, fw), fw );
+}
+
+mat2 rot(float v) {
+    float a = cos(v);
+    float b = sin(v);
+    return mat2(a,b,-b,a);
+}
+
+// From Fizzer - https://web.archive.org/web/20170610002747/http://amietia.com/lambertnotangent.html
+vec3 cosineSampleHemisphere(vec3 n)
+{
+    vec2 rnd = frand2();
+
+    float a = PI*2.*rnd.x;
+    float b = 2.0*rnd.y-1.0;
+    
+    vec3 dir = vec3(sqrt(1.0-b*b)*vec2(cos(a),sin(a)),b);
+    return normalize(n + dir);
+}
+
+// From Pixar - https://graphics.pixar.com/library/OrthonormalB/paper.pdf
+void basis(in vec3 n, out vec3 b1, out vec3 b2) 
+{
+    if(n.z<0.){
+        float a = 1.0 / (1.0 - n.z);
+        float b = n.x * n.y * a;
+        b1 = vec3(1.0 - n.x * n.x * a, -b, n.x);
+        b2 = vec3(b, n.y * n.y*a - 1.0, -n.y);
+    }
+    else{
+        float a = 1.0 / (1.0 + n.z);
+        float b = -n.x * n.y * a;
+        b1 = vec3(1.0 - n.x * n.x * a, b, -n.x);
+        b2 = vec3(b, 1.0 - n.y * n.y * a, -n.y);
+    }
+}
+
+vec3 toWorld(vec3 x, vec3 y, vec3 z, vec3 v)
+{
+    return v.x*x + v.y*y + v.z*z;
+}
+
+vec3 toLocal(vec3 x, vec3 y, vec3 z, vec3 v)
+{
+    return vec3(dot(v, x), dot(v, y), dot(v, z));
+}
+
+// ---------------------------------------------
+// Color
+// ---------------------------------------------
+vec3 RGBToYCoCg(vec3 rgb)
+{
+    float y  = dot(rgb, vec3(  1, 2,  1 )) * 0.25;
+    float co = dot(rgb, vec3(  2, 0, -2 )) * 0.25 + ( 0.5 * 256.0/255.0 );
+    float cg = dot(rgb, vec3( -1, 2, -1 )) * 0.25 + ( 0.5 * 256.0/255.0 );
+    return vec3(y, co, cg);
+}
+
+vec3 YCoCgToRGB(vec3 ycocg)
+{
+    float y = ycocg.x;
+    float co = ycocg.y - ( 0.5 * 256.0 / 255.0 );
+    float cg = ycocg.z - ( 0.5 * 256.0 / 255.0 );
+    return vec3(y + co-cg, y + cg, y - co-cg);
+}
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+// ---------------------------------------------
+// Microfacet
+// ---------------------------------------------
+float Fresnel(float n1, float n2, float VoH, float f0, float f90)
+{
+    float r0 = (n1-n2) / (n1+n2);
+    r0 *= r0;
+    if (n1 > n2)
+    {
+        float n = n1/n2;
+        float sinT2 = n*n*(1.0-VoH*VoH);
+        if (sinT2 > 1.0)
+            return f90;
+        VoH = sqrt(1.0-sinT2);
+    }
+    float x = 1.0-VoH;
+    float ret = r0+(1.0-r0)*pow(x, 5.);
+    
+    return mix(f0, f90, ret);
+}
+vec3 F_Schlick(vec3 f0, float theta) {
+    return f0 + (1.-f0) * pow(1.0-theta, 5.);
+}
+
+float F_Schlick(float f0, float f90, float theta) {
+    return f0 + (f90 - f0) * pow(1.0-theta, 5.0);
+}
+
+float D_GTR(float roughness, float NoH, float k) {
+    float a2 = pow(roughness, 2.);
+    return a2 / (PI * pow((NoH*NoH)*(a2*a2-1.)+1., k));
+}
+
+float SmithG(float NoV, float roughness2)
+{
+    float a = pow(roughness2, 2.);
+    float b = pow(NoV,2.);
+    return (2.*NoV) / (NoV+sqrt(a + b - a * b));
+}
+
+float GeometryTerm(float NoL, float NoV, float roughness)
+{
+    float a2 = roughness*roughness;
+    float G1 = SmithG(NoV, a2);
+    float G2 = SmithG(NoL, a2);
+    return G1*G2;
+}
+
+vec3 SampleGGXVNDF(vec3 V, float ax, float ay, float r1, float r2)
+{
+    vec3 Vh = normalize(vec3(ax * V.x, ay * V.y, V.z));
+
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    vec3 T1 = lensq > 0. ? vec3(-Vh.y, Vh.x, 0) * inversesqrt(lensq) : vec3(1, 0, 0);
+    vec3 T2 = cross(Vh, T1);
+
+    float r = sqrt(r1);
+    float phi = 2.0 * PI * r2;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(1.0 - t1 * t1) + s * t2;
+
+    vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+
+    return normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
+}
+
+float GGXVNDFPdf(float NoH, float NoV, float roughness)
+{
+    float D = D_GTR(roughness, NoH, 2.);
+    float G1 = SmithG(NoV, roughness*roughness);
+    return (D * G1) / max(0.00001, 4.0f * NoV);
+}
+
+
+// ---------------------------------------------------------------------------------
+// Triplanar & bump mapping! 
+// clever code taken from Shane
+// https://www.shadertoy.com/view/MscSDB
+// ---------------------------------------------------------------------------------
+vec3 tex3D( sampler2D tex, vec3 p, vec3 n )
+{
+    n = abs(n);
+    vec4 col = texture(tex, p.yz)*n.x + texture(tex, p.xz)*n.y + texture(tex, p.xy)*n.z;
+    return pow(col.rgb,vec3(2.2));
+}
+vec3 bumpMapping( sampler2D tex, vec3 p, vec3 n, float bf )
+{
+    const vec2 e = vec2(0.001, 0);
+    
+    mat3 m = mat3( tex3D(tex, p - e.xyy, n).rgb,
+                   tex3D(tex, p - e.yxy, n).rgb,
+                   tex3D(tex, p - e.yyx, n).rgb);
+    
+    vec3 g = vec3(0.299, 0.587, 0.114) * m;
+    g = (g - dot( tex3D(tex,  p , n).rgb, vec3(0.299, 0.587, 0.114)) )/e.x;
+    g -= n * dot(n, g);
+                      
+    return normalize( n + g*bf );
+    
+}
+
+// ---------------------------------------------
+// Data IO
+// ---------------------------------------------
+// struct Data {
+//     float theta;
+//     float phi;
+//     float r;
+    
+//     vec3 ro;
+//     vec3 ta;
+    
+//     vec3 oldRo;
+//     vec3 oldTa;
+    
+//     vec4 oldMouse;
+    
+//     float refreshTime;
+// };
+
+// float readData1(sampler2D tex, int id) {
+//     return texelFetch(tex, ivec2(id,0), 0).r;
+// }
+// vec3 readData3(sampler2D tex, int id) {
+//     return texelFetch(tex, ivec2(id,0), 0).rgb;
+// }
+// vec4 readData4(sampler2D tex, int id) {
+//     return texelFetch(tex, ivec2(id,0), 0);
+// }
+// vec4 writeData(vec4 col, vec2 fragCoord, int id, float value) {
+//     if (floor(fragCoord.x) == float(id))
+//         col.r = value;
+        
+//     return col;
+// }
+// vec4 writeData(vec4 col, vec2 fragCoord, int id, vec3 value) {
+//     if (floor(fragCoord.x) == float(id))
+//         col.rgb = value.rgb;
+        
+//     return col;
+// }
+// vec4 writeData(vec4 col, vec2 fragCoord, int id, vec4 value) {
+//     if (floor(fragCoord.x) == float(id))
+//         col = value;
+        
+//     return col;
+// }
+// Data initData() {
+//     Data data;
+    
+//     data.theta = -.5;
+//     data.phi = .6;
+//     data.r = 3.;
+    
+//     data.ro = normalize(vec3(cos(data.theta), data.phi, sin(data.theta)))*data.r;
+//     data.ta = vec3(0.,0.35,.5);
+    
+//     data.oldRo = data.ro;
+//     data.oldTa = data.ta;
+    
+//     data.oldMouse = vec4(0.);
+    
+//     data.refreshTime = 0.;
+    
+//     return data;
+// }
+// Data readData(sampler2D tex, vec2 invRes) {
+//     Data data;
+    
+//     data.theta = readData1(tex, 0);
+//     data.phi = readData1(tex, 1);
+//     data.r = readData1(tex, 2);
+    
+//     data.ro = readData3(tex, 3);
+//     data.ta = readData3(tex, 4);
+    
+//     data.oldRo = readData3(tex, 5);
+//     data.oldTa = readData3(tex, 6);
+    
+//     data.oldMouse = readData4(tex, 7);
+//     data.refreshTime = readData1(tex, 8);
+    
+//     return data;
+// }
+// vec4 writeData(vec4 col, vec2 fragCoord, Data data) {
+//     col = writeData(col, fragCoord.xy, 0, data.theta);
+//     col = writeData(col, fragCoord.xy, 1, data.phi);
+//     col = writeData(col, fragCoord.xy, 2, data.r);
+//     col = writeData(col, fragCoord.xy, 3, data.ro);
+//     col = writeData(col, fragCoord.xy, 4, data.ta);
+//     col = writeData(col, fragCoord.xy, 5, data.oldRo);
+//     col = writeData(col, fragCoord.xy, 6, data.oldTa);
+//     col = writeData(col, fragCoord.xy, 7, data.oldMouse);
+//     col = writeData(col, fragCoord.xy, 8, data.refreshTime);
+//     return col;
+// }
+
+// ---------------------------------------------
+// Distance field 
+// ---------------------------------------------
+float box( vec3 p, vec3 b )
+{
+    vec3 q = abs(p) - b;
+    return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+float smin( float a, float b, float k )
+{
+    float h = max(k-abs(a-b),0.0);
+    return min(a, b) - h*h*0.25/k;
+}
+float smax( float a, float b, float k )
+{
+    float h = max(k-abs(a-b),0.0);
+    return max(a, b) + h*h*0.25/k;
+}
+
+float teapot(vec3 p) {
+    p.y -= .02;
+    float scale = 1.2;
+    p *= scale;
+    
+    // body
+    float body;
+    {
+        body = length(p-vec3(0.,.5,0.))-.5+smoothstep(0.1,.8,p.y)*.5;// - smoothstep(0.,.02, p.y)*.01;
+    }
+    
+    //nose
+    float nose;
+    {
+        nose = length(p.xz-vec2(0.0,0.1+smoothstep(0.,.45,p.y)*.45))-.04;
+        nose = max(nose, -p.y+.15);
+    } 
+    
+    //grip
+    float grip;
+    {
+        vec2 pos = vec2(-.35,.34);
+        grip = length(p.zy-pos)-.12;
+        grip = smax(grip, -(length(p.zy-pos)-.1), .005);
+        grip = smax(grip, abs(p.x)-.03, .05);
+    } 
+    
+    //lid
+    float lid;
+    {
+        vec3 r= vec3(.2,.025,.2);
+        vec3 pp = p - vec3(0.,.51,0.);
+        float k0 = length(pp/r);
+        float k1 = length(pp/(r*r));
+        lid = k0*(k0-1.0)/k1;
+        lid = smin(lid, length(pp-vec3(0.,.05,0.))-.03, 0.01);
+    }
+    
+    float d = smin(body, nose, .1);
+    d = smin(d, grip, .05);
+    d = abs(d)-0.005;
+    d = max(d, p.y-.5);    
+    d = max(d, min(p.z-.3,p.y-.4));
+    d = min(d, lid);
+    
+    
+    return d/scale*.65;
+}
+float teapot2(vec3 p) {
+    float s = .4;
+    p -= vec3(.3,-.05,1.5);
+    p.xz = rot(-2.3)*p.xz;
+    return teapot(p*s)/s;
+}
+
+float bowl(vec3 p) {
+    p.y -= .42;
+    float d = length(p)-.45;
+    d = abs(d)-.025;
+    d = smax(d, p.y, .05);
+    
+    float grip;
+    {
+        vec2 pos = vec2(-.45,-.18);
+        grip = length(p.zy-pos)-.15;
+        grip = smax(grip, -(length(p.zy-pos)-.1), .05);
+        grip = smax(grip, abs(p.x)-.03, .05);
+        grip = max(grip, -(length(p)-.45));
+    } 
+    d = smin(d, grip, .05);
+    d = smax(d, -p.y-.5, .2);
+    return d;
+
+}
+
+float tea(vec3 p) {
+    p.y -= .43;
+    float d = length(p)-.4;
+    d = max(d, p.y+.1);
+    d = smax(d, -p.y-.5, .2);
+    return d;
+}
+
+
+float boxLight(vec3 p) {
+    return box(p-vec3(-5.,1.,0.), vec3(.5,.5,2.));
+}
+
+
+float map(vec3 p) {
+
+    float d = p.y;
+    d = min(d, teapot2(p));
+    d = min(d, min(bowl(p), tea(p)));
+    d = min(d, boxLight(p));
+    
+    return d;
+}
+
+// ---------------------------------------------
+// Ray tracing 
+// ---------------------------------------------
+float trace(vec3 ro, vec3 rd, vec2 nf) {
+    float t = nf.x;
+    float s = sign(map(ro));
+    for(int i=0; i<256; i++) {
+        float d = map(ro+rd*t) * s;
+        if (t > nf.y || abs(d)<0.001) break;
+        t += d;
+    }
+    
+    return t;
+}
+
+vec3 normal(vec3 p, float t) {
+    vec2 eps = vec2(0.0001,0.0);
+    float d = map(p);
+    vec3 n;
+    n.x = d - map(p - eps.xyy);
+    n.y = d - map(p - eps.yxy);
+    n.z = d - map(p - eps.yyx);
+    n = normalize(n);
+    return n;
+}
+
+// ---------------------------------------------
+// Raw Frame
+// ---------------------------------------------
+
+
+// ---------------------------------------------
+// Material
+// ---------------------------------------------
+struct Material {
+    vec3 albedo;
+    float metallic;
+    float roughness;
+    vec3 emissive;
+    
+    float specTrans;
+    float ior;
+    float absorption;
+};
+Material newMaterial() {
+    Material mat;
+    mat.albedo = vec3(1.);
+    mat.metallic = 0.;
+    mat.roughness = .0;
+    mat.emissive = vec3(0.);
+    mat.specTrans = 0.;
+    mat.ior = 1.33;
+    mat.absorption = 1.;
+    
+    return mat;
+}
+Material getMaterial(vec3 p, inout vec3 n) {
+    
+    Material mat = newMaterial();
+        
+    
+    float d = map(p);
+    if (d == bowl(p)) { // Bowl
+        mat.metallic = 0.0;
+        mat.albedo = vec3(1.);
+        mat.specTrans = 1.;
+        mat.absorption = 0.;
+        mat.roughness = .1;
+        mat.ior = 1.5;
+    } else if (d == teapot2(p)) { // Teapot
+        mat.metallic = 0.0;
+        mat.albedo = vec3(1.);
+        mat.specTrans = 0.;
+        mat.absorption = 0.;
+        mat.roughness = .1;
+        mat.ior = 1.5;
+    } else if (d == tea(p)) { // Tea
+        mat.metallic = 0.0;
+        mat.albedo = vec3(0.,-1.,-2.);
+        mat.specTrans = 1.;
+        mat.absorption = 5.;
+        mat.roughness = .05;
+        mat.ior = 1.33;
+    } else if (d == boxLight(p)) { // Area light
+        mat.emissive = vec3(3.0);
+    } else { // Ground
+        mat.metallic = 1.;
+        mat.specTrans = 0.;
+        mat.albedo = texture(tex01,p.zx).rgb;
+        n = bumpMapping(tex01, p.zyx,n, 0.01);
+        mat.roughness = luma(mat.albedo);
+    }
+    
+    return mat;
+}
+
+// ---------------------------------------------
+// State
+// ---------------------------------------------
+struct State {
+    bool isRefracted;
+    bool hasBeenRefracted;
+    float lastIOR;
+};
+
+State initState() {
+    State s;
+    s.hasBeenRefracted = false;
+    s.isRefracted = false;
+    s.lastIOR = 1.;
+    
+    return s;
+}
+
+
+// ---------------------------------------------
+// BSDF
+// ---------------------------------------------
+vec3 evalDisneyDiffuse(Material mat, float NoL, float NoV, float LoH, float roughness) {
+    float FD90 = 0.5 + 2. * roughness * pow(LoH,2.);
+    float a = F_Schlick(1.,FD90, NoL);
+    float b = F_Schlick(1.,FD90, NoV);
+    
+    return mat.albedo * (a * b / PI);
+}
+
+vec3 evalDisneySpecularReflection(Material mat, vec3 F, float NoH, float NoV, float NoL) {
+    float roughness = pow(mat.roughness, 2.);
+    float D = D_GTR(roughness, NoH,2.);
+    float G = GeometryTerm(NoL, NoV, pow(0.5+mat.roughness*.5,2.));
+
+    vec3 spec = D*F*G / (4. * NoL * NoV);
+    
+    return spec;
+}
+
+vec3 evalDisneySpecularRefraction(Material mat, float F, float NoH, float NoV, float NoL, float VoH, float LoH, float eta, out float pdf) {
+    float roughness = pow(mat.roughness, 2.);
+    float D = D_GTR(roughness, NoH, 2.);
+    float G = GeometryTerm(NoL, NoV, pow(0.5+mat.roughness*.5, 2.));
+    float denom = pow(LoH + VoH*eta, 2.);
+
+    float jacobian = abs(LoH) / denom;
+    pdf = SmithG(abs(NoL), roughness*roughness) * max(0.0, VoH) * D * jacobian / NoV;
+    
+    vec3 spec = pow(1.-mat.albedo, vec3(0.5))  * D * (1.-F) * G * abs(VoH) * jacobian * pow(eta, 2.) / abs(NoL * NoV);
+    return spec;
+}
+
+vec4 sampleDisneyBSDF(vec3 v, vec3 n, in Material mat, out vec3 l, inout State state) {
+    state.hasBeenRefracted = state.isRefracted;
+    
+    float roughness = pow(mat.roughness, 2.);
+
+    // sample microfacet normal
+    vec3 t,b;
+    basis(n,t,b);
+    vec3 V = toLocal(t,b,n,v);
+    vec3 h = SampleGGXVNDF(V, roughness,roughness, frand(), frand());
+    if (h.z < 0.0)
+        h = -h;
+    h = toWorld(t,b,n,h);
+
+    // fresnel
+    float VoH = dot(v,h);
+    vec3 f0 = mix(vec3(0.04), mat.albedo, mat.metallic);
+    vec3 F = F_Schlick(f0, VoH);
+    float dielF = Fresnel(state.lastIOR, mat.ior, abs(VoH), 0., 1.);
+    
+    // lobe weight probability
+    float diffW = (1.-mat.metallic) * (1.-mat.specTrans);
+    float reflectW = luma(F);
+    float refractW = (1.-mat.metallic) * (mat.specTrans) * (1.-dielF);
+    float invW = 1./(diffW + reflectW + refractW);
+    diffW *= invW;
+    reflectW *= invW;
+    refractW *= invW;
+    
+    // cdf
+    float cdf[3];
+    cdf[0] = diffW;
+    cdf[1] = cdf[0] + reflectW;
+    //cdf[2] = cdf[1] + refractW;
+    
+    
+    vec4 bsdf = vec4(0.);
+    float rnd = frand();
+    if (rnd < cdf[0]) // diffuse
+    {
+        l = cosineSampleHemisphere(n);
+        h = normalize(l+v);
+        
+        float NoL = dot(n,l);
+        float NoV = dot(n,v);
+        if ( NoL <= 0. || NoV <= 0. ) { return vec4(0.); }
+        float LoH = dot(l,h);
+        float pdf = NoL/PI;
+        
+        vec3 diff = evalDisneyDiffuse(mat, NoL, NoV, LoH, roughness) * (1.-F);
+        bsdf.rgb = diff;
+        bsdf.a = diffW * pdf;
+    } 
+    else if(rnd < cdf[1]) // reflection
+    {
+        l = reflect(-v,h);
+        
+        float NoL = dot(n,l);
+        float NoV = dot(n,v);
+        if ( NoL <= 0. || NoV <= 0. ) { return vec4(0.); }
+        float NoH = min(0.99,dot(n,h));
+        float pdf = GGXVNDFPdf(NoH, NoV, roughness);
+        
+        vec3 spec = evalDisneySpecularReflection(mat, F, NoH, NoV, NoL);
+        bsdf.rgb = spec;
+        bsdf.a = reflectW * pdf;
+    }
+    else // refraction
+    {
+        state.isRefracted = !state.isRefracted;
+        float eta = state.lastIOR/mat.ior;
+        l = refract(-v,h, eta);
+        state.lastIOR = mat.ior;
+        
+        float NoL = dot(n,l);
+        if ( NoL <= 0. ) { return vec4(0.); }
+        float NoV = dot(n,v);
+        float NoH = min(0.99,dot(n,h));
+        float LoH = dot(l,h);
+        
+        float pdf;
+        vec3 spec = evalDisneySpecularRefraction(mat, dielF, NoH, NoV, NoL, VoH, LoH, eta, pdf);
+        
+        bsdf.rgb = spec;
+        bsdf.a = refractW* pdf;
+    }
+    
+    bsdf.rgb *= abs(dot(n,l));
+
+    return bsdf;
+}
+
+
+// ---------------------------------------------
+// Pathtrace
+// ---------------------------------------------
+vec4 pathtrace(vec3 ro, vec3 rd) {
+    
+    State state = initState();
+    float firstDepth = 0.;
+    vec3 acc = vec3(0.);
+    vec3 abso = vec3(1.);
+    
+    for(int i=0; i<8; i++) {
+        // raytrace
+        float t = trace(ro,rd, vec2(0.01, 1000.));
+        vec3 p = ro + rd * t;
+        if (i == 0) firstDepth = t;
+        
+        // sky intersection ?
+        if (t >= 1000.) {
+            //acc += skyColor(rd, sundir) * abso;
+            acc += pow(texture(envTex, rd).rgb, vec3(2.2)) * abso;
+            break;
+        }
+        
+        // info at intersection point
+        vec3 n = normal(p, t);
+        if (state.isRefracted) n = -n;
+        Material mat = getMaterial(p,n);
+        
+        // sample BSDF
+        vec3 outDir;
+        vec4 bsdf = sampleDisneyBSDF(-rd,n, mat, outDir, state);
+        
+        // add emissive part of the current material
+        acc += mat.emissive * abso;
+            
+        // bsdf absorption (pdf are in bsdf.a)
+        if ( bsdf.a > 0.)
+            abso *= bsdf.rgb / bsdf.a;
+        
+        // medium absorption
+        if (state.hasBeenRefracted) {
+            abso *= exp(-t * ((vec3(1.)-mat.albedo)*mat.absorption));
+        }
+        
+        // next direction
+        ro = p;
+        rd = outDir;
+        if (state.isRefracted ) {
+            ro += -n*0.01;
+        } else if (state.hasBeenRefracted && !state.isRefracted) {
+            ro += -n*0.01;
+            state.lastIOR = 1.;
+        } else {
+            ro += n*0.01;
+        }
+        
+        // random early exit taking account energy loss
+        #if 0
+        {
+            float q = max(abso.r, max(abso.g, abso.b));
+            if (frand() > q)
+                break;
+
+            abso /= q;
+        }
+        #endif
+        
+    }
+
+    return vec4(acc, firstDepth);
+}
+
+
+// ---------------------------------------------
+// Entrypoint
+// ---------------------------------------------
+void main() {
+
+    searchInfo search;
+
+    search.rngState = float(base_hash(floatBitsToUint(jit_in.uv)))/float(0xffffffffU)+sample;
+
+
+    vec2 screenPos = jit_in.uv*2 - 1;
+    float ratio = viewPort.x / viewPort.y;
+    screenPos.x *= ratio;
+    vec2 jittering = hash2(search)-0.5;
+    jittering /= viewPort;
+    screenPos += jittering*3;
+
+
+    vec3 ro = eye;
+
+    vec3 target = vec3(0.);
+    vec3 front = normalize(target - ro);
+    vec3 right = cross( vec3(0., 1., 0.), front);
+    vec3 up = cross(front, right);
+
+    vec3 pixPos = vec3(screenPos, 4);
+    vec3 rd = normalize(pixPos.x*right + pixPos.y*up + pixPos.z*front);
+    
+
+    // vec2 invRes = vec2(1.) / iResolution.xy;
+    // srand(ivec2(fragCoord), iFrame);
+    
+    // read data
+    // Data data = readData(iChannel0, invRes);
+    // if (iFrame == 0) data = initData();
+    
+    // setup ray
+    // vec2 uv = (fragCoord + frand2()-.5) * invRes;
+    // vec3 ro = data.ro;
+    // vec2 v = uv*2.-1.;
+    // v.x *= iResolution.x * invRes.y;
+    
+    // setup camera
+    // const vec3 up = vec3(0.,1.,0.);
+    // vec3 fw = normalize(data.ta-data.ro);
+    // vec3 uu = normalize(cross(fw, up));
+    // vec3 vv = normalize(cross(uu, fw));
+    vec3 er = normalize(vec3(screenPos,FOCAL_LENGTH));
+    // vec3 rd = uu * er.x + vv * er.y + fw * er.z;
+    
+    // depth of field with autofocus
+    #if 1
+    float focusDistance = trace(ro,  front, vec2(0.01, 100.));
+    float blurAmount = 0.015;
+    vec3 go = blurAmount*vec3( normalize(frand2()*2.-1.)*sqrt(frand()), 0.0 );
+    vec3 gd = normalize( er*focusDistance - go );
+    ro += go.x*right + go.y*up;
+    rd += gd.x*right + gd.y*up;
+    rd = normalize(rd);
+    #endif
+    
+    
+    // pathtrace
+    vec4 col = pathtrace(ro, rd);
+    
+    outColor = vec4(min(col.rgb,vec3(10.)), col.a > 1000. ? -1. : col.a);
+}
+]]>
+</program>
+</language>
+</jittershader>

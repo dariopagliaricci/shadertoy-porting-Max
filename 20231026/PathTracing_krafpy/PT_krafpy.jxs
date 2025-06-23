@@ -1,0 +1,475 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iTime" type="int" default="0" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform sampler2D iChannel0;
+uniform float iTime;
+uniform int iFrame;
+uniform vec4 iMouse;
+
+#define PI 3.1415926535
+#define TWO_PI 6.283185307
+#define HALF_PI 1.57079632675
+
+struct Ray {
+    vec3 ro;
+    vec3 rd;
+};
+
+struct Hit {
+    int id;
+    vec3 p;
+    vec3 n;
+    float t;
+};
+
+struct Material {
+    vec3 albedo;
+    bool is_metal;
+    float fuzz;
+    bool is_glass;
+    float ref_idx;
+    vec3 phong; // kd, ks, shinniness
+};
+
+// 2D rotation matrix
+mat2 rot(float a){
+    float c = cos(a);
+    float s = sin(a);
+    return mat2(c, -s, s, c);
+}
+
+// Ray / sphere intresection function
+// Returns the distance to the closest intersection point
+// Negative if no intersection
+float sphere_itsc(Ray ray, vec4 sph){
+    vec3 c = sph.xyz;
+    float r = sph.w;
+    vec3 co = ray.ro - c;
+    
+    float b = dot(co, ray.rd);
+    float d = b*b - dot(co, co) + r*r;
+    if(d < 0.){
+        return -1.;
+    }
+    
+    float sd = sqrt(d);
+    vec2 t = vec2(-b-sd,-b+sd);
+    if(t.x < 0.) return t.y;
+    return t.x;
+}
+
+// Ray / plane (centered at (0,0,0)) intersection
+// Returns the distance to the closest intersection point
+// Negative if no intersection
+float plane_itsc(Ray ray, vec3 n){
+    return -dot(ray.ro, n) / dot(ray.rd, n);
+}
+
+// Returns the normal vector at the point
+vec3 sphere_normal(vec3 p, vec4 sph){
+    return normalize(p - sph.xyz);
+}
+
+// Soft shadow casted by a sphere, from : https://iquilezles.org/articles/sphereshadow/
+float sphere_shadow(vec3 ro, vec3 rd, vec4 sph, float k){
+    vec3 oc = ro - sph.xyz;
+    float b = dot( oc, rd );
+    float c = dot( oc, oc ) - sph.w*sph.w;
+    float h = b*b - c;
+
+    float d = -sph.w + sqrt( max(0.0,sph.w*sph.w-h));
+    float t = -b     - sqrt( max(0.0,h) );
+    return (t < 0.) ? 1. : smoothstep(0., 1., k*d/t );
+}
+
+// Computes the Fresnel coefficient at a hit point
+float fresnel(Ray ir, Hit hit, float eta){
+    float r0 = (1.-eta)/(1.+eta);
+    r0 *= r0;
+    float cos_t = dot(-ir.rd, hit.n);
+    cos_t = clamp(cos_t, 0., 1.);
+    return r0 + (1.-r0) * pow(1.-cos_t, 5.);
+}
+
+// Hash functions from : https://www.shadertoy.com/view/4djSRW
+float hash21(vec2 p)
+{
+    vec3 p3  = fract(vec3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec2 hash22(vec2 p)
+{
+	vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+float hash31(vec3 p)
+{
+    p  = fract(p * .1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+
+vec2 hash12(float p)
+{
+	vec3 p3 = fract(vec3(p) * vec3(.1031, .1030, .0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+
+}
+
+
+// from : https://www.shadertoy.com/view/3sj3Rt
+vec3 random_on_sphere(vec3 p) {
+  float f = hash31(p);
+  
+  float theta = TWO_PI * hash21(vec2(f * 0.3482f, f * 2.18622f));
+  float phi = acos(1.0f - 2.f * hash21(vec2(f * 1.9013, f * 0.94312)));
+  float x = sin(phi) * cos(theta);
+  float y = sin(phi) * sin(theta);
+  float z = cos(phi);
+  return vec3(x,y,z);
+}
+
+const vec3 sun_dir = normalize(vec3(0.8, 0.5, -1.));
+const vec3 sun_col = vec3(1., 1., 1.);
+
+// List of spheres in the scene (x, y, z, r)
+vec4 spheres[] = vec4[](
+    vec4(0, 0.5, 0, 0.5),         // Red sphere
+    vec4(1.5, 0.801, -0.5, 0.8),  // Glass sphere
+    vec4(-1.0, 0.7, -1.3, 0.7),   // Green sphere
+    vec4(0.8, 0.3, 1., 0.3),      // Sliver sphere
+    vec4(-1., 0.3, -0.2, 0.3),    // Blue sphere
+    vec4(-1., 0.5, 1., 0.5)       // Gold sphere
+);
+
+// materials[id] is the material of the object with this id
+const Material materials[] = Material[](
+    // Ground
+    Material(vec3(0.7), true, 0.5, false, 0., vec3(1., 2., 10.)),
+    // Red sphere
+    Material(vec3(0.8, 0.3, 0.3), false, 0., false, 0., vec3(0.5, 0, 0)),
+    // Glass sphere
+    Material(vec3(1., 1., 1.), false, 0., true, 1.4, vec3(0.,1.,100.)),
+    // Green sphere
+    Material(vec3(0.4, 0.7, 0.3), true, 0.5, false, 0., vec3(1.,0.5,50.)),
+    // Sliver sphere
+    Material(vec3(0.8, 0.8, 0.8), true, 0.2, false, 0., vec3(1.,2.,72.)),
+    // Blue sphere
+    Material(vec3(0.3, 0.2, 0.9), false, 0., false, 0., vec3(1.,0.,0.)),
+    // Gold sphere
+    Material(vec3(0.8, 0.6, 0.1), true, 0.05, false, 0., vec3(1.,20.,1000.))
+);
+
+
+// Simply a contained if selection
+void choose_closest(float test_t, int test_id, inout float t, inout int id){
+    if(test_t > 0. && test_t < t){
+        t = test_t;
+        id = test_id;
+    }
+}
+
+// Returns true if the ray hits something in the scene
+// and stores the hit infos in the passed 'hit' argument
+bool world_itsc(Ray ray, inout Hit hit){
+    float t = 10000.;
+    int id = -1;
+    
+    vec3 gnd = vec3(0,1,0); // ground plane normal
+    
+    choose_closest(plane_itsc(ray, gnd), 0, t, id);
+    for(int i = 0; i < 6; i++){
+        vec4 sph = spheres[i];
+        choose_closest(sphere_itsc(ray, sph), i + 1, t, id);
+    }
+    
+    vec3 p = ray.ro + ray.rd * t;
+    vec3 n = gnd;
+    if(id > 0){
+        n = sphere_normal(p, spheres[id-1]);
+    }
+    hit = Hit(id, p, n, t);
+    
+    return id >= 0;
+}
+
+// Returns the background color for a given direction
+vec3 background(Ray ray){
+    vec3 ca = vec3(0.95, 0.85, 0.65);
+    vec3 cb = vec3(0.4, 0.7, 1.);
+    float f = dot(ray.rd, vec3(0,1,0));
+    f = max(0., f);
+    f = pow(f, 0.3);
+    vec3 col = mix(ca, cb, f);
+    
+    f = dot(ray.rd, sun_dir);
+    f = max(0., f);
+    float k = smoothstep(0.9, 0.999, f*f);
+    col += vec3(1.,0.8,0.4)*k*0.1;
+    col += step(0.9997, f);
+    
+    return clamp(col, 0., 1.);
+}
+
+// Soft shadows : 0 if light is fully blocked, 1 if no shadows
+float shadow(Hit hit){
+    Ray ray = Ray(hit.p + hit.n * 0.001, sun_dir);
+    float s = 1.;
+    for(int i = 0; i < 6; i++){
+         s *= sphere_shadow(ray.ro, ray.rd, spheres[i], 12.);
+    }
+    return s;
+}
+
+vec3 direct_lighting(Ray ir, Hit hit, Material mat, vec3 surf_col){
+    // Blinn Phong reflection model (omitting ambiant light)
+    
+    float kd = mat.phong.x;
+    float ks = mat.phong.y;
+    float sh = mat.phong.z;
+    
+    vec3 v = normalize(ir.ro - hit.p);
+    vec3 r = reflect(-sun_dir, hit.n);
+    vec3 h = normalize(sun_dir + v);
+    
+    float diff = kd * max(0., dot(sun_dir, hit.n));
+    float spec = ks * pow(max(0., dot(hit.n, h)), sh);
+    
+    float cos_t = dot(h, sun_dir);
+    vec3 r0 = mat.is_metal ? surf_col : vec3(0.1);
+    vec3 fre = r0 + (1. - r0)*pow(clamp(1.-cos_t, 0.,1.), 5.);
+    
+    float shad = shadow(hit);
+    
+    vec3 col = vec3(0.);
+    if(!mat.is_metal) col += surf_col * sun_col * diff * shad;
+    col += sun_col * diff * spec * shad * fre;
+    
+    return clamp(col, 0., 1.);
+}
+
+
+Ray lambert_scatter(Ray ir, Hit hit, Material mat){
+    vec3 ro, rd; 
+    rd = hit.n + random_on_sphere(hit.p + iTime);
+    if(dot(rd, rd) < 0.001){
+        rd = hit.n;
+    }
+    rd = normalize(rd);
+    ro = hit.p + hit.n * 0.001;
+    return Ray(ro, rd);
+}
+
+
+Ray metal_scatter(Ray ir, Hit hit, Material mat){
+    vec3 rd = reflect(ir.rd, hit.n);
+    vec3 f = mat.fuzz * random_on_sphere(hit.p + iTime);
+    rd = normalize(rd + f);
+    vec3 ro = hit.p + hit.n * 0.001;
+    return Ray(ro, rd);
+}
+
+Ray glass_scatter(Ray ir, Hit hit, Material mat){
+    vec3 rd, ro;
+    float eta = mat.ref_idx;
+    
+    if(dot(ir.rd, hit.n) < 0.) {
+        // outside the sphere
+        eta = 1. / eta;
+        if(fresnel(ir, hit, eta) > hash31(hit.p + iTime)){
+            rd = reflect(ir.rd, hit.n);
+            ro = hit.p + hit.n * 0.001;
+        } else {
+            rd = refract(ir.rd, hit.n, eta);
+            ro = hit.p - hit.n * 0.001;
+        }
+    } else {
+        // inside the sphere
+        rd = refract(ir.rd, -hit.n, eta);
+        ro = hit.p + hit.n * 0.001;
+    }
+    
+    return Ray(ro, rd);
+}
+
+vec3 surface_texture(Hit hit){
+    if(hit.id == 0){
+        // Checker texture
+        vec2 uv = mod(hit.p.xz, 1.);
+        float sx = step(0.5, uv.x);
+        float sy = step(0.5, uv.y);
+        float s = step(abs(sx-sy), 0.);
+        s = clamp(s, 0.25, 1.);
+        vec3 dark = vec3(0.5, 0.4, 0.4);
+        vec3 clea = vec3(1., 1., 1.);
+        return s*clea + (1.-s)*dark;
+    }
+    return vec3(1.);
+}
+
+// Calculates the color of one ray sample
+vec3 render(Ray ray){
+    const int depth = 12; // number of rays
+    
+    vec3 col_mask = vec3(1.);
+    vec3 acc_col = vec3(0.);
+    
+    for(int i = 0; i < depth; i++){
+        Hit hit;
+        if(world_itsc(ray, hit)){
+            Material mat = materials[hit.id];
+            
+            vec3 surf_col = mat.albedo * surface_texture(hit);
+            acc_col += direct_lighting(ray, hit, mat, surf_col * col_mask);
+            col_mask *= surf_col;
+            
+            if(mat.is_metal){
+                ray = metal_scatter(ray, hit, mat);
+            } else if(mat.is_glass) {
+                ray = glass_scatter(ray, hit, mat);
+            } else {
+                ray = lambert_scatter(ray, hit, mat);
+            }
+            
+        } else {
+            acc_col += col_mask * background(ray);
+            break;
+        }
+    }
+    
+    return acc_col;
+}
+
+void main()
+{
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+    vec2 uv = fragCoord/viewPort.xy;
+    
+    vec4 data = texture(iChannel0, uv);
+    if(iFrame == 0 || iMouse.z > 0.) data = vec4(0.);
+    
+    uv -= 0.5;
+    uv.x *= viewPort.x/viewPort.y;
+    
+    vec3 col = vec3(0.);
+    
+    // Camera position
+    vec3 eye = vec3(0., 1., 4.5);
+    vec3 lookat = vec3(0., 0.5, 0.);
+    vec3 eyedir = eye - lookat;
+    
+    // Mouse rotation
+    vec2 mr = iMouse.xy/viewPort.xy;
+    mr -= 0.5;
+    mr.x *= viewPort.x / viewPort.y;
+    mr *= 3.141592;
+    mr.y = min(0., mr.y);
+    
+    eyedir.yz *= rot(mr.y);
+    eyedir.xz *= rot(mr.x);
+    
+    eye = lookat + eyedir;
+    
+    
+    // Antialias
+    float num_samples = 5.;
+    
+    for(float i = 0.; i < num_samples; i++){
+        vec3 ro = eye;
+        
+        // Randomize pixel sample direction
+        vec2 rnd = 0.001 * (-1. + 2.*hash12(i+iTime));
+        vec3 rd = normalize(vec3(uv + rnd, -1.));
+        
+        // Camera angle
+        rd.yz *= rot(mr.y);
+        rd.xz *= rot(mr.x);
+        
+        Ray ray = Ray(ro, rd);
+        col += render(ray);
+    }
+    
+    col /= num_samples;
+    col = clamp(col, 0., 1.);
+    
+    data += vec4(col, 1.);
+    
+    outColor = data;
+}
+
+
+
+// void main(void) {
+// 	outColor = vec4(1, 0, 0, 1);
+// }
+]]>
+</program>
+</language>
+</jittershader>

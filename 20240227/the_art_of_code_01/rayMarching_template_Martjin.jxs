@@ -1,0 +1,137 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0"/>
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+
+#define MAX_STEPS 100
+#define MAX_DIST 100.
+#define SURF_DIST .01
+
+float getDist (vec3 p) {
+	vec4 s = vec4(0, 1, 6, 1);
+
+	float sphereDist = length (p-s.xyz) -s.w;
+	float planeDist = p.y;
+
+	float d = min(sphereDist, planeDist);
+	return d;
+}
+
+float rayMarch (vec3 ro, vec3 rd) {
+	float d0 = 0.;
+
+	for (int i=0; i<MAX_STEPS; i++) {
+		vec3 p = ro + rd * d0;
+		float dS = getDist(p);
+		d0 += dS;
+		if(d0>MAX_DIST || dS<SURF_DIST) break;
+
+	}
+	return d0;
+}
+
+vec3 getNormal (vec3 p){
+	float d = getDist(p);
+	vec2 e = vec2(.01, 0);
+
+	vec3 n = d - vec3(
+		getDist(p-e.xyy),
+		getDist(p-e.yxy),
+		getDist(p-e.yyx));
+
+	return normalize(n);
+}
+
+float getLight (vec3 p) {
+	vec3 lightPos = vec3(0, 5, 6);
+	lightPos.xz += vec2 (sin(iTime), cos(iTime)) *2.;
+	vec3 l = normalize(lightPos -p);
+	vec3 n = getNormal (p);
+
+	float diff = clamp(dot(n, l), 0., 1.); //clamp dot values (-1 < > 1) into 0 < >1
+	float d = rayMarch (p+n*SURF_DIST*2., l);
+	if(d<length(lightPos-p)) diff *= .1;
+	return diff;
+}
+
+void main() {
+/* 
+Now that we have screen percentage from 0 to 1, we want to change it to being 
+from -1 to 1 so that it’s actually just the x and y coordinate on the imaginary pixel rectangle.
+*/
+//https://learnopengl.com/Getting-started/Coordinate-Systems#:~:text=OpenGL%20expects%20all%20the%20vertices,range%20will%20not%20be%20visible.
+//http://www.songho.ca/opengl/gl_projectionmatrix.html
+vec2 screenPos = jit_in.uv*2-1; // coordinates -1 < > 1 NDC (normalized device coordinates)
+float ratio = viewPort.x / viewPort.y; // 0 is in the middle of x and y
+screenPos.x *= ratio;
+
+vec3 col = vec3(0);
+
+vec3 ro = vec3 (0, 1, 0);
+vec3 rd = normalize(vec3(screenPos.x, screenPos.y, 1));
+
+float d = rayMarch(ro,rd);
+
+vec3 p = ro + rd * d;
+
+float diff = getLight(p);
+col = vec3(diff);
+
+// col = getNormal(p);
+outColor = vec4(col, 1.); 
+
+}
+]]>
+</program>
+</language>
+</jittershader>

@@ -1,0 +1,378 @@
+<jittershader name="default">
+  <description>Default Slab </description>
+
+  <param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+  <param name="position" type="vec3" state="POSITION" />
+  <param name="uv" type="vec2" state="TEXCOORD" />
+
+  <param name="viewPort" type="vec2" state="VIEWPORT" />
+  <param name="iTime" type="float" default="0.0" />
+  <param name="iChannel0" type="int" default="0" />
+
+  <language name="glsl" version="1.5">
+
+    <bind param="MVP" program="vp" />
+    <bind param="position" program="vp" />
+    <bind param="uv" program="vp" />
+
+    <bind param="viewPort" program="fp" />
+    <bind param="iTime" program="fp" />
+    <bind param="iChannel0" program="fp" />
+
+    <program name="vp" type="vertex"  >
+    <![CDATA[
+      #version 330 core
+      
+      in vec3 position;
+      in vec2 uv;
+
+      out jit_PerVertex {
+        vec2 uv;
+
+      } jit_out;
+      uniform mat4 MVP;
+
+      
+      void main(void) {
+        gl_Position = MVP*vec4(position, 1.);
+        jit_out.uv = uv;
+
+      }
+    ]]>
+    </program>
+    
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+  vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform samplerCube iChannel0;
+
+
+#define MAX_DIST 70. // maximum render distance
+
+// sun direction
+const vec3 lig = normalize(vec3(-.8,1,1));
+
+// randoms seed
+float seed;
+
+// hash functions by me
+float hash1() {return fract(sin(seed+=.1)*4561.7564);}
+
+vec2 hash2() {return fract(sin(seed+=.1)*vec2(8472.5636,9854.4213));}
+
+vec3 hash3() {return fract(sin(seed+=.1)*vec3(7653.1285,6912.8512,5914.7134));}
+
+// normalized 3d vector
+vec3 uniformVector() {
+    vec3 v = hash3()*2.-1.;
+    return normalize(v);
+}
+
+// 3d rotation function
+mat3 rot(vec3 a){
+    float c = cos(a.x), s = sin(a.x);
+    mat3 rx = mat3(1,0,0,0,c,-s,0,s,c);
+    c = cos(a.y), s = sin(a.y);
+    mat3 ry = mat3(c,0,-s,0,1,0,s,0,c);
+    c = cos(a.z), s = sin(a.z);
+    mat3 rz = mat3(c,-s,0,s,c,0,0,0,1);
+    
+    return rz * rx * ry;
+}
+
+// float random number between 0 and 1
+float hash(float n) {return fract(sin(n)*43758.5453123);}
+
+// 3d noise function by iq
+float noise(vec3 x) {
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f*f*(3.-2.*f); // S curve
+
+    float n = p.x + p.y*157. + 113.*p.z;
+
+    return mix(mix(mix(hash(n+  0.), hash(n+  1.),f.x),
+                   mix(hash(n+157.), hash(n+158.),f.x),f.y),
+               mix(mix(hash(n+113.), hash(n+114.),f.x),
+                   mix(hash(n+270.), hash(n+271.),f.x),f.y),f.z);
+}
+
+// 2d noise function by iq
+float noise(vec2 x) {
+    vec2 p = floor(x);
+    vec2 f = fract(x);
+    f = f*f*(3.-2.*f); // S curve
+
+    float n = p.x + p.y*138.;
+
+    return mix(mix(hash(n+  0.), hash(n+  1.),f.x),
+               mix(hash(n+138.), hash(n+139.),f.x),f.y);
+}
+
+// 3d fractal noise
+float fbm(vec3 p) {
+    float f = 0.;
+    f += .5*noise(p);
+    f += .25*noise(2.*p);
+    f += .125*noise(4.*p);
+    f += .0625*noise(8.*p);
+    return f;
+}
+
+// 2d fractal noise
+float fbm(vec2 p) {
+    float f = 0.;
+    f += .5*noise(p);
+    f += .25*noise(2.*p);
+    f += .125*noise(4.*p);
+    f += .0625*noise(8.*p);
+    return f;
+}
+
+// temple sdf
+// a simple fractal from my starship shader
+// https://www.shadertoy.com/view/ml2GWc
+float sdRuins(vec3 p) {
+    mat3 r = rot(vec3(2.));
+   
+    vec3 q = p;
+    float m = 1.;
+    
+  for (int i=0; i<7; i++) {
+      p = clamp(p,-1.,1.) * 2. - p;
+        float h = clamp(.25/dot(p, p), .25, 1.);
+      p *= h;
+        m *= h;
+        if(i<2) p *= r;
+      p = p*9. + q;
+        m = m*9.+1.;
+  }
+    q = abs(p);
+  return (max(q.x,max(q.y,q.z))-3.) / m;
+}
+
+// smooth minimum
+// thanks to iq: https://iquilezles.org/articles/smin/
+float smin(float a, float b, float k) {
+  float h = clamp(.5+.5*(b-a)/k, 0., 1.);
+  return mix(b, a, h) - k*h*(1.-h);
+}
+
+// scene sdf (temple + clouds + dunes)
+float map(vec3 p) { 
+    // dunes
+    float d = p.y-3.+.05*fbm(p.xz*7.+.4*sin(35.*p.x+.5*sin(p.z*28.)))-.06*noise(2.5*p.xz);
+    // ruins
+    d = min(d, sdRuins(p));
+    // cheap clouds
+    float h = log(hash1());
+    d = min(d, smin(abs(p.y-10.)-.06, fbm((p*.3+10.+vec3(1,0,0))), -.1)-.7*fbm(p) - .2*(h+.5));
+    
+    return d;
+}
+
+// raymarching function
+float intersect(vec3 ro, vec3 rd, float tmax) {
+    float t = 0.; // distance travelled
+    
+    for (int i=0; i<256; i++) {
+        vec3 p = ro + rd*t; // current point
+        
+        float h = map(p); // distance to the scene
+        if (h<.001) break; // we hit the surface
+        
+        t += h; // march
+        if (t>tmax) return MAX_DIST;
+    }
+    // return distance
+    return t;
+}
+
+// normal estimation
+vec3 calcNormal(vec3 p) {
+    float h = map(p);
+    const vec2 e = vec2(.0001,0); // epsilon
+    
+    return normalize(h - vec3(map(p-e.xyy),
+                              map(p-e.yxy),
+                              map(p-e.yyx)));
+}
+
+// shadow function
+float shadow(vec3 ro, vec3 rd, float tmax) {
+    for (float t=0.; t<tmax;) {
+        vec3 p = ro + rd*t;
+        float h = map(p);
+        if (h<.001) return 0.;
+        t += h;
+    }
+    return 1.;
+}
+
+// fog based on the distance t
+float fog(float t) {
+    return 1.-exp(-t*t*t*.000005); // beer's law
+}
+
+// rendering
+vec3 render(vec3 ro, vec3 rd) {
+    // background
+    vec3 bgCol = mix(vec3(.6,.8,1), vec3(.3,.5,1), clamp(1.-exp(-rd.y*8.),0.,1.));
+    
+    float fdis = 0.; // final distance
+    vec3 frd = rd; // final ray direction
+    
+    vec3 col = vec3(0); // accumulated color
+    vec3 emit = vec3(1); // color mask
+    
+    for (int i=0; i<3; i++) { // 3 global illumination bounces
+        float t = intersect(ro, rd, MAX_DIST);
+        if (i==0) fdis = t;
+        
+        // we don't hit the surface
+        if (t>=MAX_DIST) {
+            if (i==0) col = bgCol;
+            col += .25*emit*bgCol; // sky light
+            break;
+        }
+        
+        vec3 p = ro + rd*t; // hit point
+        vec3 n = calcNormal(p); // normal of the surface
+        
+        ro = p+n*.002; // new ray origin + bump to avoid self collision
+        
+        float dif = clamp(dot(n,lig), 0., 1.); // diffuse light
+        
+        if (p.y<6.) { // sand and temple BRDF
+            emit *= vec3(.8,.6,.4); // yellow
+            rd = normalize(n+uniformVector()); // cheap diffuse BRDF
+        } else { // clouds BRDF
+            emit *= .7;
+            rd = uniformVector(); // isotropic scattering (because clouds are volumes)
+            dif = 1.; // clouds don't need the diffuse component of the light
+        }   
+        // sun light
+        float sha = shadow(ro, lig, 16.);
+        col += emit*vec3(1,.7,.4)*dif*sha;
+    }
+    col = mix(col, bgCol, fog(fdis)); // fog
+    // sun glare
+    col += 2.*vec3(1,.5,.3)*pow(clamp(dot(frd, lig),0.,1.),5.);
+        
+    return col;
+}
+
+// camera function
+mat3 setCamera(vec3 ro, vec3 ta) {
+    vec3 w = normalize(ta - ro);
+    vec3 u = normalize(cross(w, vec3(0,1,0)));
+    vec3 v = cross(u, w);
+    return mat3(u, v, w);
+}
+
+// ACES tomemapper
+vec3 ACES(vec3 x) {
+    float a = 2.51;
+    float b =  .03;
+    float c = 2.43;
+    float d =  .59;
+    float e =  .14;
+    return (x*(a*x+b))/(x*(c*x+d)+e);
+}
+
+// bokeh blur function
+// b is the blur value
+// vec4 bokeh(sampler2D sam, vec2 p, float b) {    
+//     vec4 col = vec4(0);
+//     const int N = 8; // quality
+    
+//     for (int i=-N; i<=N; i++)
+//     for (int j=-N; j<=N; j++)  {
+//         vec2 off = vec2(i,j) / float(N); // blur offset
+//         if (dot(off, off)<1.) { // inside disk
+//             // blurred texture
+//             col += texture(iChannel0, p + b*off*vec2(iResolution.y/iResolution.x,1));
+//         }
+//     }
+//     // output
+//     return col/col.a;
+// }
+
+// bokeh blur function
+// b is the blur value
+vec3 bokeh(samplerCube sam, vec3 p, float b) {
+    vec4 col = vec4(0);
+    const int N = 8; // quality
+
+    for (int i = -N; i <= N; i++) {
+        for (int j = -N; j <= N; j++) {
+            vec2 off = vec2(i, j) / float(N); // blur offset
+            if (dot(off, off) < 1.0) { // inside disk
+                // Convert the 2D offset to a 3D direction for the cube map
+                vec3 dir = vec3(p.xy + b * off * vec2(viewPort.y / viewPort.x, 1), p.z);
+                col += texture(sam, dir);
+            }
+        }
+    }
+    // Return the RGB components of the blurred texture color
+    return (col / col.a).rgb;
+}
+
+
+void main()
+{
+    
+  vec2 fragCoord = jit_in.uv * viewPort.xy; 
+    // init randoms seed
+    seed = iTime+dot(sin(fragCoord),vec2(453.712,983.234));
+    
+    vec2 off = hash2()-.5; // antialiasing offset
+    // pixel coordinates centered at the origin + AA offset
+    vec2 p = (fragCoord+off - .5*viewPort.xy) / viewPort.y;
+
+    float an = -1.3; // camera angle
+    vec3 ro = vec3(-5.5*sin(an),3.5,5.5*cos(an)); // ray origin
+    vec3 ta = vec3(0,3.9,0); // target
+    mat3 ca = setCamera(ro, ta); // camera matrix
+    
+    vec3 rd = ca * normalize(vec3(p,1.5)); // ray direction
+    
+    // render
+    vec3 col = render(ro, rd);
+       
+    // progressive rendering (mix the color with the previous frame)
+    // vec4 data = texelFetch(iChannel0, ivec2(fragCoord), 0);
+    // vec4 data = texture(iChannel0, vec3(fragCoord, 0.0));
+    // outColor = vec4(col,1.0) + data;
+
+
+    // color correction
+    col = pow(col, vec3(.4545)); // gamma correction
+    col = ACES(col); // tonemapping
+    col = col*col*(3.-2.*col); // contrast
+    
+    // bloom
+    // vec3 bloom = bokeh(iChannel0, p, .1).rgb; // blurred texture
+    vec3 bloom = bokeh(iChannel0, vec3(p, 0.0), .1); // blurred texture
+    bloom = pow(bloom, vec3(.4545)); // gamma correction
+    bloom = ACES(bloom); // tonemapping
+    // adding the bloom to the final color
+    col += .4*pow(bloom,vec3(4));
+        
+    // output
+    outColor = vec4(col,1.0);
+}
+
+
+]]>
+</program>
+</language>
+</jittershader>

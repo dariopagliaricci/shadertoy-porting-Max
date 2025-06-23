@@ -1,0 +1,243 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+    <param name="iTime" type="float" default="0.0" />
+    <param name="iMouse" type="vec2" default="0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+        <bind param="iTime" program="fp" />
+        <bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec2 iMouse;
+uniform samplerCube iChannel0;
+
+#define SOBEL_EDGE_COLOR vec4(0.929,0.200,0.231,.15)
+
+vec3 computeDirection(vec2 pos, vec2 offset) {
+    vec2 finalPos = pos + offset;
+    float theta = finalPos.x; // Assuming x is the azimuth angle
+    float phi = finalPos.y;   // Assuming y is the elevation angle
+
+    // Convert spherical coordinates to Cartesian coordinates
+    float x = sin(phi) * cos(theta);
+    float y = sin(phi) * sin(theta);
+    float z = cos(phi);
+
+    return vec3(x, y, z);
+}
+
+vec4 sobel(in vec2 pos, in samplerCube channel, in vec2 reso) {
+    // 
+    mat3 SX = mat3( 1.0,  2.0,  1.0, 
+                    0.0,  0.0,  0.0, 
+                   -1.0, -2.0, -1.0);
+    mat3 SY = mat3(1.0, 0.0, -1.0, 
+                   2.0, 0.0, -2.0, 
+                   1.0, 0.0, -1.0);
+
+    // vec4 T = texelFetch(channel, ivec2(pos), 0);
+    vec4 T = texture(channel, vec3(pos, 0.0));
+
+    // mat3 M = mat3(0.);
+    // for(int i=0; i<3; i++) {
+    //     for(int j=0; j<3; j++) {
+    //         vec4 A = texelFetch(channel, ivec2(pos + vec2(i-1, j-1)), 0);
+    //         M[i][j] = length(A);
+    //     }
+    // }
+
+    mat3 M = mat3(0.);
+    for(int i=0; i<3; i++) {
+        for(int j=0; j<3; j++) {
+            // Assuming direction is a vec3 representing the direction for the cube map sampling
+            vec3 direction = computeDirection(pos, vec2(i-1, j-1)); // You need to define this function
+            vec4 A = texture(channel, direction);
+            M[i][j] = length(A);
+        }
+    }
+    
+    float gx = dot(SX[0], M[0]) + dot(SX[1], M[1]) + dot(SX[2], M[2]);
+    float gy = dot(SY[0], M[0]) + dot(SY[1], M[1]) + dot(SY[2], M[2]);
+    
+    
+    // TODO factor into float sobel() and move this to a buffer pass.
+    float g = sqrt(gx*gx + gy*gy);
+    g = smoothstep(0.25, 0.95, g);
+
+    return mix(T, SOBEL_EDGE_COLOR, g);
+}
+
+// #define MOUSE_ROTATE
+
+#define MAX_ITERATIONS 128
+#define BAILOUT 64.0
+#define POWER 8.0
+#define MINIMUM_RADIUS 0.1
+#define ITERATIONS_BEFORE_ESCAPE 256.0
+
+#define MAX_RAY_STEPS 128
+#define MAX_RAY_DIST 10.0
+#define MIN_RAY_DIST 0.001
+
+#define NORMAL_EPS 0.00001
+
+
+        
+vec4 fractal(vec3 z, mat3 rot) {
+    vec3 c = z;
+    float r = 0.0;
+    float dr = 1.0;
+    float trap = 0.0;
+
+
+    z *= rot;
+        
+    for (int i = 0; i < MAX_ITERATIONS; i++) {
+        r = length(c);
+        if (r > BAILOUT) break;
+        
+        float theta = acos(c.z / r);
+        float phi = atan(c.y, c.x);
+        float p = POWER * theta;
+        float cp = cos(p);
+        float sp = sin(p);
+        float cp2 = cos(POWER * phi);
+        float sp2 = sin(POWER * phi);
+        
+        vec3 dz = vec3(
+            sp * cp2,
+            sp * sp2,
+            cp);
+        c = pow(r, POWER) * dz + z;
+        dr = POWER * pow(r, POWER - 1.0) * dr + 1.0;
+        
+        if (float(i) > ITERATIONS_BEFORE_ESCAPE) {
+            trap += log(r);
+        }
+    }
+    
+    float dist = 0.5 * log(r) * r / dr;
+    return vec4(c, dist);
+}
+
+vec3 estimateNormal(vec3 p, mat3 rot) {
+    const vec3 dx = vec3(NORMAL_EPS, 0.0, 0.0);
+    const vec3 dy = vec3(0.0, NORMAL_EPS, 0.0);
+    const vec3 dz = vec3(0.0, 0.0, NORMAL_EPS);
+    
+    return normalize(vec3(
+        fractal(p + dx, rot).w - fractal(p - dx, rot).w,
+        fractal(p + dy, rot).w - fractal(p - dy, rot).w,
+        fractal(p + dz, rot).w - fractal(p - dz, rot).w)
+    );
+}
+
+
+float traceRay(vec3 ro, vec3 rd, out vec3 hit, out vec3 normal, mat3 rot) {
+    float t = 0.0;
+    float d = 0.0;
+    for (int i = 0; i < MAX_RAY_STEPS; i++) {
+        hit = ro + rd * t;
+        d = (fractal(hit, rot)).w;
+        if (d < MIN_RAY_DIST) {
+            normal = estimateNormal(hit, rot);
+            return t;
+        }
+        t += d;
+        if (t > MAX_RAY_DIST) break;
+    }
+    return -1.0;
+}
+
+void main() {
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 uv = (fragCoord.xy / viewPort.xy) * 2.0 - 1.0;
+    uv.x *= viewPort.x / viewPort.y;    
+    vec3 ro = vec3(0.0, 0.0, 1.6);
+    vec3 rd = normalize(vec3(uv, -1.0));
+
+
+#ifdef MOUSE_ROTATE
+    vec2 mouse = iMouse.xy / viewPort.xy; 
+    float theta = mouse.x * 10.0;
+#else
+    float theta = iTime * 0.1;
+#endif
+
+    mat3 rot = mat3(
+        vec3(cos(theta), 0.0, sin(theta)),
+        vec3(0.0, 1.0, 0.0),
+        vec3(-sin(theta), 0.0, cos(theta)));
+
+    vec3 hit, normal;
+    float t = traceRay(ro * rot, rd * rot, hit, normal, rot);
+
+    outColor = sobel(fragCoord.xy, iChannel0, viewPort.xy);
+
+    if (t > 0.0) {
+        vec3 color = vec3(0.0);
+        vec3 lightDir = normalize(vec3(-1.0, 1.0, -1.0));  
+
+        vec3 viewDir = normalize(-hit);
+        vec3 reflectDir = reflect(-lightDir, normal);
+        float diffuse = max(dot(normal, lightDir), 0.0);
+        float specular = pow(max(dot(reflectDir, viewDir), 0.0), 32.0);
+        color += vec3(0.102,0.373,0.706) * diffuse;
+        color += vec3(1.0) * specular;
+        outColor = vec4(color, 1.0);
+    } else {
+        outColor = vec4(0.0);
+    }
+
+}
+]]>
+</program>
+</language>
+</jittershader>

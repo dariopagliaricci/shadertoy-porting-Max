@@ -1,0 +1,390 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 color;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+//-------------------------------------------------------------------------
+// Math
+//-------------------------------------------------------------------------
+
+const float g_pi  = 3.14159265358979323846f;
+const float g_float_inf = 1e20f;
+
+float Max(vec3 v) {
+    return max(v.x, max(v.y, v.z));
+}
+
+vec3 Saturate(vec3 v) {
+    return clamp(v, 0.0f, 1.0f);
+}
+
+//-------------------------------------------------------------------------
+// Hash
+//-------------------------------------------------------------------------
+
+uint Hash_Wang(uint key) {
+	key = (key ^ 61u) ^ (key >> 16u);
+	key = key + (key << 3u);
+	key = key ^ (key >> 4u);
+	key = key * 0x27D4EB2Du;
+	key = key ^ (key >> 15u);
+	return key;
+}
+
+//-------------------------------------------------------------------------
+// RNG
+//-------------------------------------------------------------------------
+
+float UniformUintToFloat(uint u) {
+	// IEEE-754: 2^-32 = 0x2F800000
+	return float(u) * uintBitsToFloat(0x2F800000u);
+}
+
+uint UniformUint(inout uint state) {
+    // Xorshift: slower than LCG better distribution for long sequences
+	state ^= (state << 13u);
+	state ^= (state >> 17u);
+	state ^= (state << 5u);
+    
+    // LCG: faster than Xorshift, but poorer distribution for long sequences
+    //const uint multiplier = 1664525u;
+	//const uint increment  = 1013904223u;
+	//state *= multiplier;
+    //state += increment;
+    
+    return state;
+}
+
+float UniformFloat(inout uint state) {
+    return UniformUintToFloat(UniformUint(state));
+}
+
+//-------------------------------------------------------------------------
+// Sampling
+//-------------------------------------------------------------------------
+
+vec3 CosineWeightedSampleOnHemisphere(float u1, float u2) {	
+	float cos_theta = sqrt(1.0f - u1);
+	float sin_theta = sqrt(u1);
+	float phi = 2.0f * g_pi * u2;
+	
+	return vec3(cos(phi) * sin_theta, 
+                sin(phi) * sin_theta, 
+                cos_theta);
+}
+
+//-------------------------------------------------------------------------
+// Optics
+//-------------------------------------------------------------------------
+
+float Reflectance0(float n1, float n2) {
+	float sqrt_R0 = (n1 - n2) / (n1 + n2);
+	return sqrt_R0 * sqrt_R0;
+}
+
+float SchlickReflectance(float n1, float n2, float c) {
+	float R0 = Reflectance0(n1, n2);
+	return R0 + (1.0f - R0) * c * c * c * c * c;
+}
+
+vec3 IdealSpecularReflect(vec3 d, vec3 n) {
+	return reflect(d, n);
+}
+
+vec3 IdealSpecularTransmit(vec3 d, vec3 n, float n_out, float n_in, 
+                           out float pr, inout uint state) {
+		
+	vec3 d_Re       = IdealSpecularReflect(d, n);
+    
+	bool  out_to_in = (0.0f > dot(n, d));
+	vec3  nl        = out_to_in ? n : -n;
+	float nn        = out_to_in ? n_out / n_in : n_in / n_out;
+	float cos_theta = dot(d, nl);
+	float cos2_phi  = 1.0f - nn * nn * (1.0f - cos_theta * cos_theta);
+
+    // Total Internal Reflection
+    if (0.0f > cos2_phi) {
+        pr = 1.0f;
+        return d_Re;
+    }
+
+    // Stochastic branching between reflection and transmission 
+    vec3  d_Tr      = normalize(nn * d - nl * (nn * cos_theta + sqrt(cos2_phi)));
+    float c         = 1.0f - (out_to_in ? -cos_theta : dot(d_Tr, n));
+
+    float Re        = SchlickReflectance(n_out, n_in, c);
+    float p_Re      = 0.25f + 0.5f * Re;
+    
+    if (UniformFloat(state) < p_Re) {
+        pr          = (Re / p_Re);
+        return d_Re;
+    }
+    else {
+        float Tr    = 1.0f - Re;
+        float p_Tr  = 1.0f - p_Re;
+        pr          = (Tr / p_Tr);
+        return d_Tr;
+    }
+}
+
+//-------------------------------------------------------------------------
+// Ray
+//-------------------------------------------------------------------------
+
+struct Ray {
+    vec3  o; 
+   	vec3  d;
+	float tmin;
+    float tmax;
+	uint  depth;
+};
+ 
+vec3 EvalRay(Ray ray, float t) {
+    return ray.o + ray.d * t;
+}
+
+//-------------------------------------------------------------------------
+// Material
+//-------------------------------------------------------------------------
+
+const uint g_reflection_type_diffuse    = 0u;
+const uint g_reflection_type_specular   = 1u;
+const uint g_reflection_type_refractive = 2u;
+
+//-------------------------------------------------------------------------
+// Sphere
+//-------------------------------------------------------------------------
+
+// Decreased epsilon (1e-4f -> 1e-2f) to avoid single precision artifacts.
+const float g_sphere_epsilon = 1e-2f;
+
+struct Sphere {
+    float r;
+	vec3  p;
+	vec3  e;
+	vec3  f;
+	uint  reflection_t;
+};
+
+bool Intersect(Sphere sphere, inout Ray ray) {
+    vec3  op  = sphere.p - ray.o;
+    float dop = dot(ray.d, op);
+    float D   = dop * dop - dot(op, op) + sphere.r * sphere.r;
+
+    if (D < 0.0f) {
+        return false;
+    }
+
+    float sqrtD = sqrt(D);
+
+    float tmin = dop - sqrtD;
+    if (ray.tmin < tmin && tmin < ray.tmax) {
+        ray.tmax = tmin;
+        return true;
+    }
+
+    float tmax = dop + sqrtD;
+    if (ray.tmin < tmax && tmax < ray.tmax) {
+        ray.tmax = tmax;
+        return true;
+    }
+
+    return false;
+}
+
+//-------------------------------------------------------------------------
+// Camera
+//-------------------------------------------------------------------------
+
+const vec3  eye = vec3(50.0f, 52.0f, 295.6f);
+const float fov = 0.4135f;
+
+//-------------------------------------------------------------------------
+// Scene
+//-------------------------------------------------------------------------
+
+const float g_scene_refractive_index_out = 1.0f;
+const float g_scene_refractive_index_in  = 1.5f;
+
+const uint  g_nb_spheres = 9u;
+
+// Decreased radii (1e-5f -> 1e-4f) to avoid single precision artifacts.
+Sphere g_spheres[g_nb_spheres] = Sphere[](
+    Sphere(  1e4f, vec3( 1e4f + 1.0f,  40.8f, 81.6f),  vec3( 0.0f), vec3( 0.75f,  0.25f,  0.25f), g_reflection_type_diffuse),
+    Sphere(  1e4f, vec3(-1e4f + 99.0f, 40.8f, 81.6f),  vec3( 0.0f), vec3( 0.25f,  0.25f,  0.75f), g_reflection_type_diffuse),
+    Sphere(  1e4f, vec3(50.0f, 40.8f, 1e4f),           vec3( 0.0f), vec3( 0.75f), g_reflection_type_diffuse),
+    Sphere(  1e4f, vec3(50.0f, 40.8f, -1e4f + 170.0f), vec3( 0.0f), vec3(  0.0f), g_reflection_type_diffuse),
+    Sphere(  1e4f, vec3(50.0f, 1e4f, 81.6f),           vec3( 0.0f), vec3( 0.75f), g_reflection_type_diffuse),
+    Sphere(  1e4f, vec3(50.0f, -1e4f + 81.6f, 81.6f),  vec3( 0.0f), vec3( 0.75f), g_reflection_type_diffuse),
+    Sphere( 16.5f, vec3(27.0f, 16.5f, 47.0f),          vec3( 0.0f), vec3(0.999f), g_reflection_type_specular),
+    Sphere( 16.5f, vec3(73.0f, 16.5f, 78.0f),          vec3( 0.0f), vec3(0.999f), g_reflection_type_refractive),
+    Sphere(600.0f, vec3(50.0f, 681.33f, 81.6f),        vec3(12.0f), vec3(  0.0f), g_reflection_type_diffuse)
+);
+
+bool Intersect(inout Ray ray, out uint id) {
+	bool hit = false;
+	for (uint i = 0u; i < g_nb_spheres; ++i) {
+		if (Intersect(g_spheres[i], ray)) {
+			hit = true;
+			id = i;
+		}
+	}
+
+	return hit;
+}
+
+vec3 Radiance(Ray ray, inout uint state) {
+    Ray  r = Ray(ray.o, ray.d, ray.tmin, ray.tmax, ray.depth);
+    vec3 L = vec3(0.0f);
+    vec3 F = vec3(1.0f);
+
+    while (true) {
+        uint id;
+        if (!Intersect(r, id)) {
+            return L;
+        }
+
+        Sphere sphere = g_spheres[id];
+        vec3 p = EvalRay(r, r.tmax);
+        vec3 n = normalize(p - sphere.p);
+
+        L += F * sphere.e;
+        F *= sphere.f;
+        
+        // Russian roulette
+        if (4u < r.depth) {
+            float continue_probability = Max(sphere.f);
+            if (UniformFloat(state) >= continue_probability) {
+                return L;
+            }
+            F /= continue_probability;
+        }
+
+        // Next path segment
+        switch (sphere.reflection_t) {
+
+            case g_reflection_type_specular: {
+                vec3 d = IdealSpecularReflect(r.d, n);
+                r = Ray(p, d, g_sphere_epsilon, g_float_inf, r.depth + 1u);
+                break;
+            }
+
+            case g_reflection_type_refractive: {
+                float pr;
+                vec3 d = IdealSpecularTransmit(r.d, n, g_scene_refractive_index_out, g_scene_refractive_index_in, pr, state);
+                F *= pr;
+                r = Ray(p, d, g_sphere_epsilon, g_float_inf, r.depth + 1u);
+                break;
+            }
+
+            default: {
+                vec3 w = (0.0f > dot(n, r.d)) ? n : -n;
+                vec3 u = normalize(cross(((0.1f < abs(w.x)) ? 
+                                          vec3(0.0f, 1.0f, 0.0f) : 
+                                          vec3(1.0f, 0.0f, 0.0f)), w));
+                vec3 v = cross(w, u);
+                vec3 sample_d = CosineWeightedSampleOnHemisphere(UniformFloat(state), 
+                                                                 UniformFloat(state));
+                vec3 d = normalize(sample_d.x * u + sample_d.y * v + sample_d.z * w);
+                r = Ray(p, d, g_sphere_epsilon, g_float_inf, r.depth + 1u);
+                break;
+            }
+        }
+    }
+}
+
+vec3 Radiance(vec2 fragCoord, inout uint state) {
+	vec3  cz   = normalize(vec3(0.0f, -0.042612f, -1.0f));
+	vec3  cx   = vec3(viewPort.x * fov / viewPort.y, 0.0f, 0.0f);
+	vec3  cy   = normalize(cross(cx, cz)) * fov;
+    
+    vec2  u2   = vec2(UniformFloat(state), UniformFloat(state));
+    vec2  cs   = (fragCoord + u2) / viewPort.xy - vec2(0.5f);
+    vec3  d    = cs.x * cx + cs.y * cy + cz;
+    
+    return Radiance(Ray(eye + d * 130.0f, normalize(d), g_sphere_epsilon, g_float_inf, 0u), state);
+}
+
+//-------------------------------------------------------------------------
+// Main
+//-------------------------------------------------------------------------
+
+void main() {
+	vec2 fragCoord = jit_in.uv * viewPort,xy;
+    // Hashing for seeding, Xorshift/LCG for sequencing
+    uint  index  = uint(fragCoord.y * viewPort.x + fragCoord.x);
+    uint  key    = index ^ floatBitsToUint(iTime);
+    uint  state  = Hash_Wang(key);
+    
+    // Compute new HDR sample.
+    vec3  hdr    = Radiance(fragCoord, state);
+    
+    // Compute incremental HDR average (Welford).
+    vec2  uv     = fragCoord.xy / viewPort.xy;
+    vec3 dir = normalize(vec3(uv.x, uv.y, 1.0)); // Example direction
+	vec3 mean = texture(iChannel0, dir).xyz;
+    // vec3  mean   = texture(iChannel0, uv).xyz;
+   	mean        += (hdr - mean) / float(iFrame + 1);
+    
+    // Store new HDR average.
+    color        = vec4(mean, 1.0f);
+}
+]]>
+</program>
+</language>
+</jittershader>

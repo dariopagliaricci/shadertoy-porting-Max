@@ -1,0 +1,149 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 color;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform sampler2D iChannel0;
+
+//-------------------------------------------------------------------------
+// Math
+//-------------------------------------------------------------------------
+
+const float g_pi  = 3.14159265358979323846f;
+const float g_float_inf = 1e20f;
+
+float Max(vec3 v) {
+    return max(v.x, max(v.y, v.z));
+}
+
+vec3 Saturate(vec3 v) {
+    return clamp(v, 0.0f, 1.0f);
+}
+
+//-------------------------------------------------------------------------
+// Hash
+//-------------------------------------------------------------------------
+
+uint Hash_Wang(uint key) {
+	key = (key ^ 61u) ^ (key >> 16u);
+	key = key + (key << 3u);
+	key = key ^ (key >> 4u);
+	key = key * 0x27D4EB2Du;
+	key = key ^ (key >> 15u);
+	return key;
+}
+
+//-------------------------------------------------------------------------
+// RNG
+//-------------------------------------------------------------------------
+
+float UniformUintToFloat(uint u) {
+	// IEEE-754: 2^-32 = 0x2F800000
+	return float(u) * uintBitsToFloat(0x2F800000u);
+}
+
+uint UniformUint(inout uint state) {
+    // Xorshift: slower than LCG better distribution for long sequences
+	state ^= (state << 13u);
+	state ^= (state >> 17u);
+	state ^= (state << 5u);
+    
+    // LCG: faster than Xorshift, but poorer distribution for long sequences
+    //const uint multiplier = 1664525u;
+	//const uint increment  = 1013904223u;
+	//state *= multiplier;
+    //state += increment;
+    
+    return state;
+}
+
+float UniformFloat(inout uint state) {
+    return UniformUintToFloat(UniformUint(state));
+}
+
+
+
+//-------------------------------------------------------------------------
+// Display
+//-------------------------------------------------------------------------
+
+const float g_quantization = 1.0f / 255.0f;
+const float g_inv_gamma    = 1.0f / 2.2f;
+
+//-------------------------------------------------------------------------
+// Main
+//-------------------------------------------------------------------------
+
+void main() {
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Hashing for seeding, Xorshift/LCG for sequencing
+    uint  index  = uint(fragCoord.y * viewPort.x + fragCoord.x);
+    uint  key    = index ^ floatBitsToUint(iTime);
+    uint  state  = Hash_Wang(key);
+    
+    vec2  uv     = fragCoord.xy / viewPort.xy;
+	vec3  hdr    = texture(iChannel0, uv).xyz;
+    // Apply basic tone mapping.
+    vec3  ldr    = Saturate(hdr);
+    // Apply basic gamma correction
+    vec3  gcolor = pow(ldr, vec3(g_inv_gamma));
+    // Apply temporal dithering.
+    float noise  = UniformFloat(state);
+    float qnoise = noise * g_quantization;
+    
+    color = vec4(gcolor + vec3(qnoise), 1.0f);
+}
+		]]>
+		</program>
+	</language>
+</jittershader>

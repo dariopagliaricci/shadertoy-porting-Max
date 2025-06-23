@@ -1,0 +1,816 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+	<param name="iChannel1" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 c;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2D iChannel0, iChannel1;
+uniform samplerCube iChannel2;
+
+/*
+
+Extruded Subdivided Triangles
+    -----------------------------
+    
+    Combining raymarching and cell-by-cell prism boundary techniques
+    provides the opportunity to create some grid structures that would
+    normally be considered prohibitively expensive. This is a subdivided
+    triangle prism grid, and it'd be near impossible to raymarch one 
+    in realtime using the usual neighboring cell techniques.
+    
+    To be fair, it's kind of expensive doing it this way too, so 
+    apologies to those with slower systems. Having said that, a decent
+    machine could run this pretty easily -- Mine can push this out in
+    fullscreen without too much trouble.
+    
+    Anyway, I posted this just to get one of these on the board and to
+    show that raymarching with cell boundary restrictions can work on
+    non rectangular polygon grids as well. The work is a little rushed,
+    but I'll look into improving the sudivision routine later.
+
+
+
+    Similar examples:
+    
+    // This is a cell-by-cell traversal of subdivided equilateral 
+    // triangles. Like all of Abje's stuff, it's understated,
+    // underrated and cleverly written. On the surface, his subdivision 
+    // routine seems to be faster than the one I hacked together, so I 
+    // might take a look at it later.
+    recursive triangles - abje
+    https://www.shadertoy.com/view/3scyR2
+
+    // A 2D Truchet subdivided triangle grid example.
+	Multiscale Triangle Truchet - Shane
+    https://www.shadertoy.com/view/dllyD7
+
+*/
+
+
+// Maximum ray distance.
+#define FAR 20.
+
+
+// Object ID: Either the back plane, extruded object or beacons.
+int objID;
+
+// Standard 2D rotation formula.
+mat2 rot2(in float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// IQ's vec2 to float hash.
+float hash21(vec2 p){  
+    return fract(sin(mod(dot(p, vec2(27.619, 57.583)), 6.2831853))*43758.5453); 
+}
+
+// Tri-Planar blending function. Based on an old Nvidia tutorial by Ryan Geiss.
+vec3 tex3D(sampler2D t, in vec3 p, in vec3 n){
+    
+    n = max(abs(n) - .2, 0.001); // max(abs(n), 0.001), etc.
+    //n /= dot(n, vec3(1)); 
+    n /= length(n);
+    
+	vec3 tx = texture(t, p.yz).xyz;
+    vec3 ty = texture(t, p.zx).xyz;
+    vec3 tz = texture(t, p.xy).xyz;
+    
+    // Textures are stored in sRGB (I think), so you have to convert them to linear 
+    // space (squaring is a rough approximation) prior to working with them... or 
+    // something like that. :) Once the final color value is gamma corrected, you 
+    // should see correct looking colors.
+    return mat3(tx*tx, ty*ty, tz*tz)*n;
+}
+
+/*
+// Texture sample.
+//
+vec3 getTex(sampler2D iCh, vec2 p){
+    
+    // Strething things out so that the image fills up the window. You don't need to,
+    // but this looks better. I think the original video is in the oldschool 4 to 3
+    // format, whereas the canvas is along the order of 16 to 9, which we're used to.
+    // If using repeat textures, you'd comment the first line out.
+    //p *= vec2(viewPort.y/viewPort.x, 1);
+    vec3 tx = texture(iCh, p).xyz;
+    return tx*tx; // Rough sRGB to linear conversion.
+}
+*/
+
+// Height map value, which is just the pixel's greyscale value.
+//float hm(in vec2 p){ return dot(getTex(iChannel0, p), vec3(.299, .587, .114)); }
+
+float hm(vec2 p){
+
+    float rnd = hash21(p + .22);
+    rnd = smoothstep(.84, .94, sin(6.2831*rnd + iTime/2.));
+    float sn = dot(sin(p - cos(p.yx*1.25)*3.14159), vec2(.25)) + .5;
+    //float sn = dot(getTex(iChannel0, p/4.), vec3(.299, .587, .114)); 
+    return mix(sn, rnd, .2) + .05;
+}
+
+
+
+// IQ;s signed distance to an equilateral triangle.
+// https://www.shadertoy.com/view/Xl2yDW
+float getTri(in vec2 p, in float r){
+
+    const float k = sqrt(3.0);
+    p.x = abs(p.x) - r;
+   
+    p.y = p.y + r/k; 
+    if(p.x + k*p.y>0.) p = vec2(p.x - k*p.y, -k*p.x - p.y)/2.;
+    p.x -= clamp(p.x, -2.*r, 0.);
+    return -length(p)*sign(p.y);
+   
+    /*   
+    const float k = sqrt(3.0);
+    p.y = abs(p.y) - r; // This one has been reversed.
+    p.x = p.x + r/k;
+    if( p.y + k*p.x>0.) p = vec2(-k*p.y - p.x, p.y - k*p.x)/2.0;
+    p.y -= clamp( p.y, -2.0, 0.0 );
+    return -length(p)*sign(p.x);
+    */  
+}
+
+
+
+
+
+// IQ's extrusion formula.
+float opExtrusion(in float sdf, in float pz, in float h){
+    
+    vec2 w = vec2( sdf, abs(pz) - h );
+  	return min(max(w.x, w.y), 0.) + length(max(w, 0.));
+
+    /* 
+    // Slight rounding. A little nicer, but slower.
+    const float sf = .01;
+    vec2 w = vec2( sdf, abs(pz) - h) + sf;
+  	return min(max(w.x, w.y), 0.) + length(max(w, 0.)) - sf;
+    */
+     
+}
+
+
+// Signed distance to a line passing through A and B.
+float distLineS(vec2 p, vec2 a, vec2 b){
+
+   b -= a; 
+   return dot(p - a, vec2(-b.y, b.x)/length(b));
+}
+
+
+////////
+// A 2D triangle partitioning. I've dropped in an old routine here.
+// It works fine, but could do with some fine tuning. By the way, this
+// will partition all repeat grid triangles, not just equilateral ones.
+
+
+// Number of possible subdivisions. Larger numbers will work,
+// but will slow your machine down. This example is designed to
+// work with numbers 0 to 2. For 3 and 4, etc, you'll need to change
+// the triangle scale variable below.
+#define DIV_NUM 2
+
+// Skewing coordinates. "s" contains the X and Y skew factors.
+vec2 skewXY(vec2 p, vec2 s){ return mat2(1, -s.yx, 1)*p; }
+
+// Unskewing coordinates. "s" contains the X and Y skew factors.
+vec2 unskewXY(vec2 p, vec2 s){ return inverse(mat2(1, -s.yx, 1))*p; }
+
+// Triangle scale: Smaller numbers mean smaller triangles, oddly enough. :)
+const float scale = .8;
+
+// Rectangle scale.
+const vec2 rect = (vec2(1./.8660254, 1))*scale;
+
+// Skewing half way along X, and not skewing in the Y direction.
+const vec2 sk = vec2(rect.x*.5, 0)/scale; // 12 x .2
+
+
+float gTri;
+
+// Triangle routine, with additinal subdivision. It returns the 
+// local tringle coordinates, the vertice IDs and vertices.
+vec4 getTriVerts(in vec2 p, inout mat3x2 vID, inout mat3x2 v){
+   
+
+    // Skew the XY plane coordinates.
+    p = skewXY(p, sk);
+    
+    // Unique position-based ID for each cell. Technically, to get the central position
+    // back, you'd need to multiply this by the "rect" variable, but it's kept this way
+    // to keep the calculations easier. It's worth putting some simple numbers into the
+    // "rect" variable to convince yourself that the following makes sense.
+	vec2 id = floor(p/rect) + .5; 
+    // Local grid cell coordinates -- Range: [-rect/2., rect/2.].
+	p -= id*rect; 
+    
+    
+    // Equivalent to: 
+    //gTri = p.x/rect.x < -p.y/rect.y? 1. : -1.;
+    // Base on the bottom (-1.) or upside down (1.);
+    gTri = dot(p, 1./rect)<0.? 1. : -1.;
+   
+    // Puting the skewed coordinates back into unskewed form.
+    p = unskewXY(p, sk);
+    
+    
+    // Vertex IDs for each partitioned triangle: The numbers are inflated
+    // by a factor of 3 to ensure vertex IDs are precisely the same. The
+    // reason behind it is that "1. - 1./3." is not always the same as
+    // "2./3" on a GPU, which can mess up hash logic. However, "3. - 2."
+    // is always the same as "1.". Yeah, incorporating hacks is annoying, 
+    // but GPUs don't work as nicely as our brains do, unfortunately. :)
+    if(gTri<0.){
+        vID = mat3x2(vec2(-1.5, 1.5), vec2(1.5, -1.5), vec2(1.5));
+    }
+    else {
+        vID = mat3x2(vec2(1.5, -1.5), vec2(-1.5, 1.5), vec2(-1.5));
+    }
+    
+    // Triangle vertex points.
+    for(int i = 0; i<3; i++) v[i] = unskewXY(vID[i]*rect/3., sk); // Unskew.
+  
+    // Centering at the zero point.
+    vec2 ctr = (v[0] + v[1] + v[2])/3.;
+    p -= ctr;
+    v[0] -= ctr; v[1] -= ctr; v[2] -= ctr;
+    
+     // Centered ID, taking the inflation factor of three into account.
+    vec2 ctrID = (vID[0] + vID[1] + vID[2])/3.;//vID[2]/3.;
+    vec2 tID = id*3. + ctrID;   
+    // Since these are out by a factor of three, "v = vertID*rect/3.".
+    vID[0] -= ctrID; vID[1] -= ctrID; vID[2] -= ctrID;
+    
+    
+    /////////////////////////////
+    #if DIV_NUM > 0
+    
+    // The random triangle subdivsion addition. I put this together pretty
+    // quickly, so there'd probably be better ways to do it. By the way, if
+    // you know of ways to improve the following, feel free to let me know.
+    for(int j = 0; j<DIV_NUM; j++){
+    
+        // Randomly subdivide.
+        if(hash21(tID + float(j + 6)/32.)<.35){
+
+            // Subdividing an equilateral triangle into four smaller 
+            // equilateral ones. Use the "GRID" define and refer to the 
+            // resultant imagery, if you're not sure.
+
+            mat3x2 mid, midID; // Midpoints.
+            vec3 dl; // Divding lines.
+
+            for(int i = 0; i<3; i++){
+                int ip1 = (i + 1)%3;
+                mid[i] = mix(v[i], v[ip1], .5); // Mid points.
+                midID[i] = mix(vID[i], vID[ip1], .5); // Mid point IDs.
+                // Divinding lines -- separating  the midpoints.            
+                dl[i] = distLineS(p, mid[i], mix(v[ip1], v[(i + 2)%3], .5));  
+            }
+
+            // Choosing which of the four new triangles you're in. The top
+            // triangle is above the first midpoint dividing line, the
+            // bottom right is to the right of the next diving line and the
+            // bottom left is to the left of the third one. If you're not in
+            // any of those triangles, then you much be in the middle one...
+            // By the way, if you know of better, faster, logic to subdivide
+            // a triangle into four smaller ones, feel free to let me know. :)
+            //
+            if(dl[0]<0.){ // Top.   
+                v[0] = mid[0]; vID[0] = midID[0];
+                v[2] = mid[1]; vID[2] = midID[1];        
+            }
+            else if(dl[1]<0.){ // Bottom right.   
+                v[1] = mid[1]; vID[1] = midID[1];
+                v[0] = mid[2]; vID[1] = midID[2];        
+            }
+            else if(dl[2]<0.){ // Bottom left.   
+                v[2] = mid[2]; vID[2] = midID[2];
+                v[1] = mid[0]; vID[1] = midID[0];        
+            }  
+            else { // Center.
+               v[0] = mid[0]; vID[0] = midID[0];
+               v[1] = mid[1]; vID[1] = midID[1];
+               v[2] = mid[2]; vID[2] = midID[2];  
+               gTri = -gTri;
+            }
+
+            // Triangle center coordinate.
+            ctr = (v[0] + v[1] + v[2])/3.;
+            // Centering the coordinate system -- vec2(0) is the triangle center.
+            p -= ctr;
+            v[0] -= ctr; v[1] -= ctr; v[2] -= ctr;
+
+             // Centered ID, taking the inflation factor of three into account.
+            ctrID = (vID[0] + vID[1] + vID[2])/3.;//vID[2]/3.;
+            tID += ctrID;   
+            // Since these are out by a factor of three, "v = vertID*rect/3.".
+            vID[0] -= ctrID; vID[1] -= ctrID; vID[2] -= ctrID;
+        }
+    }
+    
+    #endif
+
+    // Triangle local coordinates (centered at the zero point) and 
+    // the central position point (which acts as a unique identifier).
+    return vec4(p, tID);
+}
+
+vec2 gTriID;
+mat3x2 gVert, gVertID;
+vec2 gP;
+
+// The subdivided triangle routine.
+float tr(vec2 p){
+    
+    
+    // Returns the local coordinates (centered on zero), cellID, the 
+    // triangle vertex ID and relative coordinates.
+    mat3x2 v, vID;
+    vec4 p4 = getTriVerts(p, vID, v);
+    vec2 triID = p4.zw;
+    gTriID = p4.zw;
+    
+    // Setting some globals.
+    gVert = v;
+    gVertID = vID;
+    gP = p4.xy;
+    
+    
+    // Grid triangles. Some are upside down.
+    float ew = .01;
+    vec2 q = p4.xy*vec2(1, gTri); // Equivalent to the line above.
+    
+    float rad = length(v[0]); // 2D object radius.
+    float d2D = getTri(q, (rad - ew - rad*.15*2.)*.8660254) - rad*.15; // Triangle.
+    //float d2D = length(q) - (rad*.5 - .001); // Cylinders.
+    
+    // Randomly bore out some of the triangle centers.
+    if(hash21(gTriID + .093)<.5) d2D = max(d2D, -(d2D + .3*sqrt(length(v[0]))));
+
+    // Return the 2D field.
+    return d2D;
+
+
+}
+
+
+
+// Ray origin, ray direction, point on the line, normal. 
+float rayLine(vec2 ro, vec2 rd, vec2 p, vec2 n){
+   
+   // This it trimmed down, and can be trimmed down more. Note that 
+   // "1./dot(rd, n)" can be precalculated outside the loop. However,
+   // this isn't a GPU intensive example, so it doesn't matter here.
+   //return max(dot(p - ro, n), 0.)/max(dot(rd, n), 1e-8);
+   float dn = dot(rd, n);
+   return dn>0.? dot(p - ro, n)/dn : 1e8;   
+   //return dn>0.? max(dot(p - ro, n), 0.)/dn : 1e8;   
+
+} 
+
+vec3 gRd; // Global ray variable.
+float gCD; // Global cell boundary distance.
+
+ 
+// The scene's distance function: There'd be faster ways to do this, but it's
+// more readable this way. Plus, this  is a pretty simple scene, so it's 
+// efficient enough.
+float m(vec3 p){
+    
+    
+    // 2D triangle distance -- for the extrusion cross section.
+    float d2D = tr(p.xy);
+    
+    // Back plane.
+    float fl = -p.z;
+
+    
+    // Extrude the 2D Truchet object along the Z-plane. Note that this is a cheap
+    // hack. However, in this case, it doesn't make much of a visual difference.
+    vec2 gTriV = unskewXY(gTriID*rect/3., sk);
+    float h = hm(gTriV);
+    // Proper extrusion formula for comparisson.
+    float obj = opExtrusion(d2D, p.z + h/2., h/2.);
+    
+   
+    // Adding the 2D field to angle the tops a bit.
+    obj -= max(-(d2D + .02), .0)*.1;
+    //obj -= clamp(-(d2D + .02), .0, .08)*.15;
+    //obj += smoothstep(0., .5, sin(d2D*80.))*.002;
+    //obj += smoothstep(0., .5, sin((p.z - h)*60.))*.002;
+    
+    
+    ///////////
+    // Ray to triangle prism wall distances.
+    vec3 rC;
+    rC.x = rayLine(gP.xy, gRd.xy, gVert[0], 
+                   normalize(gVert[1] - gVert[0]).yx*vec2(1, -1));
+    rC.y = rayLine(gP.xy, gRd.xy, gVert[1], 
+                   normalize(gVert[2] - gVert[1]).yx*vec2(1, -1));
+    rC.z = rayLine(gP.xy, gRd.xy, gVert[2], 
+                   normalize(gVert[0] - gVert[2]).yx*vec2(1, -1));
+    /* 
+    // Same thing, but using absolute coordinates.
+    rC.x = rayLine(oP.xy, gRd.xy, gTriV + gVert[0], 
+                   normalize(gVert[1] - gVert[0]).yx*vec2(1, -1));
+    rC.y = rayLine(oP.xy, gRd.xy, gTriV + gVert[1], 
+                   normalize(gVert[2] - gVert[1]).yx*vec2(1, -1));
+    rC.z = rayLine(oP.xy, gRd.xy, gTriV + gVert[2], 
+                   normalize(gVert[0] - gVert[2]).yx*vec2(1, -1));
+    */
+
+    // Minimum of all distances, plus not allowing negative distances, which
+    // stops the ray from tracing backwards... or something like that.
+    gCD = max(min(min(rC.x, rC.y), rC.z), 0.) + .0015;
+    
+    
+    ///////////
+    
+   
+    // Object ID.
+    objID = fl<obj? 0 : 1 ;
+    
+    // Minimum distance for the scene.
+    return min(fl, obj);
+    
+}
+
+// Basic raymarcher.
+float trace(in vec3 ro, in vec3 rd){
+
+    // Overall ray distance and scene distance.
+    float d, t = 0.; //hash21(r.xy*57. + fract(iTime + r.z))*.5;
+    
+    gRd = rd; // Set the global ray  direction varible.
+    
+    for(int i = min(iFrame, 0); i<96; i++){
+    
+        d = m(ro + rd*t);
+        // Note the "t*b + a" addition. Basically, we're putting less emphasis on 
+        // accuracy, as "t" increases. It's a cheap trick that works in most 
+        // situations... Not all, though.
+        if(abs(d)<.001 || t>FAR) break; // Alternative: 0.001*max(t*.25, 1.), etc.
+
+        // Restrict the maximum ray distance to the prism wall boundaries.
+        t += min(d, gCD); 
+    }
+
+    return min(t, FAR);
+}
+
+/*
+// Texture bump mapping. Four tri-planar lookups, or 12 texture lookups in total. 
+// I tried to make it as concise as possible. Whether that translates to speed, 
+// or not, I couldn't say.
+vec3 texBump( sampler2D tx, in vec3 p, in vec3 n, float bf){
+   
+    const vec2 e = vec2(.001, 0);
+    
+    // Three gradient vectors rolled into a matrix, constructed with offset greyscale 
+    // texture values.    
+    mat3 m = mat3(tex3D(tx, p - e.xyy, n), tex3D(tx, p - e.yxy, n), 
+                  tex3D(tx, p - e.yyx, n));
+    
+    vec3 g = vec3(.299, .587, .114)*m; // Converting to greyscale.
+    g = (g - dot(tex3D(tx,  p , n), vec3(.299, .587, .114)))/e.x; 
+    
+    // Adjusting the tangent vector so that it's perpendicular to the normal -- Thanks 
+    // to EvilRyu for reminding me why we perform this step. It's been a while, but I 
+    // vaguely recall that it's some kind of orthogonal space fix using the Gram-Schmidt 
+    // process. However, all you need to know is that it works. :)
+    g -= n*dot(n, g);
+                      
+    return normalize( n + g*bf ); // Bumped normal. "bf" - bump factor.
+	
+}
+*/
+
+// Cheap shadows are hard. In fact, I'd almost say, shadowing particular scenes with 
+// limited iterations is impossible... However, I'd be very grateful if someone could 
+// prove me wrong. :)
+float softShadow(vec3 ro, vec3 lp, vec3 n, float k){
+
+    // More would be nicer, but not always affordable for slower machines.
+    const int iter = 32; 
+    
+    ro += n*.0015; // Bumping the shadow off the hit point.
+    
+    vec3 rd = lp - ro; // Unnormalized direction ray.
+
+    float shade = 1.;
+    float t = 0.; 
+    float end = max(length(rd), 0.0001);
+    rd /= end;
+    
+    //rd = normalize(rd + (hash33R(ro + n) - .5)*.03);
+    
+    gRd = rd;
+
+    // Max shadow iterations - More iterations make nicer shadows, but slow things down. 
+    // Obviously, the lowest number to give a decent shadow is the best one to choose. 
+    for (int i = min(iFrame, 0); i<iter; i++){
+
+        float d = m(ro + rd*t);
+        shade = min(shade, k*d/t);
+        //shade = min(shade, smoothstep(0., 1., k*h/dist)); // IQ's subtle refinement.
+        t += clamp(min(d, gCD), .01, .2); 
+        
+        
+        // Early exits from accumulative distance function calls tend to be a good thing.
+        if (d<0. || t>end) break; 
+    }
+
+    // Shadow.
+    return max(shade, 0.); 
+}
+
+
+// I keep a collection of occlusion routines... OK, that sounded really nerdy. :)
+// Anyway, I like this one. I'm assuming it's based on IQ's original.
+float calcAO(in vec3 p, in vec3 n){
+
+	float sca = 2., occ = 0.;
+    for( int i = min(iFrame, 0); i<5; i++ ){
+    
+        float hr = float(i + 1)*.2/5.;        
+        float d = m(p + n*hr);
+        occ += (hr - d)*sca;
+        sca *= .7;
+        
+        // Deliberately redundant line that may or may not stop the 
+        // compiler from unrolling.
+        if(sca>1e5) break;
+    }
+    
+    return clamp(1. - occ, 0., 1.);
+}
+  
+// Normal function. It's not as fast as the tetrahedral calculation, but more symmetrical.
+vec3 nr(in vec3 p) {
+	
+    //return normalize(vec3(m(p + e.xyy) - m(p - e.xyy), m(p + e.yxy) - m(p - e.yxy),	
+    //                      m(p + e.yyx) - m(p - e.yyx)));
+    
+    // This mess is an attempt to speed up compiler time by contriving a break... It's 
+    // based on a suggestion by IQ. I think it works, but I really couldn't say for sure.
+    float sgn = 1.;
+    vec3 e = vec3(.001, 0, 0), mp = e.zzz; // Spalmer's clever zeroing.
+    for(int i = min(iFrame, 0); i<6; i++){
+		mp.x += m(p + sgn*e)*sgn;
+        sgn = -sgn;
+        if((i&1)==1){ mp = mp.yzx; e = e.zxy; }
+    }
+    
+    return normalize(mp);
+}
+
+
+void main(){
+
+    vec2 u = jit_in.uv * viewPort.xy;
+    // Aspect correct coordinates. Only one line necessary.
+    u = (u - viewPort.xy*.5)/viewPort.y;    
+    
+    // Unit direction vector, camera origin and light position.
+    vec3 r = normalize(vec3(u, 1)), o = vec3(iTime/4., iTime/8., -3.25),
+         l = o + vec3(1, 2.5, 1);
+    
+    // Rotating the camera about the XY plane.
+    r.yz = rot2(.35)*r.yz;
+    r.xz = rot2(-cos(iTime*3.14159/32.)/16.)*r.xz;
+    r.xy = rot2(sin(iTime*3.14159/32.)/16. + .28)*r.xy; 
+    
+    // Rough fish-eye lens.
+    r = normalize(vec3(r.xy, sqrt(max(r.z*r.z - dot(r.xy, r.xy)*.15, 0.))));
+  
+    
+    // Raymarch to the scene.
+    float t = trace(o, r);
+ 
+    
+    // Object ID: Back plane (0), or the metaballs (1).
+    int gObjID = objID;
+    
+    
+    // Initialize the scene color to zero.
+    c = vec4(0);
+    
+    
+    if(t<FAR){
+    
+        // Very basic lighting.
+        // Hit point and normal.
+        vec3 p = o + r*t, n = nr(p); 
+        
+        // Texture base bump mapping.
+        // Slightly better, but I thought we could save the cycles.
+        // If using it, uncomment the "texBump" function.
+        //n = texBump(iChannel1, p, n, .003);///(1. + t/FAR)
+        
+         // Basic point lighting.   
+        vec3 ld = l - p;
+        float lDist = length(ld);
+        ld /= lDist; // Light direction vector.
+        float at = 1.5/(1. + lDist*.05); // Attenuation.
+
+        // Very, very cheap shadows -- Not used here.
+        //float sh = min(min(m(p + ld*.08), m(p + ld*.16)), 
+        //           min(m(p + ld*.24), m(p + ld*.32)))/.08*1.5;
+        //sh = clamp(sh, 0., 1.);
+        float sh = softShadow(p, l, n, 8.); // Shadows.
+        float ao = calcAO(p, n); // Ambient occlusion.
+
+
+        // UV texture coordinate holder.
+        vec2 uv = p.xy;
+
+
+        // Returns the local coordinates (centered on zero), cellID, the 
+        // triangle vertex ID and relative coordinates.
+        mat3x2 v, vID;
+
+
+        // Triangle face distace -- Used to render borders, etc.
+        float d = tr(p.xy);
+
+        /*
+        // Subtle pattern lines for a bit of texture.
+        #ifdef LINES
+        float lSc = 30.;
+        vec2 rUV = rot2(-3.14159/3.)*uv;
+        float pat = (abs(fract(rUV.x*lSc - .5) - .5) - .125)/lSc;
+        #else
+        float pat = 1e5;
+        #endif     
+        */
+
+        // Object color.
+        vec4 oCol;
+
+
+        // Use whatever logic to color the individual scene components. I made it
+        // all up as I went along, but things like edges, textured line patterns,
+        // etc, seem to look OK.
+        //
+        if(gObjID == 1){
+        
+            // Extruded subdivided triangle height.            
+            vec2 gTriV = unskewXY(gTriID*rect/3., sk);
+            float h = hm(gTriV); 
+
+         
+            // Metallic texturing.
+            vec4 tx = tex3D(iChannel1, p/2., n).xyzx;
+             
+            // Two colors, used for decorating the prisms.
+            vec4 col1 = tx*(tx*2. + .1)/2.;
+            vec4 col2 = tx/2.;
+
+ 
+            float bw = .05; // Side band width.
+            float ew = .02; // Dark edge line width.
+            float sf = .007;//3./viewPort.y;
+            oCol = col2*vec4(1, .6, .38, 0)/2.;
+            oCol = mix(oCol, oCol*.05, 1. - smoothstep(0., sf, max(d, (p.z + h - bw))));
+         
+            
+ 
+            // Darken alternate checkers on the face only.
+            //if(gTri>0.) col1 *= vec4(1, .6, .4, 0);
+            
+            // Giving the triangle faces some subtle random gold hints.
+            vec4 fCol = mix(vec4(1), vec4(1, .7, .4, 0), hash21(gTriV + .08)*.5 + .1);
+            col1 *= fCol;
+            col2 *= fCol*.5 + .5;
+             
+            // Screen gradient... Not for this example. :)
+            //col1 *= mix(vec4(1, .7, .4, 0), vec4(1, .7, .4, 0).zyxw, -u.y + .5);
+            
+            // Fake pearlescence.
+            vec4 pearl = mix(vec4(1, .6, .2, 0), vec4(1, .6, .3, 0).zyxw,
+                                clamp(-n.y*8. + .5, 0., 1.))*2. + .1;
+            col1 *= pearl;
+            col2 *= pearl; 
+            
+            // Green falloff.
+            col1 += col1*vec4(.6, 1, .2, 0)/2.*(1. - smoothstep(0., sf*16., (d + .2)));
+            // Line pattern. Uncomment the line pattern block above.
+            //col1 = mix(col1*1.25, col1*.7, 1. - smoothstep(0., sf, pat));
+            
+            // Applying the top face color and edging.
+            oCol = mix(oCol, col2*vec4(1, .77, .5, 0), 
+                       1. - smoothstep(0., sf, max(d, (p.z + h - bw + ew))));
+            oCol = mix(oCol, oCol*.05, 1. - smoothstep(0., sf, max(d, (p.z + h ))));
+            
+            
+            // Apply the colored face to the Truchet, but leave enough room
+            // for an edge.
+            oCol = mix(oCol, col2*vec4(1, .8, .6, 0), 1. - smoothstep(0., sf, d + ew));
+            oCol = mix(oCol, oCol*.05, 1. - smoothstep(0., sf, d + ew + .02));
+            oCol = mix(oCol, col1, 1. - smoothstep(0., sf, d + ew*2. + .02));
+
+
+        }
+        else {
+            
+            // The floor. Mostly hidden.
+            oCol = vec4(.02); 
+        }
+
+
+
+       
+
+        // Diffuse and specular.
+        float df = pow(max(dot(n, ld), 0.), 2. + 8.*oCol.x)*2.; // Diffuse.
+        float sp = pow(max(dot(reflect(r, n), ld), 0.), 16.); // Specular.
+
+
+        // Specular reflection.
+        vec3 hv = normalize(ld - r); // Half vector.
+        vec3 ref = reflect(r, n); // Surface reflection.
+        vec4 refTx = texture(iChannel2, -ref.yzx); refTx *= refTx; // Cube map.
+        float spRef = pow(max(dot(hv, n), 0.), 5.); // Specular reflection.
+        float rf = mix(.5, 1., 1. - smoothstep(0., .01, d + .02));
+        rf *= (gObjID == 0)? .1 : 1.;
+        oCol += oCol*spRef*refTx.zyxw*rf*24.;
+        
+
+
+        // Apply the lighting and shading. 
+        c = oCol*(df*sh + sp*sh*8. + .3)*at*ao;
+    
+    
+    }
+    
+    // Applying fog: This fog begins at 90% towards the horizon.
+    //c = mix(c, vec4(0), smoothstep(.25, .9, t/FAR));
+  
+   
+ 
+    // Rough gamma correction.
+    c = vec4(max(c.xyz, 0.), t);  
+
+}
+]]>
+</program>
+</language>
+</jittershader>

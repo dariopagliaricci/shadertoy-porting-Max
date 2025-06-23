@@ -1,0 +1,216 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+uniform sampler2D iChannel0;
+
+
+// Crystal Drops
+// by Michal 'spolsh' Klos 2017
+
+// Works well with Pulfrich Effect:
+// https://en.wikipedia.org/wiki/Pulfrich_effect
+// https://www.youtube.com/watch?v=Q-v4LsbFc5c
+
+// comment line 5 in Buf A to animate camera endlessly
+
+#define R viewPort
+#define T iTime
+#define F fragCoord
+#define M iMouse
+
+// uncomment to enable FPS counter 
+// #define FPS_COUNTER
+
+//-----------------------------------------------------------------
+// Digit drawing function by P_Malin (https://www.shadertoy.com/view/4sf3RN)
+
+float SampleDigit(const in float n, const in vec2 vUV)
+{		
+	if(vUV.x  < 0.0) return 0.0;
+	if(vUV.y  < 0.0) return 0.0;
+	if(vUV.x >= 1.0) return 0.0;
+	if(vUV.y >= 1.0) return 0.0;
+	
+	float data = 0.0;
+	
+	     if(n < 0.5) data = 7.0 + 5.0*16.0 + 5.0*256.0 + 5.0*4096.0 + 7.0*65536.0;
+	else if(n < 1.5) data = 2.0 + 2.0*16.0 + 2.0*256.0 + 2.0*4096.0 + 2.0*65536.0;
+	else if(n < 2.5) data = 7.0 + 1.0*16.0 + 7.0*256.0 + 4.0*4096.0 + 7.0*65536.0;
+	else if(n < 3.5) data = 7.0 + 4.0*16.0 + 7.0*256.0 + 4.0*4096.0 + 7.0*65536.0;
+	else if(n < 4.5) data = 4.0 + 7.0*16.0 + 5.0*256.0 + 1.0*4096.0 + 1.0*65536.0;
+	else if(n < 5.5) data = 7.0 + 4.0*16.0 + 7.0*256.0 + 1.0*4096.0 + 7.0*65536.0;
+	else if(n < 6.5) data = 7.0 + 5.0*16.0 + 7.0*256.0 + 1.0*4096.0 + 7.0*65536.0;
+	else if(n < 7.5) data = 4.0 + 4.0*16.0 + 4.0*256.0 + 4.0*4096.0 + 7.0*65536.0;
+	else if(n < 8.5) data = 7.0 + 5.0*16.0 + 7.0*256.0 + 5.0*4096.0 + 7.0*65536.0;
+	else if(n < 9.5) data = 7.0 + 4.0*16.0 + 7.0*256.0 + 5.0*4096.0 + 7.0*65536.0;
+	
+	vec2 vPixel = floor(vUV * vec2(4.0, 5.0));
+	float fIndex = vPixel.x + (vPixel.y * 4.0);
+	
+	return mod(floor(data / pow(2.0, fIndex)), 2.0);
+}
+
+float PrintInt(const in vec2 uv, const in float value )
+{
+	float res = 0.0;
+	float maxDigits = 1.0+ceil(log2(value)/log2(10.0));
+	float digitID = floor(uv.x);
+	if( digitID>0.0 && digitID<maxDigits )
+	{
+        float digitVa = mod( floor( value/pow(10.0,maxDigits-1.0-digitID) ), 10.0 );
+        res = SampleDigit( digitVa, vec2(fract(uv.x), uv.y) );
+	}
+
+	return res;	
+}
+
+float nrand(vec2 n)
+{
+	return fract(sin(dot(n.xy, vec2(12.9898, 78.233)))* 43758.5453);
+}
+
+vec3 filmGrainColor(vec2 uv, float offset)
+{ // by ma (lstGWn)
+    vec4 uvs;
+    uvs.xy = uv + vec2(offset, offset);
+    uvs.zw = uvs.xy + 0.5*vec2(1.0 / viewPort.x, 1.0 / viewPort.y);
+
+    uvs = fract(uvs * vec2(21.5932, 21.77156).xyxy);
+
+    vec2 shift = vec2(21.5351, 14.3137);
+    vec2 temp0 = uvs.xy + dot(uvs.yx, uvs.xy + shift);
+    vec2 temp1 = uvs.xw + dot(uvs.wx, uvs.xw + shift);
+    vec2 temp2 = uvs.zy + dot(uvs.yz, uvs.zy + shift);
+    vec2 temp3 = uvs.zw + dot(uvs.wz, uvs.zw + shift);
+
+    vec3 r = vec3(0.0, 0.0, 0.0);
+    r += fract(temp0.x * temp0.y * vec3(95.4337, 96.4337, 97.4337));
+    r += fract(temp1.x * temp1.y * vec3(95.4337, 96.4337, 97.4337));
+    r += fract(temp2.x * temp2.y * vec3(95.4337, 96.4337, 97.4337));
+    r += fract(temp3.x * temp3.y * vec3(95.4337, 96.4337, 97.4337));
+
+    return r * 0.25;
+}
+
+vec2 barrelDistortion(vec2 coord, float amt, float zoom)
+{ // based on gtoledo3 (XslGz8)
+  // added zoomimg
+	vec2 cc = coord-0.5;
+    vec2 p = cc*zoom;
+    coord = p+0.5;
+	float dist = dot(cc, cc);
+	return coord +cc*dist*amt;
+}
+
+void main()
+{    
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    outColor = vec4(0.0);
+    vec2 uv = F.xy/R.xy;
+    vec2 vv = 2.0*(uv-0.5);
+    vv.x *= R.x/R.y;
+ 
+    float cas = step(abs(vv.y)*2.39,R.x/R.y);
+    if (cas<0.1) return;
+ 
+    vec3 c = texture(iChannel0, uv).rgb;   
+        
+    uv = barrelDistortion(uv, 0.1, 0.96);
+           
+    // chromatic abberation inspired by knifa (lsKSDz)
+    vec2 d = abs((uv-0.5)*2.0);    
+    d = pow(d, vec2(1.5, 1.0));
+    d.y *= 0.1;
+    
+    float dScale = 0.01;
+    const int maxSamples = 4;
+    vec4 r, g, b;
+    r = g = b = vec4(0.0);
+    for (int i=0; i<maxSamples; ++i)
+    {
+        float rnd = nrand(uv+vec2(i)+0.001*T);
+    	r += texture(iChannel0, uv +d*rnd*dScale);
+    	g += texture(iChannel0, uv);
+    	b += texture(iChannel0, uv -d*rnd*dScale);
+	}
+    
+    c = vec3(r.r, g.g, b.b)/vec3(maxSamples);
+    
+    c *= 1.0 -0.25*filmGrainColor(0.5*uv, T).rgb;
+    
+    c = pow(c, vec3(0.4545));
+    
+    vec2 v = 2.*(uv-.5);
+    v.y *= 2.39 * R.y/R.x;
+    v = clamp((v*.5)+.5, 0., 1.);
+    // c.rgb = vec3(1.0); // uncomment to see only vignette
+    c *= 0.25 + 0.75*pow( 16.0*v.x*v.y*(1.0-v.x)*(1.0-v.y), 0.25);
+    
+#ifdef FPS_COUNTER    
+    vec2 h = F.xy/R.xy; 
+    h.x *= R.x / R.y;
+    c += PrintInt( (h -vec2(0.0,0.21))*30.0, iFrameRate );
+#endif 
+    
+    outColor = vec4(c, 1.0);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

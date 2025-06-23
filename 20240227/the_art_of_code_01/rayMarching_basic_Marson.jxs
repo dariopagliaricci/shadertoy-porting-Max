@@ -1,0 +1,242 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="lightPos" type="vec3" default="0.1 3. -5." />
+	<param name="iTime" type="float" default="0.0"/>
+	<param name="spherePos" type="int" default="1" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="lightPos" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="spherePos" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform vec3 lightPos;
+uniform float iTime;
+uniform sampler2DRect spherePos;
+
+// #define MAX_STEPS 100
+// #define MAX_DIST 100.
+// #define SURF_DIST .01
+
+#define MAX_STEPS 100 //The maximum amount of marching steps
+#define MIN_DIST 0.0001 //The distance below which we consider a shape being hit
+#define MAX_DIST 100. //The maximum distance each ray investigates
+
+
+
+float SDFsphere(vec3 pos, vec3 c, float ra){
+	//returns the distance from a point on a ray to the surface of a sphere
+	//c is the center, ra is the radius
+	return length(pos - c) - ra;
+}
+
+// float getDist (vec3 p) {
+// 	vec4 s = vec4(0, 1, 6, 1);//SDF sphere function(pos, c, ra)
+
+// 	float sphereDist = length (p-s.xyz) -s.w;
+// 	float planeDist = p.y;
+
+// 	float d = min(sphereDist, planeDist);
+// 	return d;
+// }
+
+float getDist(vec3 pos){
+//in this function you place all the objects you want to render
+//it returns the minimum distance between a point on the ray and the surface of the objects
+	float closest = 100000;
+	float dist;
+	vec3 c;
+	for (int i = 0; i < 10; i++){
+		c = texture(spherePos, vec2(i, 0)).rgb;
+		dist = SDFsphere(pos, c, 0.1);
+		closest = min(closest, dist);
+	}
+	return closest;
+}
+
+
+// float rayMarch (vec3 ro, vec3 rd) {
+// 	float d0 = 0.;
+
+// 	for (int i=0; i<MAX_STEPS; i++) {
+// 		vec3 p = ro + rd * d0;
+// 		float dS = getDist(p);
+// 		d0 += dS;
+// 		if(d0>MAX_DIST || dS<SURF_DIST) break;
+
+// 	}
+// 	return d0;
+// }
+
+float map(vec3 ro, vec3 rd){
+
+	//this function creates the marching loop 
+	float dist = 0;
+	vec3 pos;
+	for(int i = 0; i < MAX_STEPS; i++){
+		pos = ro + rd*dist;
+		dist += getDist(pos);
+		if (dist < MIN_DIST || dist > MAX_DIST){
+			break;
+		}
+	}
+	return dist;
+}
+
+
+
+// vec3 getNormal (vec3 p){
+// 	float d = getDist(p);
+// 	vec2 e = vec2(.01, 0);
+
+// 	vec3 n = d - vec3(
+// 		getDist(p-e.xyy),
+// 		getDist(p-e.yxy),
+// 		getDist(p-e.yyx));
+
+// 	return normalize(n);
+// }
+
+vec3 getNorm(vec3 hitPos){
+
+	//this function returns the normal vector to hitPos
+	vec2 eps = vec2(0.00001, 0.);
+	float shiftX = getDist(hitPos + eps.xyy) - getDist(hitPos - eps.xyy);
+	float shiftY = getDist(hitPos + eps.yxy) - getDist(hitPos - eps.yxy);
+	float shiftZ = getDist(hitPos + eps.yyx) - getDist(hitPos - eps.yyx);
+
+	return normalize(vec3(shiftX, shiftY, shiftZ));
+}
+
+// float getLight (vec3 p) {
+// 	vec3 lightPos = vec3(0, 5, 6);
+// 	lightPos.xz += vec2 (sin(iTime), cos(iTime)) *2.;
+// 	vec3 l = normalize(lightPos -p);
+// 	vec3 n = getNormal (p);
+
+// 	float diff = clamp(dot(n, l), 0., 1.); //clamp dot values (-1 < > 1) into 0 < >1
+// 	float d = rayMarch (p+n*SURF_DIST*2., l);
+// 	if(d<length(lightPos-p)) diff *= .1;
+// 	return diff;
+// }
+
+vec3 getLight(vec3 hitPos, vec3 rd){
+
+	//this function computes the direct and specular component ot the light (Phong model)
+	//and returns a color
+	vec3 normals = getNorm(hitPos);
+	vec3 lightDir = normalize(hitPos - lightPos);
+	float direct = max(-dot(lightDir, normals), 0.);
+
+	vec3 refRd = reflect(rd, normals);
+	float reflected = max(-dot(lightDir, refRd), 0.);
+
+	reflected = pow(reflected, 100);
+	vec3 ambient = vec3(0.1);
+	vec3 col = vec3(direct + reflected) + ambient;
+	return col;
+}
+
+void main() {
+
+
+/* 
+Now that we have screen percentage from 0 to 1, we want to change it to being 
+from -1 to 1 so that it’s actually just the x and y coordinate on the imaginary pixel rectangle.
+*/
+//https://learnopengl.com/Getting-started/Coordinate-Systems#:~:text=OpenGL%20expects%20all%20the%20vertices,range%20will%20not%20be%20visible.
+//http://www.songho.ca/opengl/gl_projectionmatrix.html
+vec2 screenPos = jit_in.uv*2-1; // coordinates -1 < > 1 NDC (normalized device coordinates)
+float ratio = viewPort.x / viewPort.y; // 0 is in the middle of x and y
+screenPos.x *= ratio;
+
+// vec3 col = vec3(0);
+
+// vec3 ro = vec3 (0, 1, 0);
+// vec3 rd = normalize(vec3(screenPos.x, screenPos.y, 1));
+
+// float dist = map(ro,rd);
+
+// vec3 p = ro + rd * d;//hitPos vector
+
+// float diff = getLight(p);
+// col = vec3(diff);
+
+// // col = getNormal(p);
+// outColor = vec4(col, 1.); 
+
+//the ray origin (camera position)
+	vec3 ro = vec3(0., 0., -1);
+
+	//the "imaginary plane" in front of the camera
+	float planeDist = 0.6;
+	// vec3 rd = normalize(vec3(jit_in.texcoord, planeDist));
+	vec3 rd = normalize(vec3(screenPos.x, screenPos.y, planeDist));
+
+	//cast a ray in the world and retrieve the distance to the hit point
+	float dist = map(ro, rd);
+
+	vec3 col = vec3(1., 0., 0.);
+	vec3 bgCol = vec3(0.);
+
+	//if the distance to the hit point is minor than the maximum allowed distance,
+	//color this pixel calculating how the light interacts with the shape
+	if (dist > MAX_DIST){
+		outColor = vec4(bgCol, 1.);
+	} else {
+		vec3 hitPos = ro + rd * dist;
+		vec3 test = getLight(hitPos, rd);
+		outColor = vec4(test, 1);
+	}
+
+
+}
+]]>
+</program>
+</language>
+</jittershader>

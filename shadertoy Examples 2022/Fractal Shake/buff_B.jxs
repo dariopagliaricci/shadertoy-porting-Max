@@ -1,0 +1,160 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_A" type="int" default="0" />	
+	<param name="buff_B" type="int" default="1" />	
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+		<bind param="buff_A" program="fp" />
+		<bind param="buff_B" program="fp" />
+		
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+			
+
+		uniform vec2 iResolution;
+		uniform float iTime;
+		
+		uniform sampler2D buff_A;
+		uniform sampler2D buff_B;
+
+		
+		// This buffer is the feedback loop
+
+		vec3 hue(vec3 color, float shift) {
+
+		    const vec3  kRGBToYPrime = vec3 (0.299, 0.587, 0.114);
+		    const vec3  kRGBToI     = vec3 (0.596, -0.275, -0.321);
+		    const vec3  kRGBToQ     = vec3 (0.212, -0.523, 0.311);
+
+		    const vec3  kYIQToR   = vec3 (1.0, 0.956, 0.621);
+		    const vec3  kYIQToG   = vec3 (1.0, -0.272, -0.647);
+		    const vec3  kYIQToB   = vec3 (1.0, -1.107, 1.704);
+
+		    // Convert to YIQ
+		    float   YPrime  = dot (color, kRGBToYPrime);
+		    float   I      = dot (color, kRGBToI);
+		    float   Q      = dot (color, kRGBToQ);
+
+		    // Calculate the hue and chroma
+		    float   hue     = atan (Q, I);
+		    float   chroma  = sqrt (I * I + Q * Q);
+
+		    // Make the user's adjustments
+		    hue += shift;
+
+		    // Convert back to YIQ
+		    Q = chroma * sin (hue);
+		    I = chroma * cos (hue);
+
+		    // Convert back to RGB
+		    vec3    yIQ   = vec3 (YPrime, I, Q);
+		    color.r = dot (yIQ, kYIQToR);
+		    color.g = dot (yIQ, kYIQToG);
+		    color.b = dot (yIQ, kYIQToB);
+
+		    return color;
+		}
+		float hash( float n )
+		{
+		    return fract(sin(n)*43758.5453123);
+		}
+
+		float noise( in vec2 x )
+		{
+		    vec2 p = floor(x);
+		    vec2 f = fract(x);
+
+		    f = f*f*(3.0-2.0*f);
+
+		    float n = p.x + p.y*157.0;
+
+		    return mix(mix( hash(n+  0.0), hash(n+  1.0),f.x),
+		               mix( hash(n+157.0), hash(n+158.0),f.x),f.y);
+		}
+
+		void main()
+		{
+		   	vec2 fragCoord = jit_in.texcoord * iResolution;
+		   	
+		   	vec2 uv = fragCoord.xy / iResolution.xy;
+		    
+		    float time = mod(iTime, 1.570795);
+		    float val1 = noise(uv*2. + time)*0.0025;
+		    float val2 = noise(uv*2. + time - 1.570795)*0.0025;
+		    
+			
+		    // Convert the uv's to polar coordinates to scale up  
+		    vec2 polarUv = (uv * 2.0 - 1.0);
+
+		    float angle = atan(polarUv.y, polarUv.x);
+		    
+		    // Scale up the length of the vector by a noise function feeded by the angle and length of the vector
+		    float llr = length(polarUv)*0.495;
+		    float llg = length(polarUv)*0.4965;
+		    float llb = length(polarUv)*0.498;
+		 
+		    vec3 base = texture(buff_A, uv).rgb;
+
+		    vec2 offsR = vec2(cos(angle)*llr + 0.5, sin(angle)*llr + 0.5);
+		    vec2 offsG = vec2(cos(angle)*llg + 0.5, sin(angle)*llg + 0.5);
+		    vec2 offsB = vec2(cos(angle)*llb + 0.5, sin(angle)*llb + 0.5);
+		    
+		    // sample the last texture with uv's slightly scaled up
+		    vec3 overlayR = texture(buff_B,offsR).rgb;
+			vec3 overlayG = texture(buff_B,offsG).rgb;
+			vec3 overlayB = texture(buff_B,offsB).rgb;
+			vec3 overlay = vec3(overlayR.r, overlayG.g, overlayB.b);
+
+		    // Additively blend the colors together
+		    vec4 col = vec4(base + overlay*0.55, 1.0);
+		    
+		    fragColor = col;
+		}
+		]]>
+		</program>
+	</language>
+</jittershader>

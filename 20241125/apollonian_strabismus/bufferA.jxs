@@ -1,0 +1,146 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iMouse" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform vec3 iMouse;
+
+// Complex arithmetic
+
+vec2 cMul(vec2 a, vec2 b)
+{
+    return vec2(a.x * b.x - a.y * b.y, 
+                a.x * b.y + a.y * b.x);
+}
+
+vec2 cConj(vec2 a)
+{
+    return vec2(a.x, -a.y);
+}
+
+vec2 cInverse(vec2 a)
+{
+    return cConj(a) / dot(a,a);
+}
+
+vec2 cDiv( vec2 a, vec2 b)
+{
+    return cMul(a, cInverse(b));
+}
+
+#define smooth (16.0 / viewPort.x)
+#define PI 3.1415926535
+#define S(x) smoothstep(-smooth, smooth, x)
+#define SR(x, y) smoothstep(-smooth * y, smooth * y, x)
+
+// Palettes by Inigo Quilez https://iquilezles.org/articles/palettes
+
+vec3 pal(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+vec3 pal1(float t) {
+    return pal(t, vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));
+}
+
+float rand(vec3 v) {
+    return fract(cos(dot(v, vec3(13.46543, 67.1132, 123.546123))) * 43758.5453);
+}
+
+float rand(vec2 v) {
+    return fract(sin(dot(v, vec2(5.11543, 71.3177))) * 43758.5453);
+}
+
+vec2 rand2(vec2 v) {
+    return vec2(
+        fract(sin(dot(v, vec2(5.11543, 71.3132))) * 43758.5453),
+        fract(sin(dot(v, vec2(7.3113, 21.5723))) * 31222.1234)
+    );
+}
+
+vec3 eye(vec2 fst, vec2 cst, vec2 mouse) {
+    float mouseDown = clamp(iMouse.z, 0.0, 1.0);
+    float noise = rand(cst);
+    float nt = iTime * 2.0 * (noise + 0.8) + noise * 100.0;
+    float fnt = floor(nt);
+    vec2 noise2 = rand2(cst + vec2(fnt));
+    vec2 noise22 = rand2(cst + vec2(fnt + 1.0));
+    float move = pow(1.0 - (cos(fract(nt) * PI) + 1.0) / 2.0, 4.0);
+    float eyeOpen = 1.0 - pow(mix((sin(iTime * 2.0 + noise * 100.0) + 1.0) / 2.0, 0.0, mouseDown), 3.0);
+    
+    vec2 loc = vec2(fract(fst.x / PI / 2.0 + PI * 2.0) - 0.53, fst.y * viewPort.y / viewPort.x);
+    vec2 pin2 = mix(vec2(cos(noise2.x * PI * 2.0), sin(noise2.x * PI * 2.0)) * ((noise2.y + 1.0) / 2.0),
+                    vec2(cos(noise22.x * PI * 2.0), sin(noise22.x * PI * 2.0)) * ((noise22.y + 1.0) / 2.0), move);
+    pin2 = mix(pin2 * 0.25, mouse, max(mouseDown - 0.05, 0.0));
+
+    float lloc = length(loc);
+    float iris = length(loc - pin2 * (0.5 - lloc));
+    float irisWhite = SR(-length(loc - pin2 * (0.2 - lloc)) + 0.03, 1.4);
+    float irisDark = SR(length(loc - pin2 * (0.4 - lloc)) - 0.05, 0.5);
+    vec3 irisColor = max(irisDark * pal1((SR(-length(loc - pin2 * (0.2 - lloc)) + 0.07, 15.0)) + nt / 10.0), irisWhite * 0.9);
+    vec3 baseCol = vec3(SR(-lloc + 0.25, 15.0)) + 0.25 * pal1(SR(-lloc + 0.25, 15.0) + nt / 10.0);
+
+    return mix(baseCol*0.8, irisColor, S(-iris + 0.15));
+}
+
+void main() {
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec2 st = vec2(fragCoord.x / viewPort.x - 0.75, fragCoord.y / viewPort.y);
+    vec2 mouse = iMouse.xy / viewPort.xy;
+    vec3 col = eye(vec2((st.x - 0.5) * PI * 2.0, st.y - 0.5), vec2(0.0), mouse - 0.5);
+    outColor = vec4(col, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>

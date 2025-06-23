@@ -1,0 +1,82 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iMouse" type="vec4" default="0 0 0 0" />
+    <param name="iTime" type="float" default="0" />
+    <param name="iFrame" type="int" default="0" />
+	<param name="dummytex" type="int" default="0" />
+	<param name="iChannel0" type="int" default="1" />
+	<param name="iChannel1" type="int" default="2" />
+	<param name="iChannel2" type="int" default="3" />
+    <param name="iChannel3" type="int" default="4" />
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+        <bind param="iMouse" program="fp" />
+		<bind param="dummytex" program="fp" />
+		<bind param="iChannel0" program="fp" />
+		<bind param="iChannel1" program="fp" />
+		<bind param="iChannel2" program="fp" />
+        <bind param="iChannel3" program="fp" />
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+			} jit_out;
+
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform sampler2DRect dummytex;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+uniform sampler2D iChannel3;
+
+// Copy shadertoy example here. 
+// Modify main() function accordingly. Delete "out vec4 fragColor, in vec2 fragCoord" beetween braces ()
+// Replace mainImage for main.
+// Declare fragCoord in main() function.
+// vec2 fragCoord = jit_in.uv * viewPort.xy;
+// Replace iResolution for viewPort in main() function.
+// Replace fragColor for outColor in main() function.
+
+void main(void) {
+	outColor = vec4(1, 0, 0, 1);
+}
+]]>
+</program>
+</language>
+</jittershader>

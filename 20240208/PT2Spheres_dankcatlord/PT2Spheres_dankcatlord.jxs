@@ -1,0 +1,251 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+		<bind param="viewPort" program="fp" />
+        <bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+	
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+
+precision highp float;
+
+float floatConstruct(uint a) {
+	return uintBitsToFloat(0x3F800000u | (a >> 9)) - 1.0;
+}
+
+// Bob Jenkins' One-At-A-Time hashing algorithm https://stackoverflow.com/a/17479300
+uint hash( uint x ) {
+    x += ( x << 10u );
+    x ^= ( x >>  6u );
+    x += ( x <<  3u );
+    x ^= ( x >> 11u );
+    x += ( x << 15u );
+    return x;
+}
+
+// xoroshiro 128+ https://prng.di.unimi.it
+uint rotl(const uint x, int k) {
+	return (x << k) | (x >> (32 - k));
+}
+
+float rand(inout uint s[4]) {
+	uint result = s[0] + s[3];
+
+	uint t = s[1] << 9;
+
+	s[2] ^= s[0];
+	s[3] ^= s[1];
+	s[1] ^= s[2];
+	s[0] ^= s[3];
+
+	s[2] ^= t;
+
+	s[3] = rotl(s[3], 11);
+
+	return floatConstruct(result);
+}
+vec2 rand2(inout uint s[4]) { return vec2(rand(s), rand(s)); }
+vec3 rand3(inout uint s[4]) { return vec3(rand(s), rand(s), rand(s)); }
+vec4 rand4(inout uint s[4]) { return vec4(rand(s), rand(s), rand(s), rand(s)); }
+
+void genState(out uint s[4], ivec2 coord, int frame) {
+   s[0] = hash(uint(frame) ^ hash(uint(coord.y) ^ hash(uint(coord.x))));
+   s[1] = hash(s[0]);
+   s[2] = hash(s[1]);
+   s[3] = hash(s[2]);
+   rand(s);
+   rand(s);
+}
+
+float fresnel(vec3 dir, vec3 norm, float ior) {
+    float c = -dot(dir, norm);
+    float s = sqrt(1.0 - c * c);
+    float v = sqrt(max(0.0, 1.0 - (ior * ior) * (1.0 - c * c)));
+    float rs = (ior * c - v) / (ior * c + v);
+    float rp = (ior * v - c) / (ior * v + c);
+    return (rs * rs + rp * rp) / 2.0;
+}
+
+struct MatData {
+    vec3 dir;
+    vec3 albedo;
+    vec3 emmission;
+};
+
+struct TraceData {
+    float dist;
+    vec3 pos;
+    vec3 norm;
+    MatData matData;
+};
+
+float intFloor(vec3 pos, vec3 dir, float dist) {
+    float a = pos.y - dist;
+    if (a <= 0.0 || dir.y >= 0.0) return 1.0 / 0.0;
+    float b = sqrt((dir.x * dir.x + dir.z * dir.z) / (dir.y * dir.y) + 1.0) * a;
+//    if (b < 0.001) return 1.0 / 0.0;
+    return b;
+}
+
+float intSphere(vec3 pos, vec3 dir, vec3 sph, float rad) {
+    vec3 a = pos - sph;
+    float b = dot(a,dir);
+    float c = dot(a,a) - rad * rad;
+    float d = b * b - c;
+    if (d < 0.0) return 1.0 / 0.0;
+    float e = -b - sqrt(d);
+    if (e < 0.01) {
+        e = -b + sqrt(d);
+        if (e < 0.01) return 1.0 / 0.0;
+    }
+    return e;
+}
+
+vec3 randVec(inout uint s[4]) {
+    vec3 dir = rand3(s) * 2.0 - 1.0;
+    dir /= cos(dir);
+    dir = normalize(dir);
+    return dir;
+}
+
+MatData matDiffuse(inout uint s[4], vec3 dir, vec3 norm, vec3 albedo) {
+    MatData matData;
+    matData.dir = normalize(randVec(s) + norm);
+    matData.albedo = albedo;
+    return matData;
+}
+
+MatData matSpecular(inout uint s[4], vec3 dir, vec3 norm, vec3 albedo, float ior, float roughness, float metallic) {
+    MatData matData;
+    float fresnel = fresnel(dir, norm, ior);
+    if (rand(s) > fresnel * (1.0 - metallic) + metallic) matData = matDiffuse(s, dir, norm, albedo);
+    else {
+        matData.dir = normalize(reflect(dir, norm) + randVec(s) * roughness);
+        matData.albedo = (albedo * (1.0 - fresnel) + fresnel) * metallic + (1.0 - metallic);
+    }
+    return matData;
+}
+
+TraceData trace(inout uint s[4], vec3 pos, vec3 dir) {
+    float dists[] = float[](
+        intFloor(pos, dir, 0.0),
+        intSphere(pos, dir, vec3(-1.5, 1.0, 0.0), 1.0),
+        intSphere(pos, dir, vec3(1.5, 1.0, 0.0), 1.0)
+    );
+    float dist = 1.0 / 0.0;
+    int nearest = 1024;
+    for (int i = 0; i < 3; i++) {if (dists[i] < dist) {dist = dists[i]; nearest = i;}}
+    pos += dir * dist;
+    TraceData traceData;
+    traceData.dist = dist;
+    traceData.pos = pos;
+    switch (nearest) {
+        case 0:
+            traceData.norm = vec3(0.0, 1.0, 0.0);
+            bool a = mod(pos.x, 2.0) >= 1.0 ^^ mod(pos.z, 2.0) >= 1.0;
+            traceData.matData = matSpecular(s, dir, traceData.norm, a ? vec3(1.0) : vec3(0.25), 0.9, 0.0, 0.0);
+            break;
+        case 1:
+            traceData.norm = pos - vec3(-1.5, 1.0, 0.0);
+            traceData.matData = matSpecular(s, dir, traceData.norm, vec3(0.2, 0.7, 0.0), 0.8, 0.3, 0.0);
+            break;
+        case 2:
+            traceData.norm = pos - vec3(1.5, 1.0, 0.0);
+            traceData.matData = matSpecular(s, dir, traceData.norm, vec3(1.0, 0.4, 0.0), 0.8, 0.0, 1.0);
+            break;
+        case 1024:
+            traceData.matData.emmission = vec3(0.2, 0.3, 0.0) * pow(1.0 - max(0.0, dir.y), 2.0) + vec3(0.1, 0.2, 1.0);
+            if (dot(dir, normalize(vec3(-1.0, 3.0, -2.0))) > 0.99) traceData.matData.emmission = vec3(80.0);
+            break;
+    }
+    return traceData;
+}
+
+void main() {
+
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    uint[4] s;
+    genState(s, ivec2(fragCoord), iFrame);
+    
+    vec3 pos = vec3(0.0, 1.0, -6.0);
+    vec2 npos;
+    for (int i = 0; i < 4; i++) {
+        npos = rand2(s) * 2.0 - 1.0;
+        if (dot(npos,npos) < 1.0) break;
+    }
+    npos *= 0.03;
+    pos.xy += npos;
+    vec3 dir = normalize(vec3((fragCoord * 2.0 - viewPort.xy + rand2(s) * 2.0 - 1.0) / viewPort.x - npos / 3.0, 2.0));
+    
+    vec3 col;
+    {
+        TraceData traceData;
+        traceData.pos = pos;
+        traceData.matData.dir = dir;
+        vec3 alb = vec3(1.0);
+        for (int j = 0; j < 4; j++) {
+            traceData = trace(s, traceData.pos, traceData.matData.dir);
+            col += traceData.matData.emmission * alb;
+            alb *= traceData.matData.albedo;
+        }
+    }
+
+    outColor = mix(
+        texture(iChannel0, fragCoord / viewPort.xy),
+        vec4(col, 1.0),
+        1.0 / float(iFrame + 1)
+    );
+    
+}
+]]>
+</program>
+</language>
+</jittershader>

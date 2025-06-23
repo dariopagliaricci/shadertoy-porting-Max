@@ -1,0 +1,198 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+        
+			} jit_out;
+			uniform mat4 MVP;
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform int iFrame;
+uniform sampler2D iChannel0;
+
+const int BARREL_ITER = 40;
+const float BARREL_AMP = 0.05;
+const vec4 COLOR_LIFT = vec4(0.0, 0.0, 0.0, 0.02);
+const vec4 COLOR_GAMMA = vec4(0.0, 0.0, 0.0, -0.1);
+const vec4 COLOR_GAIN = vec4(1.0, 1.0, 1.1, 1.1);
+
+const float PI = acos(-1.0);
+const float SQRT2 = sqrt(2.0);
+const float INV_SQRT2 = 1.0 / SQRT2;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+#define saturate(x) clamp(x, 0.0, 1.0)
+
+// http://www.jcgt.org/published/0009/03/02/
+uvec3 hash3u(uvec3 v) {
+  v = v * 1664525u + 1013904223u;
+
+  v.x += v.y * v.z;
+  v.y += v.z * v.x;
+  v.z += v.x * v.y;
+
+  v ^= v >> 16u;
+
+  v.x += v.y * v.z;
+  v.y += v.z * v.x;
+  v.z += v.x * v.y;
+
+  return v;
+}
+
+vec3 hash3f(vec3 v) {
+  uvec3 r = floatBitsToUint(v);
+  return vec3(hash3u(r)) / float(-1u);
+}
+
+uvec3 seed;
+vec3 random3() {
+  seed = hash3u(seed);
+  return vec3(seed) / float(-1u);
+}
+
+vec3 grad(float phase) {
+  return saturate(
+    1.0 - 3.0 * abs(vec3(0.25, 0.5, 0.75) - phase)
+  ) * 4.0 / float(BARREL_ITER);
+}
+
+vec2 barrelUv(vec2 uv, float amp) {
+  const float CORN = 0.5 * SQRT2;
+
+  float a = min(3.0 * sqrt(amp), INV_SQRT2 * PI);
+  float zoom = INV_SQRT2 / (tan(INV_SQRT2 * a) + INV_SQRT2);
+
+  vec2 uvt = uv - 0.5;
+  return saturate(mix(
+    vec2(0.5),
+    uv + normalize(uvt) * tan(length(uvt) * a),
+    zoom
+  ));
+}
+
+vec3 RRTAndODTFit(vec3 v) {
+  vec3 a = v * (v + 0.0245786) - 0.000090537;
+  vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+  return a / b;
+}
+
+vec3 tonemapACESHill(vec3 sRGB) {
+  vec3 inputCol = mat3(
+    0.59719, 0.07600, 0.02840,
+    0.35458, 0.90834, 0.13383,
+    0.04823, 0.01566, 0.83777
+  ) * sRGB;
+  vec3 fittedCol = RRTAndODTFit(inputCol);
+  vec3 outputCol = mat3(
+    1.60475, -0.10208, -0.00327,
+    -0.53108, 1.10813, -0.07276,
+    -0.07367, -0.00605, 1.07602
+  ) * fittedCol;
+  return saturate(outputCol);
+}
+
+vec3 sRGBOETF(vec3 x) {
+  vec3 x_ = saturate(x);
+  return mix(
+    x_ * 12.92,
+    pow(x_, vec3(0.4167)) * 1.055 - 0.055,
+    step(0.0031308, x_)
+  );
+}
+
+vec3 liftGammaGain(vec3 rgb) {
+  vec4 liftt = 1.0 - pow(1.0 - COLOR_LIFT, log2(COLOR_GAIN + 1.0));
+
+  vec4 gammat = COLOR_GAMMA.rgba - vec4(0.0, 0.0, 0.0, dot(LUMA, COLOR_GAMMA.rgb));
+  vec4 gammatTemp = 1.0 + 4.0 * abs(gammat);
+  gammat = mix(gammatTemp, 1.0 / gammatTemp, step(0.0, gammat));
+
+  vec3 col = rgb;
+  float luma = dot(LUMA, col);
+
+  col = pow(col, gammat.rgb);
+  col *= pow(COLOR_GAIN.rgb, gammat.rgb);
+  col = max(mix(2.0 * liftt.rgb, vec3(1.0), col), 0.0);
+
+  luma = pow(luma, gammat.a);
+  luma *= pow(COLOR_GAIN.a, gammat.a);
+  luma = max(mix(2.0 * liftt.a, 1.0, luma), 0.0);
+
+  col += luma - dot(LUMA, col);
+
+  return saturate(col);
+}
+
+void main() {
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+  seed = uvec3(fragCoord, iFrame);
+
+  vec2 uv = fragCoord.xy / viewPort.xy;
+  vec2 p = uv * 2.0 - 1.0;
+  p.x *= viewPort.x / viewPort.y;
+
+  vec3 col = vec3(0.0);
+  
+  for (int i = 0; i < BARREL_ITER; i ++) {
+    float phase = (float(i) + random3().x) / float(BARREL_ITER);
+    vec3 tint = grad(phase);
+    vec2 uv = barrelUv(uv, BARREL_AMP * phase);
+    col += tint * texture(iChannel0, uv).xyz;
+  }
+
+  col *= 1.0 - 0.2 * length(p);
+  col = tonemapACESHill(max(col, 0.0));
+  col = sRGBOETF(col);
+  col = liftGammaGain(col);
+
+  outColor = vec4(col, 1.0);
+}
+
+]]>
+</program>
+</language>
+</jittershader>

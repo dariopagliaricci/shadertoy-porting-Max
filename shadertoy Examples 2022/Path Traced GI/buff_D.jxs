@@ -1,0 +1,124 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="iResolution" type="vec2" state="VIEWPORT"/>
+	<param name="iTime" type="float" default="0.0" />
+
+	<param name="buff_A" type="int" default="0" />
+	<param name="buff_B" type="int" default="1" />
+	<param name="iChannel2" type="int" default="2" />
+	<param name="iChannel3" type="int" default="3" />
+	<param name="iChannel4" type="int" default="4" />
+	<param name="iChannel5" type="int" default="5" />
+
+
+	<param name="modelViewProjectionMatrix" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="textureMatrix0" type="mat4" state="TEXTURE0_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="texcoord" type="vec2" state="TEXCOORD" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="iResolution" program="fp" />
+		<bind param="iTime" program="fp" />
+
+
+		<bind param="buff_A" program="fp" />
+		<bind param="buff_B" program="fp" />
+		<bind param="iChannel2" program="fp" />
+		<bind param="iChannel3" program="fp" />
+		<bind param="iChannel4" program="fp" />
+		<bind param="iChannel5" program="fp" />
+		
+		
+		
+
+		<bind param="modelViewProjectionMatrix" program="vp" />
+		<bind param="textureMatrix0" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="texcoord" program="vp" />
+
+		<include source="PTGI_common.glsl" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 texcoord;
+			out jit_PerVertex {
+				vec2 texcoord;
+			} jit_out;
+			uniform mat4 modelViewProjectionMatrix;
+			uniform mat4 textureMatrix0;
+			
+			void main(void) {
+				gl_Position = modelViewProjectionMatrix*vec4(position, 1.);
+				jit_out.texcoord = vec2(textureMatrix0*vec4(texcoord, 0., 1.));
+			}
+		]]>
+		</program>
+		
+		<program name="fp" type="fragment"  >
+		<![CDATA[
+			#version 330 core
+			
+			in jit_PerVertex {
+				vec2 texcoord;
+			} jit_in;
+			layout (location = 0) out vec4 fragColor;
+			
+
+		uniform vec2 iResolution;
+		uniform float iTime;
+		
+		uniform sampler2D buff_A;
+		uniform sampler2D buff_B;
+		uniform sampler2D iChannel2;
+		uniform sampler2D iChannel3;
+		uniform sampler2D iChannel4;
+		uniform sampler2D iChannel5;
+
+		void main(){
+	    
+	    vec2 fragCoord = floor(jit_in.texcoord * iResolution);
+
+	    Camera cam = getCam(iTime);
+	    
+	    vec4 col = texelFetch(buff_A, ivec2(fragCoord), 0);
+	    vec4 tx = texelFetch(buff_B, ivec2(fragCoord), 0);
+	    vec3 finalPos = tx.rgb;
+	    col.a = length(cam.pos-finalPos);
+	    
+	    vec2 uv = (fragCoord-iResolution.xy/2.0) / iResolution.y;
+	    vec3 dir = uv2dir(cam, uv);
+	    
+	    if(tx.a != 0.) {
+	        vec3 dc, ec;
+	        sdf(finalPos, dc, ec);
+	        col.rgb = ec + dc * (col.rgb + directLight(finalPos, normalEstimation(finalPos)));
+	    } else {
+	        finalPos = cam.pos + dir * 100.;
+	    }
+	    
+	    vec3 volCol = vec3(0.), volAbs = vec3(1.), pos = cam.pos;
+	    float stepDist = (tx.a == 0. ? FogRange : min(FogRange, col.a))/float(FogSteps);
+	    vec3 stepAbs = exp(-Density*stepDist);
+	    vec3 stepCol = (vec3(1.) - stepAbs) * henyeyGreenstein(-LightDir, dir);
+	    pos += stepDist * dir * texture(iChannel2, fragCoord/vec2(1024)).a;
+	    for(int i = 0; i < FogSteps; i++){
+	        volAbs *= stepAbs;
+	        volCol += stepCol*volAbs*directLight(pos, -LightDir);
+	        pos += dir * stepDist;
+	    }
+	    
+	    col.rgb = col.rgb*volAbs + volCol;
+		
+	    
+
+	    fragColor = col;
+	}
+		]]>
+		</program>
+	</language>
+</jittershader>

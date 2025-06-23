@@ -1,0 +1,315 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" state="TIME" />
+	<param name="iFrame" type="int" state="FRAME" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform samplerCube iChannel0;
+
+// Draw
+
+// Originally made with Blossom, the 4k exegfx framework
+// Shoutouts to yx!
+// https://github.com/lunasorcery/Blossom
+
+const int SAMPLES_PER_FRAME = 5;
+const int TRAVERSAL_STEPS = 30;
+const int QUADTREE_SUBDIV = 3;
+
+const float TAU = 2.0 * acos( -1.0 );
+const float FAR = 100.0;
+const float ROUGHNESS = 0.2;
+const float SQ_ROUGHNESS = ROUGHNESS * ROUGHNESS;
+const float SQ_SQ_ROUGHNESS = SQ_ROUGHNESS * SQ_ROUGHNESS;
+const float HALF_SQ_ROUGHNESS = 0.5 * SQ_ROUGHNESS;
+
+// https://www.shadertoy.com/view/XlXcW4
+vec3 hash3f( vec3 s ) {
+  uvec3 r = floatBitsToUint( s );
+  r = ( ( r >> 16u ) ^ r.yzx ) * 1111111111u;
+  r = ( ( r >> 16u ) ^ r.yzx ) * 1111111111u;
+  r = ( ( r >> 16u ) ^ r.yzx ) * 1111111111u;
+  return vec3( r ) / float( -1u );
+}
+
+vec4 isectBoxPillar( vec3 ro, vec3 rd, vec3 s, vec3 po, float r ) {
+  // box sides
+  // front: each components of `dfv`
+  // back: each components of `dbv`
+  vec3 i_xo = -ro / rd;
+  vec3 xsOrRot = abs( s / rd );
+
+  vec3 dfv = i_xo - xsOrRot;
+  vec3 dbv = dfv + xsOrRot + xsOrRot;
+
+  // pillar side
+  // front: pf
+  // back: pb
+  xsOrRot = ro - po;
+  float sqLenXY = 1.0 - rd.z * rd.z;
+
+  float b = dot( xsOrRot, rd ) - xsOrRot.z * rd.z;
+  float i_c = dot( xsOrRot, xsOrRot ) - xsOrRot.z * xsOrRot.z - r * r;
+  float h = b * b - sqLenXY * i_c;
+
+  float df;
+
+  if ( h < 0.0 ) { return vec4( FAR ); }
+  h = sqrt( h );
+
+  float i_pf = ( -b - h ) / sqLenXY;
+  float i_pb = ( -b + h ) / sqLenXY;
+
+  // check faces
+  df = max( max( max( dfv.x, dfv.y ), dfv.z ), i_pf );
+  float i_db = min( min( min( dbv.x, dbv.y ), dbv.z ), i_pb );
+
+  if ( i_db < df || df < 0.0 ) { return vec4( FAR ); }
+
+  // calc normals
+  // crime: if NBox is not zero, use that. if NBox is zero, use NPillar instead
+  vec3 i_NBox = -sign( rd ) * step( vec3( df ), dfv );
+  vec3 i_NPillar = vec3( 0.01, 0.01, 0.0 ) * ( df * rd + xsOrRot ) / r;
+  vec3 i_N = normalize( i_NBox + i_NPillar );
+
+  // determine normal
+  return vec4( i_N, df );
+}
+
+mat3 orthBas( vec3 z ) {
+  vec3 x = normalize( cross(
+    step( 0.5, vec3( 0.0, z.z, 1.0 - z.z ) ),
+    z
+  ) );
+  return mat3( x, cross( z, x ), z );
+}
+
+void main() {
+  
+  vec2 fragCoord = jit_in.uv * viewPort.xy;
+
+  outColor *= 0.0;
+
+  vec2 p = fragCoord.xy / viewPort.xy * 2.0 - 1.0;
+  p.x *= viewPort.x / viewPort.y;
+  vec3 seed = vec3( p, iFrame );
+
+
+  // accumulate using backbuffer
+  outColor = texture( iChannel0, vec3(p, 0.0) );
+
+  for ( int i = 0; i ++ < SAMPLES_PER_FRAME; ) {
+    vec3 colRem = normalize( vec3( -0.5, 0.2, 1.0 ) );
+
+    // cringe: normal distribution looks better than rectangle supersampling
+    vec2 i_aaJitter = sqrt( -2.0 * log( ( seed = hash3f( seed ) ).x ) ) * sin( TAU * seed.z + vec2( 0.0, TAU / 4.0 ) ) / viewPort.y;
+    vec3 ro = orthBas( colRem ) * vec3( ( p + i_aaJitter ), 6.0 );
+    vec3 rd = orthBas( colRem ) * vec3( 0.0, 0.0, -1.0 );
+
+    colRem /= colRem;
+
+    for ( int i = 0; i ++ < TRAVERSAL_STEPS; ) {
+      float colIndex = -1.0;
+
+      // background
+      vec4 isect = isectBoxPillar( ro - vec3( 0.0, 15.0, 0.0 ), rd, vec3( 10.0 ), vec3( 0.0 ), 10.0 );
+      vec4 isect2;
+
+      {
+        // quadtree subdivision
+        ro += rd * 0.001;
+
+        const float QUADTREE_DEPTH = 2.0;
+
+        vec3 cell = vec3( 0.0, 0.0, sign( ro.z ) * ( 0.5 * FAR + 0.5 * QUADTREE_DEPTH ) );
+        vec3 cellSize = vec3( FAR );
+        vec3 cellDice = vec3( 1e9 );
+
+        if ( abs( ro.z ) < 0.5 * QUADTREE_DEPTH ) {
+          cellSize = vec3( QUADTREE_DEPTH );
+          for ( int i = 0; i ++ < QUADTREE_SUBDIV && cellDice.x > 0.5; ) {
+            cellSize *= 0.5;
+            cellSize.z = QUADTREE_DEPTH;
+
+            cell = ( floor( ro / cellSize ) + 0.5 ) * cellSize;
+            cell.z = 0.0;
+            cellDice = hash3f( cell + 3.0 );
+          }
+        }
+
+        ro -= rd * 0.001;
+
+        {
+          // quadtree traversal
+          vec3 i_src = -( ro - cell ) / rd;
+          vec3 i_dst = abs( 0.5 * cellSize / rd );
+          vec3 bvOrRot = i_src + i_dst;
+          float distToNextCell = min( min( bvOrRot.x, bvOrRot.y ), bvOrRot.z );
+
+          vec3 rand = vec3( 0.0 );
+
+          // scene
+          bvOrRot = ro - cell - vec3( 0.0, 0.0, 0.4 * cellDice.y - 1.0 );
+
+          for ( int i = 0; i ++ < 3; ) {
+            cellDice = hash3f( cellDice );
+
+            isect2 = isectBoxPillar(
+              bvOrRot,
+              rd,
+              vec3( 0.5 * cellSize.xx - 0.001, 1.0 + 0.02 * float( i ) ),
+              cellSize * step( cellDice.z, 0.8 ) * ( step( 0.5, hash3f( -cellDice ) ) - 0.5 ),
+              ( cellSize.x - 0.002 ) * exp2( 1.0 - rand.y )
+            );
+
+            if ( isect2.w < isect.w ) {
+              isect = isect2;
+              colIndex = rand.x;
+            }
+
+            rand += 1.0 + step( 0.5, cellDice );
+          }
+
+          // should we skip the cell?
+          if ( distToNextCell < isect.w ) {
+            ro += distToNextCell * rd;
+            continue;
+          }
+        }
+      }
+
+      // does it miss?
+      outColor.xyz += step( colIndex, -1.0 ) * step( isect.w + 1.0, FAR ) * min( colRem, 1.0 ) / 0.1;
+      colRem *= step( 0.0, colIndex );
+
+      // if hit then
+      ro += isect.w * rd;
+
+      {
+        float NdotV = dot( isect.xyz, -rd );
+        float Fn = mix( 0.04, 1.0, pow( 1.0 - NdotV, 5.0 ) );
+        float spec = step( ( seed = hash3f( seed ) ).x, Fn );
+
+        // sample ggx or lambert
+        seed.y = sqrt( ( 1.0 - seed.y ) / ( 1.0 - spec * ( 1.0 - SQ_SQ_ROUGHNESS ) * seed.y ) );
+        vec3 woOrH = orthBas( isect.xyz ) * vec3(
+          sqrt( 1.0 - seed.y * seed.y ) * sin( TAU * seed.z + vec2( 0.0, TAU / 4.0 ) ),
+          seed.y
+        );
+
+        if ( spec > 0.0 ) {
+          // specular
+          // note: woOrH is H rn
+          vec3 i_H = woOrH;
+          vec3 i_wo = reflect( rd, i_H );
+
+          // vector math
+          float NdotL = dot( isect.xyz, i_wo );
+          float i_VdotH = dot( -rd, i_H );
+          float i_NdotH = dot( isect.xyz, i_H );
+
+          // fresnel
+          float i_Fh = mix( 0.04, 1.0, pow( 1.0 - i_VdotH, 5.0 ) );
+
+          // brdf
+          // colRem *= Fh / Fn * G * VdotH / ( NdotH * NdotV );
+          colRem *= i_Fh / Fn
+          //        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Fh
+            / ( NdotV * ( 1.0 - HALF_SQ_ROUGHNESS ) + HALF_SQ_ROUGHNESS ) // G1V / NdotV
+            * NdotL / ( NdotL * ( 1.0 - HALF_SQ_ROUGHNESS ) + HALF_SQ_ROUGHNESS ) // G1L
+            * i_VdotH / i_NdotH;
+
+          // wo is finally wo
+          woOrH = i_wo;
+        } else {
+          // diffuse
+          // note: woOrH is wo rn
+
+          // calc H
+          // vector math
+          vec3 i_H = normalize( -rd + woOrH );
+          float i_VdotH = dot( -rd, i_H );
+
+          // fresnel
+          float i_Fh = mix( 0.04, 1.0, pow( 1.0 - i_VdotH, 5.0 ) );
+
+          // color
+          vec3 i_baseColor = vec3[](
+            vec3( 0.01, 0.02, 0.03 ),
+            vec3( 0.04, 0.04, 0.3 ),
+            vec3( 0.8, 0.1, 0.1 ),
+            vec3( 0.8, 0.4, 0.1 ),
+            vec3( 0.8 )
+          )[ int( colIndex ) ];
+
+          // brdf
+          colRem *= ( 1.0 - i_Fh ) / ( 1.0 - Fn ) * i_baseColor;
+        }
+
+        // prepare the rd for the next ray
+        rd = woOrH;
+
+        // if the ray goes beind the surface, invalidate it
+        colRem *= step( 0.0, dot( woOrH, isect.xyz ) );
+      }
+
+    }
+
+    outColor.w += 1.0;
+  }
+}
+]]>
+</program>
+</language>
+</jittershader>

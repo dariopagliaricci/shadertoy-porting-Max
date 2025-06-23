@@ -1,0 +1,197 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="position" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iTime" type="float" default="0.0" />
+	<param name="iFrame" type="int" default="0" />
+	<param name="iMouse" type="vec3" default="0 0 0" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+
+		<bind param="MVP" program="vp" />
+		<bind param="position" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iTime" program="fp" />
+		<bind param="iFrame" program="fp" />
+		<bind param="iMouse" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 position;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(position, 1.);
+				jit_out.uv = uv;
+
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+	vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform float iTime;
+uniform int iFrame;
+uniform vec3 iMouse;
+uniform samplerCube iChannel0;
+
+
+#define BOUNCES 3
+
+#define MAX_ITER 250
+#define EPS 0.001
+#define rot(a) mat2(cos(a), -sin(a), sin(a), cos(a))
+#define hash(p) fract(sin(p)*43758.5453)
+
+float sdBox(vec3 p, vec3 s) {
+  vec3 q = abs(p) - s;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0)-.0;
+}
+
+vec3 cosineDirection(float seed, vec3 nor) {
+    vec3 tc = vec3( 1.0+nor.z-nor.xy*nor.xy, -nor.x*nor.y)/(1.0+nor.z);
+    vec3 uu = vec3( tc.x, tc.z, -nor.x );
+    vec3 vv = vec3( tc.z, tc.y, -nor.y );
+    float u = hash( 78.233 + seed);
+    float v = hash( 10.873 + seed);
+    float a = 6.283185 * v;
+    return sqrt(u)*(cos(a)*uu + sin(a)*vv) + sqrt(1.0-u)*nor;
+}
+
+vec4 map(vec3 p, inout float em) {
+    vec3 p0 = p;
+
+    p.z = abs(p.z) - 5.;
+    float ground = p.y + 1.;
+    ground = min(ground, abs(p0.z + 5.7));
+   
+    vec3 pp = p + vec3(2.,0.,0.);
+    pp.x = mod(pp.x+2., 4.)-2.;
+    ground = min(ground, sdBox(pp, vec3(1.,1e5,1.)));
+    
+    vec3 ppp = p;
+    ppp.x = mod(ppp.x-2., 4.)-2.;
+    float box = sdBox(ppp - vec3(0., 9.*step(mod(p0.x/4.-.5, 6.), 3.),0.), vec3(1.));
+    
+    float spheres = length(p + vec3(-4.,0.,3.)) - 1.;
+    box = min(box, spheres);
+    
+    if (box < ground) {
+        em = 1.;
+        vec3 col = (sin(vec3(.02,.04,.06)*p*10.)+1.);
+        return vec4(col,box);
+    } 
+    
+    em = 0.;
+    return vec4(1.,1.,1.,ground);
+}
+
+vec3 raymarch(vec3 ro, vec3 rd, inout vec3 col, inout float em) {
+    float t = 0.;
+    for (int i = 0; i < MAX_ITER; i++) {
+        vec3 p = ro + t*rd;
+        vec4 d = map(p, em);
+        
+        t += d.a;
+        if (d.a < EPS*t) {
+            col = d.rgb;
+            return p;
+        }
+        if (t > 250.) break;
+    }
+    col = vec3(-1.);
+    return vec3(0.);
+}
+
+vec3 normal(vec3 p) {
+    float em;
+    vec2 e = vec2(1.0,-1.0)*0.5773*0.0001;
+    return normalize(e.xyy*map(p + e.xyy, em).a + e.yyx*map(p + e.yyx, em).a + 
+					 e.yxy*map(p + e.yxy, em).a + e.xxx*map(p + e.xxx, em).a);
+}
+
+vec3 render(vec3 ro, vec3 rd, float seed) {
+    vec3 colMask = vec3(1.0);
+    vec3 col     = vec3(0.0);
+    
+    for (int i = 0; i < BOUNCES; i++) {
+        vec3 hitCol;
+        float em = 0.;
+        vec3 p = raymarch(ro, rd, hitCol, em) - rd * .01;
+        
+        if (hitCol == vec3(-1.)) {
+            if (i == 0) return vec3(rd.y+.2)*.0;
+            break;
+        }
+        
+        vec3 n = normal(p);
+        float cseed = seed + 76.2 + 73.1*float(i) + 17.7*iTime;
+        
+        ro = p;
+        rd = cosineDirection(cseed, n);
+        
+        colMask *= hitCol;
+        col     += colMask * em;// * exp(-length(p*.01));
+    }
+    
+    return col;
+}
+
+void initRayOriginAndDirection(vec2 uv, inout vec3 ro, inout vec3 rd) {
+    vec2 m = iMouse.z == 0. ? vec2(0.1, 0.5) : iMouse.xy/viewPort.xy*2.-1.;  
+    ro = vec3(0., 6.5, 5.+abs(m.x)*15.); 
+    ro.yz *= rot(m.y*.7);
+    ro.zx *= rot(m.x*2.-1.57);
+        
+    vec3 f = normalize(vec3(0.,1.,0.)-ro), r = normalize(cross(vec3(0,1,0), f));
+    rd = normalize(f + uv.x*r + uv.y*cross(f, r));
+}
+
+void main() {
+    
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // vec3 ro, rd, color = texelFetch( iChannel0, ivec2(fragCoord), 0 ).xyz;
+    vec3 ro, rd, color = texture( iChannel0, vec3(fragCoord, 0.0)).xyz;
+    if (iMouse.z > 0. || iFrame == 0) color *= 0.;
+    
+    float seed = hash(dot(fragCoord, vec2(12.9898, 78.233)) + 1113.1*iTime); 
+    vec2 of = vec2(hash(seed+13.271), hash(seed+63.216))-0.5;
+    vec2 uv = (2.*(fragCoord+of) - viewPort.xy)/viewPort.y;
+    
+    initRayOriginAndDirection(uv, ro, rd);
+    
+    color += render(ro, rd, seed);
+    
+    if (fragCoord == vec2(0.5, 0.5) && (iMouse.z > 0. || iFrame == 0)) color = vec3(float(iFrame));
+    outColor = vec4(color, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>
