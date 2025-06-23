@@ -1,0 +1,14 @@
+# macOS junk
+.DS_Store
+Icon?
+Thumbs.db
+
+# Max backups and autosaves
+*.maxpat.bak
+*.maxhelp.bak
+*.maxproj.bak
+*.maxpresets.bak
+
+
+# Other possible temp files
+._*
