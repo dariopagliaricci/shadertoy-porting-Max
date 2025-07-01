@@ -1,0 +1,94 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform sampler2D iChannel0;
+
+const mat4x4 threshold = mat4x4(0., 8., 2., 10., 
+                                12., 4., 14., 6.,
+                                3.,11.,1.,9.,
+                                15.,7.,13., 5.);
+
+
+float findClosest(int x, int y, float v)
+{
+    mat4x4 thresholdT = transpose(threshold);
+    float t = (thresholdT[x][y]) / 16.;
+    if(v < t)
+    {
+      	return 0.;   
+    }
+    else
+    {
+     	return 1.;   
+    }
+}
+
+
+void main()
+{  
+	vec2 fragCoord = jit_in.uv * viewPort.xy;
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/viewPort.xy;
+    vec4 col = texture(iChannel0, uv);
+
+    // https://en.wikipedia.org/wiki/Ordered_dithering
+   	int x = int(fragCoord.x) % 4;
+    int y = int(fragCoord.y) % 4;
+    
+    // https://en.wikipedia.org/wiki/Luma_(video)
+	float lum = dot(vec3(0.2126, 0.7152, 0.0722), col.rgb);
+    lum = findClosest(x,y, lum);
+ 
+	// Output to screen
+	outColor = vec4(lum);
+}
+]]>
+</program>
+</language>
+</jittershader>
