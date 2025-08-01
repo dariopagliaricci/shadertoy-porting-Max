@@ -1,0 +1,181 @@
+<jittershader name="default">
+	<description>Default Slab </description>
+	<param name="MVP" type="mat4" state="MODELVIEW_PROJECTION_MATRIX" />
+	<param name="pos" type="vec3" state="POSITION" />
+	<param name="uv" type="vec2" state="TEXCOORD" />
+
+	<param name="viewPort" type="vec2" state="VIEWPORT" />
+	<param name="iChannel0" type="int" default="0" />
+
+	<language name="glsl" version="1.5">
+		<bind param="MVP" program="vp" />
+		<bind param="pos" program="vp" />
+		<bind param="uv" program="vp" />
+
+		<bind param="viewPort" program="fp" />
+		<bind param="iChannel0" program="fp" />
+
+		<program name="vp" type="vertex"  >
+		<![CDATA[
+			#version 330 core
+			
+			in vec3 pos;
+			in vec2 uv;
+
+			out jit_PerVertex {
+				vec2 uv;
+
+			} jit_out;
+			uniform mat4 MVP;
+
+			
+			void main(void) {
+				gl_Position = MVP*vec4(pos, 1.);
+				jit_out.uv = uv;
+			}
+		]]>
+		</program>
+		
+<program name="fp" type="fragment"  >
+<![CDATA[
+#version 330 core
+
+in jit_PerVertex {
+vec2 uv;
+
+} jit_in;
+layout (location = 0) out vec4 outColor;
+
+uniform vec2 viewPort;
+uniform sampler2D iChannel0;
+
+const float scale = 0.0591;
+
+vec4 RGBtoCMYK (vec3 rgb) {
+    vec3 cmy = vec3(1.0) - rgb;
+    float k = min(min(cmy.r, cmy.g), cmy.b);
+    return vec4(cmy, k);
+}
+
+vec3 CMYKtoRGB (vec4 cmyk) {
+    float c = cmyk.x;
+    float m = cmyk.y;
+    float y = cmyk.z;
+    float k = cmyk.w;
+
+    float invK = 1.0 - k;
+    float r = 1.0 - min(1.0, c * invK + k);
+    float g = 1.0 - min(1.0, m * invK + k);
+    float b = 1.0 - min(1.0, y * invK + k);
+    return clamp(vec3(r, g, b), 0.0, 1.0);
+}
+
+mat2 rotate(float a) {
+    float sa = sin(a);
+    float ca = cos(a);
+    return mat2(vec2(ca, sa), vec2(-sa, ca));
+}
+
+float maxOf(vec4 v) {
+    return max(max(v.x, v.y), max(v.z, v.w));
+}
+
+float tone_grid(vec2 uv, float rotation, float scale, vec4 mask) {
+    // Dot grid rotaiton matrix
+    mat2 rot = rotate(rotation);
+    vec2 cell_size = vec2(scale) * viewPort.xy;
+
+    vec2 uvr = rot * uv;
+    vec2 uvrs = uvr * scale;
+
+    // Cell XY coordinates (uniform accross each cell)
+    vec4 cell_xy = vec4(floor(uvrs), 0.0, 0.0);
+    cell_xy.zw = cell_xy.xy + vec2(1.0, 1.0);
+    // Dual grid coordinates.
+    vec4 cell_dual = cell_xy + 0.5;
+
+    // UVs for each corner's texture sample
+    vec2 cell_uv1 = floor(uvrs) / cell_size;
+    vec2 cell_uv4 = ceil(uvrs) / cell_size;
+    vec2 cell_uv2 = vec2(cell_uv4.x, cell_uv1.y);
+    vec2 cell_uv3 = vec2(cell_uv1.x, cell_uv4.y);
+
+    cell_uv1 = cell_uv1 * cell_size * rot / cell_size;
+    cell_uv2 = cell_uv2 * cell_size * rot / cell_size;
+    cell_uv3 = cell_uv3 * cell_size * rot / cell_size;
+    cell_uv4 = cell_uv4 * cell_size * rot / cell_size;
+
+    // Color samples for each dot
+    vec3 rgb1 = texture(iChannel0, cell_uv1).rgb;
+    vec3 rgb2 = texture(iChannel0, cell_uv2).rgb;
+    vec3 rgb3 = texture(iChannel0, cell_uv3).rgb;
+    vec3 rgb4 = texture(iChannel0, cell_uv4).rgb;
+
+    // CMYK for each sample
+    vec4 cmyk1 = RGBtoCMYK(rgb1);
+    vec4 cmyk2 = RGBtoCMYK(rgb2);
+    vec4 cmyk3 = RGBtoCMYK(rgb3);
+    vec4 cmyk4 = RGBtoCMYK(rgb4);
+
+    // Circle distance fields
+    vec2 circ1 = uvrs - cell_xy.xy;
+    vec2 circ2 = uvrs - cell_xy.zy;
+    vec2 circ3 = uvrs - cell_xy.xw;
+    vec2 circ4 = uvrs - cell_xy.zw;
+    float d1 = length(abs(circ1));
+    float d2 = length(abs(circ2));
+    float d3 = length(abs(circ3));
+    float d4 = length(abs(circ4));
+    float r = min(min(d1, d2), min(d3, d4));
+    
+    float v1 = maxOf(cmyk1 * mask);
+    float v2 = maxOf(cmyk2 * mask);
+    float v3 = maxOf(cmyk3 * mask);
+    float v4 = maxOf(cmyk4 * mask);
+
+    // Step point for each circle
+    float s1 = 0.75 * v1;
+    float s2 = 0.75 * v2;
+    float s3 = 0.75 * v3;
+    float s4 = 0.75 * v4;
+    
+    float ss = clamp(0.02 / scale, 0.0, 0.1);
+    
+    float dd = clamp(fwidth(d1), 0.0, scale);
+
+    float spot1 = smoothstep(s1 + dd, s1 - dd, d1);
+    float spot2 = smoothstep(s2 + dd, s2 - dd, d2);
+    float spot3 = smoothstep(s3 + dd, s3 - dd, d3);
+    float spot4 = smoothstep(s4 + dd, s4 - dd, d4);
+    
+    float spot = max(max(spot1, spot2), max(spot3, spot4));
+    
+    return spot;
+}
+
+void main() {
+    vec2 fragCoord = jit_in.uv * viewPort.xy;
+    vec4 rotation = vec4(0.0);
+    rotation.x = 1.0000; // C
+    rotation.y = 1.6666; // M
+    rotation.z = 2.3333; // Y
+    rotation.w = 3.0000; // K
+
+    vec4 scale = vec4(scale);
+    scale.x *= 1.737391; // C
+    scale.y *= 4.112312; // M
+    scale.z *= 0.941264; // Y
+    scale.w *= 2.128122; // K
+
+    vec2 mask = vec2(1.0, 0.0);
+    float c = tone_grid(fragCoord, rotation.x, scale.x, mask.xyyy);
+    float m = tone_grid(fragCoord, rotation.y, scale.y, mask.yxyy);
+    float y = tone_grid(fragCoord, rotation.z, scale.z, mask.yyxy);
+    float k = tone_grid(fragCoord, rotation.w, scale.w, mask.yyyx);
+    vec3 color = CMYKtoRGB(vec4(c, m, y, k));
+    outColor = vec4(color, 1.0);
+}
+]]>
+</program>
+</language>
+</jittershader>
