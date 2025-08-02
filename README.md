@@ -1,7 +1,7 @@
 # Shadertoy to Max/MSP Ports
 
 This is a collection of Shadertoy GLSL shaders ported to Max/MSP (Jitter).
-Each folder contains one shader port, with all necessary Max patches and GLSL code to load and run inside Max/MSP (minimum requirements: version 8).
+Each folder contains nested fooders, each one with all necessary Max patches and GLSL code to load and run inside Max/MSP (minimum requirements: version 8).
 
 ---
 
