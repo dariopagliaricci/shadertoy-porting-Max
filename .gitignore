@@ -9,6 +9,8 @@ Thumbs.db
 *.maxproj.bak
 *.maxpresets.bak
 
+# TouchDesigner files
+*.toe
 
 # Other possible temp files
 ._*
