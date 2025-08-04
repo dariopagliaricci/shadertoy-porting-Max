@@ -12,5 +12,8 @@ Thumbs.db
 # TouchDesigner files
 *.toe
 
+# Documentation and workflow notes
+git-workflow-summary.md
+
 # Other possible temp files
 ._*
